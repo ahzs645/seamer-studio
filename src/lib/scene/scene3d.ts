@@ -683,6 +683,12 @@ export class PatternRenderer {
       this.setLightingMode(pattern.settings3d.lightingMode || 'flat');
       this.rebuildCloth(pattern, changedPieces);
       this.onStatus('ready');
+      // The engine renders on demand (ARCHITECTURE 5.3), and this method is async: by the time
+      // the avatar resolves and the cloth is rebuilt, the initial frame has long been drawn
+      // against an empty scene. Nothing else here reliably invalidates — setCameraState()
+      // early-returns when the camera already matches the saved settings — so without this the
+      // pane stays black until some unrelated setting change happens to request a frame.
+      this.invalidate();
       // If the sim was live when the edit landed, re-settle the rebuilt cloth (the edited region drapes
       // instead of sitting at its seed). ~100 ms after the rebuild, matching the source's deferred
       // restart. simulate() recreates the sim from the fresh `prepared` via ensureSim().
