@@ -1,0 +1,20 @@
+{
+  "name": "@seamer/pattern-model",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./commands": "./src/commands/index.ts",
+    "./solver/*": "./src/solver/*.ts",
+    "./utils/*": "./src/utils/*.ts"
+  },
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@atelier/core": "file:../../../atelier/packages/core",
+    "@atelier/geometry": "file:../../../atelier/packages/geometry"
+  }
+}

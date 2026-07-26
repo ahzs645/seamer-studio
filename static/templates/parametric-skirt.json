@@ -1,0 +1,459 @@
+{
+  "id": "pat_9kqp2mwdj",
+  "name": "Parametric Skirt",
+  "description": "Quarter skirt block driven by waist/hip/length variables",
+  "lengthUnit": "cm",
+  "angleUnit": "degrees",
+  "defaultNotchSize": 6.35,
+  "isPublic": false,
+  "pointLabeling": "alphabetic",
+  "pointPrefix": "A",
+  "points": [
+    {
+      "id": "ConstrainablePoint_mxtgk2boh",
+      "name": "WB",
+      "x": 0,
+      "y": 0,
+      "layerId": "default"
+    },
+    {
+      "id": "ConstrainablePoint_l13sf2d21",
+      "name": "WF",
+      "x": 180,
+      "y": 0,
+      "constraint": {
+        "type": "offset",
+        "from": "ConstrainablePoint_mxtgk2boh",
+        "dxFormula": "waistQ",
+        "dyFormula": "0"
+      },
+      "layerId": "default"
+    },
+    {
+      "id": "ConstrainablePoint_q7vs0d9sd",
+      "name": "HF",
+      "x": 240,
+      "y": -200,
+      "constraint": {
+        "type": "offset",
+        "from": "ConstrainablePoint_mxtgk2boh",
+        "dxFormula": "hipQ",
+        "dyFormula": "-hipDrop"
+      },
+      "layerId": "default"
+    },
+    {
+      "id": "ConstrainablePoint_wvpy16r8f",
+      "name": "HemF",
+      "x": 240,
+      "y": -600,
+      "constraint": {
+        "type": "offset",
+        "from": "ConstrainablePoint_q7vs0d9sd",
+        "dxFormula": "0",
+        "dyFormula": "-(skirtLength - hipDrop)"
+      },
+      "layerId": "default"
+    },
+    {
+      "id": "ConstrainablePoint_yz0waasy3",
+      "name": "HemB",
+      "x": 0,
+      "y": -600,
+      "constraint": {
+        "type": "offset",
+        "from": "ConstrainablePoint_mxtgk2boh",
+        "dxFormula": "0",
+        "dyFormula": "-skirtLength"
+      },
+      "layerId": "default"
+    }
+  ],
+  "variables": [
+    {
+      "id": "var_tmewc3t45",
+      "name": "waistQ",
+      "description": "",
+      "type": "number",
+      "value": 180,
+      "valueFormula": {
+        "formula": "180",
+        "unit": "mm"
+      },
+      "isEditable": true,
+      "isVisible": true,
+      "options": [],
+      "unitType": "length"
+    },
+    {
+      "id": "var_e9w5jzuro",
+      "name": "hipQ",
+      "description": "",
+      "type": "number",
+      "value": 240,
+      "valueFormula": {
+        "formula": "240",
+        "unit": "mm"
+      },
+      "isEditable": true,
+      "isVisible": true,
+      "options": [],
+      "unitType": "length"
+    },
+    {
+      "id": "var_384hvav0n",
+      "name": "hipDrop",
+      "description": "",
+      "type": "number",
+      "value": 200,
+      "valueFormula": {
+        "formula": "200",
+        "unit": "mm"
+      },
+      "isEditable": true,
+      "isVisible": true,
+      "options": [],
+      "unitType": "length"
+    },
+    {
+      "id": "var_liaoe8bum",
+      "name": "skirtLength",
+      "description": "",
+      "type": "number",
+      "value": 600,
+      "valueFormula": {
+        "formula": "600",
+        "unit": "mm"
+      },
+      "isEditable": true,
+      "isVisible": true,
+      "options": [],
+      "unitType": "length"
+    }
+  ],
+  "paths": [
+    {
+      "id": "ConstrainablePath_cvrp5vwhq",
+      "name": "LineWBWF",
+      "layerId": "default",
+      "pathType": "line",
+      "pathPoints": [
+        {
+          "id": "ConstrainablePoint_mxtgk2boh"
+        },
+        {
+          "id": "ConstrainablePoint_l13sf2d21"
+        }
+      ],
+      "basePoint": "ConstrainablePoint_mxtgk2boh",
+      "version": 1
+    },
+    {
+      "id": "ConstrainablePath_jfct6l5fj",
+      "name": "LineWFHF",
+      "layerId": "default",
+      "pathType": "line",
+      "pathPoints": [
+        {
+          "id": "ConstrainablePoint_l13sf2d21"
+        },
+        {
+          "id": "ConstrainablePoint_q7vs0d9sd"
+        }
+      ],
+      "basePoint": "ConstrainablePoint_l13sf2d21",
+      "version": 1
+    },
+    {
+      "id": "ConstrainablePath_81mel69u6",
+      "name": "LineHFHemF",
+      "layerId": "default",
+      "pathType": "line",
+      "pathPoints": [
+        {
+          "id": "ConstrainablePoint_q7vs0d9sd"
+        },
+        {
+          "id": "ConstrainablePoint_wvpy16r8f"
+        }
+      ],
+      "basePoint": "ConstrainablePoint_q7vs0d9sd",
+      "version": 1
+    },
+    {
+      "id": "ConstrainablePath_wphcac32a",
+      "name": "LineHemFHemB",
+      "layerId": "default",
+      "pathType": "line",
+      "pathPoints": [
+        {
+          "id": "ConstrainablePoint_wvpy16r8f"
+        },
+        {
+          "id": "ConstrainablePoint_yz0waasy3"
+        }
+      ],
+      "basePoint": "ConstrainablePoint_wvpy16r8f",
+      "version": 1
+    },
+    {
+      "id": "ConstrainablePath_9ztkx96ti",
+      "name": "LineHemBWB",
+      "layerId": "default",
+      "pathType": "line",
+      "pathPoints": [
+        {
+          "id": "ConstrainablePoint_yz0waasy3"
+        },
+        {
+          "id": "ConstrainablePoint_mxtgk2boh"
+        }
+      ],
+      "basePoint": "ConstrainablePoint_yz0waasy3",
+      "version": 1
+    }
+  ],
+  "pieces": [
+    {
+      "id": "Piece_i2izyeu98",
+      "name": "Skirt panel",
+      "layerId": "default",
+      "type": "dynamic",
+      "materialId": "",
+      "origin": {
+        "id": "Point_z6whggjxg",
+        "name": "",
+        "x": 0,
+        "y": 0
+      },
+      "originPoint": "ConstrainablePoint_mxtgk2boh",
+      "position": {
+        "x": 0,
+        "y": 0
+      },
+      "rotation": 0,
+      "grainVector": {
+        "id": "Point_qr1fgehib",
+        "name": "",
+        "x": 0,
+        "y": 1
+      },
+      "text": null,
+      "rightPieces": 0,
+      "leftPieces": 0,
+      "mirrorLeftPiecesAxis": "X",
+      "mirrorX": false,
+      "mirrorY": false,
+      "seamAllowanceInside": false,
+      "mainPaths": [
+        {
+          "id": "PiecePath_9hifz1pp0",
+          "name": "",
+          "path": "ConstrainablePath_cvrp5vwhq",
+          "from": "ConstrainablePoint_mxtgk2boh",
+          "to": "ConstrainablePoint_l13sf2d21",
+          "reversed": false,
+          "notches": []
+        },
+        {
+          "id": "PiecePath_ie27ev0ea",
+          "name": "",
+          "path": "ConstrainablePath_jfct6l5fj",
+          "from": "ConstrainablePoint_l13sf2d21",
+          "to": "ConstrainablePoint_q7vs0d9sd",
+          "reversed": false,
+          "notches": []
+        },
+        {
+          "id": "PiecePath_ggozpwm1z",
+          "name": "",
+          "path": "ConstrainablePath_81mel69u6",
+          "from": "ConstrainablePoint_q7vs0d9sd",
+          "to": "ConstrainablePoint_wvpy16r8f",
+          "reversed": false,
+          "notches": []
+        },
+        {
+          "id": "PiecePath_dif27jp5m",
+          "name": "",
+          "path": "ConstrainablePath_wphcac32a",
+          "from": "ConstrainablePoint_wvpy16r8f",
+          "to": "ConstrainablePoint_yz0waasy3",
+          "reversed": false,
+          "notches": []
+        },
+        {
+          "id": "PiecePath_jbxllnxml",
+          "name": "",
+          "path": "ConstrainablePath_9ztkx96ti",
+          "from": "ConstrainablePoint_yz0waasy3",
+          "to": "ConstrainablePoint_mxtgk2boh",
+          "reversed": false,
+          "notches": []
+        }
+      ],
+      "internalPaths": [],
+      "settings3d": {
+        "arrangement": {
+          "mode": "flat",
+          "cylinderName": "",
+          "uDegrees": 0,
+          "v": 0.5,
+          "uOffsetMm": 0,
+          "vOffsetMm": 0,
+          "radialOffsetMm": 0,
+          "use2DPosition": true,
+          "positionChanged": false,
+          "matrixWorld": [],
+          "position": []
+        },
+        "enable3d": true,
+        "frozen": false,
+        "flipNormals": false,
+        "filterExternalCollisionsByClothNormal": false,
+        "collisionLayer": 0,
+        "savedPositions": []
+      }
+    }
+  ],
+  "seams": [],
+  "materials": [
+    {
+      "id": "mat_y65de17u1",
+      "name": "Material",
+      "frontTexture": {
+        "url": "",
+        "mediaId": null,
+        "color": "#9fb3c8",
+        "scale": 100,
+        "normalUrl": "",
+        "normalMediaId": null,
+        "normalMapScale": 100,
+        "opacityUrl": "",
+        "opacityMediaId": null,
+        "opacityMapScale": 100
+      },
+      "backTexture": null,
+      "useSeparateBackSide": false,
+      "stretchWarpValue": 30,
+      "stretchWeftValue": 30,
+      "bendValue": 30,
+      "thickness": 0.5,
+      "weight": 200,
+      "roughness": 0.8,
+      "metalness": 0,
+      "specularIntensity": 0.5,
+      "opacity": 1,
+      "normalScale": 1,
+      "alphaCutoff": 0.5,
+      "libraryItemId": null,
+      "libraryVersion": null,
+      "libraryUpdatedAt": null
+    }
+  ],
+  "seamAllowance": 12.7,
+  "versionName": "Initial",
+  "versionId": "ver_rkoewyq0x",
+  "versionNumber": 1,
+  "softwareVersion": "1.0.0",
+  "currentSize": "",
+  "images": [],
+  "frozenSnapshot": null,
+  "texts": [],
+  "body": {
+    "fields": {
+      "age": 35,
+      "height": 65,
+      "weight": 150,
+      "waist": 28,
+      "hip": 38
+    },
+    "gender": "female",
+    "unitType": "imperial",
+    "bodyColor": "#b58a6a"
+  },
+  "layers": [
+    {
+      "id": "default",
+      "name": "Default",
+      "visible": true,
+      "locked": false,
+      "order": 0,
+      "style": null
+    }
+  ],
+  "currentLayerId": "default",
+  "useBodyMeasurementsForSizes": false,
+  "gradingProfile": {
+    "sizes": [
+      {
+        "id": "size_1wvpxyey1",
+        "name": "Size S",
+        "scale": 0.92,
+        "color": "#c91d1d",
+        "values": {
+          "var_tmewc3t45": 160,
+          "var_e9w5jzuro": 215
+        }
+      },
+      {
+        "id": "size_jr7qnidl9",
+        "name": "Size L",
+        "scale": 1.08,
+        "color": "#1d4ed8",
+        "values": {
+          "var_tmewc3t45": 205,
+          "var_e9w5jzuro": 270
+        }
+      }
+    ]
+  },
+  "markerSettings": null,
+  "graphicsOffset": {
+    "x": 0,
+    "y": 0
+  },
+  "graphicsScale": 0.31,
+  "enable3d": false,
+  "showCompass": false,
+  "showGrid": true,
+  "snapToGrid": false,
+  "snapToGuides": false,
+  "showPieceNames": true,
+  "viewMode": "2d",
+  "interactionMode": "fast",
+  "settings3d": {
+    "cameraFov": 54.43,
+    "cameraPosition": [
+      0.49,
+      0.83,
+      0.84
+    ],
+    "controlsTarget": [
+      0.095,
+      0.77,
+      0.053
+    ],
+    "gravity": [
+      0,
+      -9.8,
+      0
+    ],
+    "avatarEnabled": true,
+    "showAvatar": true,
+    "showArrangementPoints": false,
+    "showTriangles": false,
+    "showSeams": true,
+    "lightingMode": "flat",
+    "bokehFStop": 11,
+    "n8aoEnabled": false,
+    "n8aoRadius": 0.6,
+    "n8aoDistanceFalloff": 1.5,
+    "n8aoIntensity": 5,
+    "smaaScale": 2,
+    "forceLowEndHardware": false,
+    "handleSelfCollisions": true,
+    "debugFocusPoint": false
+  },
+  "hasChanged": false
+}

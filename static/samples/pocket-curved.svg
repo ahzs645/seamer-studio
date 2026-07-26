@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160mm" height="200mm" viewBox="0 0 160 200">
+  <!-- A patch pocket: straight top + sides, with a curved (cubic) rounded bottom.
+       Closed path -> imports as one Piece; the bottom edge keeps its bezier handles. -->
+  <path d="M20,10 L140,10 L140,140 C140,175 110,190 80,190 C50,190 20,175 20,140 Z"
+        fill="none" stroke="#000" stroke-width="0.5"/>
+</svg>

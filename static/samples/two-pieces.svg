@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="320mm" height="220mm" viewBox="0 0 320 220">
+  <!-- Two separate closed shapes -> imports as two Pieces. A polygon (all straight)
+       and a path with a curved right side. Also one open polyline -> a loose path. -->
+  <polygon points="20,20 140,20 140,200 20,200" fill="none" stroke="#000" stroke-width="0.5"/>
+  <path d="M180,20 L300,20 C320,80 320,140 300,200 L180,200 Z" fill="none" stroke="#000" stroke-width="0.5"/>
+  <polyline points="20,210 160,210 300,210" fill="none" stroke="#000" stroke-width="0.5"/>
+</svg>

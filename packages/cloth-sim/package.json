@@ -1,0 +1,27 @@
+{
+  "name": "@seamer/cloth-sim",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./geometry/*": "./src/geometry/*.ts"
+  },
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@atelier/geometry": "file:../../../atelier/packages/geometry",
+    "@atelier/sim": "file:../../../atelier/packages/sim",
+    "@seamer/avatar": "workspace:*",
+    "@seamer/pattern-model": "workspace:*",
+    "delaunator": "^5.1.0",
+    "three": "0.181.2"
+  },
+  "devDependencies": {
+    "@types/delaunator": "^5.0.3",
+    "@types/three": "0.184.1",
+    "@webgpu/types": "^0.1.70"
+  }
+}
