@@ -1,14 +1,18 @@
 <script lang="ts">
-  import { get } from 'svelte/store';
-  import { selectedTool, zoom, selectedPointIds, selectedPathIds, selectedPieceIds } from '$lib/stores/pattern';
+  import type { Editor } from '@atelier/core';
+  import { editorState } from '@atelier/svelte';
+  import { selectedTool, zoom } from '$lib/stores/pattern';
   import type { Pattern } from '@seamer/pattern-model';
 
   interface Props {
     currentPattern: Pattern;
+    editor: Editor<Pattern>;
     onchange: (p: Pattern) => void;
   }
 
-  let { currentPattern, onchange }: Props = $props();
+  let { currentPattern, editor, onchange }: Props = $props();
+  // svelte-ignore state_referenced_locally -- parent keys this component by Editor identity
+  const editorView = editorState(editor);
 
   const tools: { id: string; icon: string; label: string; hotkey?: string }[] = [
     { id: 'select', icon: '&#x2B9F;', label: 'Select', hotkey: 'V' },
@@ -27,7 +31,7 @@
     if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return; // plain keys only (Cmd+V etc. are app-level)
     // M doubles as "mirror selection" — an active selection wins over the measure tool
     if (e.key.toLowerCase() === 'm' &&
-        (get(selectedPointIds).size || get(selectedPathIds).size || get(selectedPieceIds).size)) return;
+        (editorView.selection.get('point').size || editorView.selection.get('path').size || editorView.selection.get('piece').size)) return;
     const tool = tools.find((t) => t.hotkey?.toLowerCase() === e.key.toLowerCase());
     if (tool) selectedTool.set(tool.id);
   }

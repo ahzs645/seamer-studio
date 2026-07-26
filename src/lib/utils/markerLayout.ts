@@ -7,6 +7,7 @@ import type { Pattern } from '@seamer/pattern-model';
 import {
   indexPaths, indexPoints, pieceWorldOutline, pieceAllowancePolygon, pieceCutCounts, type Vec2
 } from '@seamer/pattern-model';
+import { nest as atelierNest, offsetPolygon as geometryOffsetPolygon } from '@atelier/geometry';
 import { boundingBox, convexHull, concaveHull } from './hull';
 
 export interface Placement {
@@ -101,10 +102,8 @@ export function nestPieces(pattern: Pattern, fabricWidthMm = 1400, gapMm = 10): 
 }
 
 // ---------------------------------------------------------------------------
-// True-shape nesting (rotations + bottom-left fill + light genetic ordering).
-// A faithful-in-spirit port of the original cutting room's GA nester: pieces are
-// placed as real polygons (not bounding boxes), may rotate by configurable angles,
-// and a small genetic algorithm searches piece orderings to minimise marker length.
+// True-shape nesting: Pattern-specific piece construction surrounds Atelier's
+// canonical bottom-left/NFP placement.
 // ---------------------------------------------------------------------------
 
 export interface NestOptions {
@@ -112,10 +111,6 @@ export interface NestOptions {
   gapMm?: number;
   /** rotations (degrees) each piece may take; e.g. [0], [0,180], [0,90,180,270]. Default [0,180]. */
   allowedRotations?: number[];
-  /** GA generations (0 = single greedy pass, no evolution). Default 12. */
-  generations?: number;
-  /** GA population size. Default 16. */
-  population?: number;
   /** max marker length per fabric sheet (mm); overflow spills into more bins. 0 = unlimited. */
   maxLengthMm?: number;
 }
@@ -193,112 +188,131 @@ export function buildNestItems(pattern: Pattern): NestItem[] {
   return items;
 }
 
-/** Place ordered items with the given rotation choices using bottom-left corner-candidate fill. */
+function transformPoly(poly: Vec2[], rotationDeg: number, offset: Vec2): Vec2[] {
+  return rotatePoly(poly, rotationDeg).map((point) => ({
+    x: point.x + offset.x,
+    y: point.y + offset.y
+  }));
+}
+
+/** Place items with Atelier's canonical bottom-left/NFP nester. */
 export function placeBottomLeft(
-  order: NestItem[], rotIdx: number[], rotations: number[], fabricWidthMm: number, gapMm: number
+  order: NestItem[], _rotIdx: number[], rotations: number[], fabricWidthMm: number, gapMm: number,
+  maxLengthMm?: number
 ): { placements: Placement[]; usedLength: number } {
-  const placed: { poly: Vec2[]; bounds: ReturnType<typeof polyBounds> }[] = [];
-  const placements: Placement[] = [];
-  let usedLength = gapMm;
-
-  for (let k = 0; k < order.length; k++) {
-    const it = order[k];
-    const deg = rotations[rotIdx[k] % rotations.length];
-    const rot = normalize(rotatePoly(it.cut, deg));
-    const rotOut = normalize(rotatePoly(it.outline, deg));
-    const w = rot.w, h = rot.h;
-
-    // Candidate anchors: top-left corner, and the corners spawned by already-placed pieces.
-    const xs = new Set<number>([gapMm]);
-    const ys = new Set<number>([gapMm]);
-    for (const pl of placed) { xs.add(pl.bounds.maxX + gapMm); ys.add(pl.bounds.maxY + gapMm); }
-
-    let best: { x: number; y: number } | null = null;
-    for (const y of [...ys].sort((a, b) => a - b)) {
-      for (const x of [...xs].sort((a, b) => a - b)) {
-        if (x + w + gapMm > fabricWidthMm) continue;
-        const cand = rot.poly.map((p) => ({ x: p.x + x, y: p.y + y }));
-        const cb = polyBounds(cand);
-        let ok = true;
-        for (const pl of placed) {
-          if (cb.maxX < pl.bounds.minX - gapMm || pl.bounds.maxX < cb.minX - gapMm || cb.maxY < pl.bounds.minY - gapMm || pl.bounds.maxY < cb.minY - gapMm) continue;
-          if (polysOverlap(cand, pl.poly)) { ok = false; break; }
-        }
-        if (ok && (!best || y < best.y || (y === best.y && x < best.x))) { best = { x, y }; break; }
-      }
-      if (best && best.y <= [...ys].sort((a, b) => a - b)[0]) break; // can't beat the lowest row
+  if (order.length === 0) return { placements: [], usedLength: gapMm };
+  const enginePlacements = atelierNest(
+    order.map((item) => ({ outer: item.cut })),
+    {
+      binWidth: fabricWidthMm,
+      ...(maxLengthMm !== undefined ? { binLength: maxLengthMm } : {}),
+      spacing: gapMm,
+      rotations: rotations.length ? rotations : [0]
     }
-    const pos = best ?? { x: gapMm, y: usedLength };
-    const poly = rot.poly.map((p) => ({ x: p.x + pos.x, y: p.y + pos.y }));
-    const outline = rotOut.poly.map((p) => ({ x: p.x + pos.x, y: p.y + pos.y }));
-    placed.push({ poly, bounds: polyBounds(poly) });
-    placements.push({ pieceId: it.pieceId, name: it.name, poly, outline, bbox: { w, h }, rotationDeg: deg, instanceId: it.instanceId });
-    usedLength = Math.max(usedLength, pos.y + h + gapMm);
-  }
+  );
+  const placements = enginePlacements.map((enginePlacement) => {
+    const item = order[enginePlacement.index];
+    const poly = transformPoly(item.cut, enginePlacement.rotationDeg, enginePlacement.offset);
+    const outline = transformPoly(item.outline, enginePlacement.rotationDeg, enginePlacement.offset);
+    const bounds = polyBounds(poly);
+    return {
+      pieceId: item.pieceId,
+      name: item.name,
+      poly,
+      outline,
+      bbox: { w: bounds.maxX - bounds.minX, h: bounds.maxY - bounds.minY },
+      rotationDeg: enginePlacement.rotationDeg,
+      instanceId: item.instanceId
+    };
+  });
+  const usedLength = placements.reduce(
+    (length, placement) => Math.max(length, polyBounds(placement.poly).maxY + gapMm),
+    gapMm
+  );
   return { placements, usedLength };
 }
 
-/** Nest pieces as true shapes with rotation and a small genetic ordering search. */
+interface AtelierNestLayoutOptions {
+  fabricWidthMm: number;
+  gapMm: number;
+  rotations: number[];
+  maxLengthMm?: number;
+}
+
+/**
+ * App-side metadata adapter for Atelier nesting. A finite sheet length is handled by greedily
+ * assigning whole Pattern instances to bins; placement within each bin remains engine-owned.
+ */
+export function nestItemsWithAtelier(items: NestItem[], options: AtelierNestLayoutOptions): MarkerLayout {
+  const { fabricWidthMm, gapMm, rotations, maxLengthMm } = options;
+  if (items.length === 0) {
+    return { fabricWidthMm, usedLengthMm: gapMm, gapMm, placements: [], efficiency: 0 };
+  }
+  const bins: NestItem[][] = [];
+  if (maxLengthMm && maxLengthMm > 0) {
+    const ordered = [...items].sort((a, b) => b.area - a.area || a.instanceId.localeCompare(b.instanceId));
+    let current: NestItem[] = [];
+    for (const item of ordered) {
+      try {
+        placeBottomLeft([...current, item], [], rotations, fabricWidthMm, gapMm, maxLengthMm);
+        current.push(item);
+      } catch {
+        if (current.length === 0) {
+          throw new Error(`Piece "${item.name}" does not fit in the configured nesting bin`);
+        }
+        bins.push(current);
+        placeBottomLeft([item], [], rotations, fabricWidthMm, gapMm, maxLengthMm);
+        current = [item];
+      }
+    }
+    if (current.length > 0) bins.push(current);
+  } else {
+    bins.push(items);
+  }
+
+  const BIN_GAP = 30;
+  const placements: Placement[] = [];
+  const binsMeta: { startYmm: number; usedLengthMm: number }[] = [];
+  let startY = 0;
+  for (let bin = 0; bin < bins.length; bin++) {
+    const result = placeBottomLeft(
+      bins[bin],
+      [],
+      rotations,
+      fabricWidthMm,
+      gapMm,
+      maxLengthMm && maxLengthMm > 0 ? maxLengthMm : undefined
+    );
+    binsMeta.push({ startYmm: startY, usedLengthMm: result.usedLength });
+    placements.push(...result.placements.map((placement) => ({
+      ...placement,
+      bin,
+      poly: placement.poly.map((point) => ({ x: point.x, y: point.y + startY })),
+      outline: placement.outline.map((point) => ({ x: point.x, y: point.y + startY }))
+    })));
+    startY += result.usedLength + BIN_GAP;
+  }
+  const totalArea = items.reduce((sum, item) => sum + item.area, 0);
+  const totalBinLength = binsMeta.reduce((sum, bin) => sum + bin.usedLengthMm, 0);
+  const efficiency = Math.min(1, totalArea / Math.max(1, fabricWidthMm * (totalBinLength - gapMm * bins.length)));
+  const multi = binsMeta.length > 1;
+  return {
+    fabricWidthMm,
+    usedLengthMm: multi ? startY - BIN_GAP : binsMeta[0].usedLengthMm,
+    gapMm,
+    placements,
+    efficiency,
+    ...(multi ? { bins: binsMeta } : {})
+  };
+}
+
+/** Nest Pattern-specific cut instances as true shapes using Atelier geometry. */
 export function nestPiecesTrueShape(pattern: Pattern, opts: NestOptions = {}): MarkerLayout {
   const fabricWidthMm = opts.fabricWidthMm ?? 1400;
   const gapMm = opts.gapMm ?? 10;
   const rotations = (opts.allowedRotations?.length ? opts.allowedRotations : [0, 180]);
-  const generations = opts.generations ?? 12;
-  const population = Math.max(4, opts.population ?? 16);
   const items = buildNestItems(pattern);
-  if (items.length === 0) return { fabricWidthMm, usedLengthMm: gapMm, gapMm, placements: [], efficiency: 0 };
-
-  const totalArea = items.reduce((s, it) => s + it.area, 0);
-  const evaluate = (order: NestItem[], rotIdx: number[]) => {
-    const r = placeBottomLeft(order, rotIdx, rotations, fabricWidthMm, gapMm);
-    return { ...r, fitness: r.usedLength };
-  };
-
-  // Greedy seed: largest-area first, rotation 0.
-  const seedOrder = [...items].sort((a, b) => b.area - a.area);
-  const idxOf = new Map(items.map((it, i) => [it.instanceId, i] as const));
-  type Chrom = { order: number[]; rot: number[] };
-  const toChrom = (ord: NestItem[]): Chrom => ({ order: ord.map((it) => idxOf.get(it.instanceId)!), rot: ord.map(() => 0) });
-  const fromChrom = (c: Chrom): NestItem[] => c.order.map((i) => items[i]);
-
-  let pop: Chrom[] = [toChrom(seedOrder)];
-  const rndInt = (n: number) => Math.floor(Math.random() * n);
-  while (pop.length < population) {
-    const ord = [...items];
-    for (let i = ord.length - 1; i > 0; i--) { const j = rndInt(i + 1); [ord[i], ord[j]] = [ord[j], ord[i]]; }
-    pop.push({ order: ord.map((it) => idxOf.get(it.instanceId)!), rot: ord.map(() => rndInt(rotations.length)) });
-  }
-
-  const score = (c: Chrom) => evaluate(fromChrom(c), c.rot).fitness;
-  let best = pop[0]; let bestScore = score(best);
-  for (const c of pop) { const s = score(c); if (s < bestScore) { best = c; bestScore = s; } }
-
-  for (let g = 0; g < generations; g++) {
-    const scored = pop.map((c) => ({ c, s: score(c) })).sort((a, b) => a.s - b.s);
-    if (scored[0].s < bestScore) { best = scored[0].c; bestScore = scored[0].s; }
-    const elite = scored.slice(0, Math.max(2, Math.floor(population / 4))).map((x) => x.c);
-    const next: Chrom[] = [...elite];
-    while (next.length < population) {
-      const p1 = elite[rndInt(elite.length)], p2 = elite[rndInt(elite.length)];
-      // order crossover (OX) on order; uniform on rotation.
-      const n = p1.order.length, a = rndInt(n), b = a + rndInt(n - a);
-      const childOrder: number[] = new Array(n).fill(-1);
-      const taken = new Set<number>();
-      for (let i = a; i <= b; i++) { childOrder[i] = p1.order[i]; taken.add(p1.order[i]); }
-      let fill = 0;
-      for (let i = 0; i < n; i++) { if (childOrder[i] === -1) { while (taken.has(p2.order[fill])) fill++; childOrder[i] = p2.order[fill++]; } }
-      const rot = childOrder.map((_, i) => (Math.random() < 0.5 ? p1.rot[i % p1.rot.length] : p2.rot[i % p2.rot.length]));
-      // mutation: swap two, and flip a rotation.
-      if (Math.random() < 0.3) { const i = rndInt(n), j = rndInt(n); [childOrder[i], childOrder[j]] = [childOrder[j], childOrder[i]]; }
-      if (Math.random() < 0.3 && rotations.length > 1) rot[rndInt(n)] = rndInt(rotations.length);
-      next.push({ order: childOrder, rot });
-    }
-    pop = next;
-  }
-
-  const final = evaluate(fromChrom(best), best.rot);
-  const efficiency = totalArea / Math.max(1, fabricWidthMm * (final.usedLength - gapMm));
-  return { fabricWidthMm, usedLengthMm: final.usedLength, gapMm, placements: final.placements, efficiency: Math.min(1, efficiency) };
+  return nestItemsWithAtelier(items, { fabricWidthMm, gapMm, rotations, maxLengthMm: opts.maxLengthMm });
 }
 
 /**
@@ -358,8 +372,6 @@ ${binsSVG}${cutSVG}${body}
 
 // ---- nest-onto-paper (the original's print-dialog re-nest) -----------------------------------------
 
-import { nestCore, polygonArea as corePolygonArea, type CoreItem } from './nestCore';
-
 /**
  * Re-position the pattern's pieces onto a strip as wide as the printable paper area, so tiled
  * printing uses the fewest pages (the original nests with rotations [0,90,180,270] before printing).
@@ -370,24 +382,16 @@ export function nestPatternForPaper(pattern: Pattern, usableWidthMm: number): Pa
   if (usableWidthMm < 50) return pattern;
   const paths = indexPaths(pattern);
   const points = indexPoints(pattern);
-  const items: CoreItem[] = [];
+  const items: NestItem[] = [];
   for (const piece of pattern.pieces) {
     if (piece.hidden) continue;
     const outline = pieceWorldOutline(pattern, piece, paths, points, 4);
     if (outline.length < 3) continue;
-    items.push({ pieceId: piece.id, instanceId: piece.id, name: piece.name, cut: outline, outline, area: corePolygonArea(outline) });
+    items.push({ pieceId: piece.id, instanceId: piece.id, name: piece.name, cut: outline, outline, area: polygonArea(outline) });
   }
   if (items.length < 2) return pattern;
-  const layout = nestCore(items, {
-    fabricWidthMm: usableWidthMm,
-    gapMm: 8,
-    rotations: [0, 90, 180, 270],
-    generations: 6,
-    population: 12,
-    strategy: 'nfp',
-    seed: 42 // deterministic: the preview page count matches the printed result
-  });
-  const byPiece = new Map(layout.placements.map((pl) => [pl.pieceId, pl]));
+  const result = placeBottomLeft(items, [], [0, 90, 180, 270], usableWidthMm, 8);
+  const byPiece = new Map(result.placements.map((pl) => [pl.pieceId, pl]));
   const itemByPiece = new Map(items.map((it) => [it.pieceId, it]));
   const pieces = pattern.pieces.map((piece) => {
     const pl = byPiece.get(piece.id);
@@ -456,8 +460,6 @@ export function warpLayoutToFabric(layout: MarkerLayout, distortion: FabricDisto
 
 // ---- print/plaid pattern matching (the original's matching nest options) ---------------------------
 
-import { polyBounds as nestPolyBounds, polysOverlap as nestPolysOverlap, offsetPoly as nestOffsetPoly } from './nestCore';
-
 export interface PatternMatching {
   /** horizontal repeat of the print (mm) */
   cellWidthMm: number;
@@ -474,15 +476,15 @@ export interface PatternMatching {
 export function matchLayoutToRepeat(layout: MarkerLayout, match: PatternMatching, gapMm = 0): MarkerLayout {
   const cw = Math.max(1, match.cellWidthMm);
   const ch = Math.max(1, match.cellHeightMm);
-  const placed: { test: Vec2[]; bounds: ReturnType<typeof nestPolyBounds> }[] = [];
+  const placed: { test: Vec2[]; bounds: ReturnType<typeof polyBounds> }[] = [];
   let usedLength = gapMm;
   const order = [...layout.placements].sort((a, b) => {
-    const ba = nestPolyBounds(a.poly), bb = nestPolyBounds(b.poly);
+    const ba = polyBounds(a.poly), bb = polyBounds(b.poly);
     return ba.minY - bb.minY || ba.minX - bb.minX;
   });
   const out = new Map<typeof order[number], { dx: number; dy: number }>();
   for (const pl of order) {
-    const b = nestPolyBounds(pl.poly);
+    const b = polyBounds(pl.poly);
     // candidate grid shifts, nearest first (rings around the snapped origin)
     const snapX = Math.round(b.minX / cw) * cw - b.minX;
     const snapY = Math.round(b.minY / ch) * ch - b.minY;
@@ -495,12 +497,12 @@ export function matchLayoutToRepeat(layout: MarkerLayout, match: PatternMatching
           const dy = snapY + ky * ch;
           if (b.minX + dx < 0 || b.maxX + dx > layout.fabricWidthMm || b.minY + dy < 0) continue;
           const cand = pl.poly.map((p) => ({ x: p.x + dx, y: p.y + dy }));
-          const candTest = gapMm > 0 ? nestOffsetPoly(cand, gapMm * 0.49) : cand;
-          const cb = nestPolyBounds(candTest);
+          const candTest = gapMm > 0 ? geometryOffsetPolygon(cand, gapMm * 0.49) : cand;
+          const cb = polyBounds(candTest);
           let ok = true;
           for (const q of placed) {
             if (cb.maxX < q.bounds.minX || q.bounds.maxX < cb.minX || cb.maxY < q.bounds.minY || q.bounds.maxY < cb.minY) continue;
-            if (nestPolysOverlap(candTest, q.test)) { ok = false; break; }
+            if (polysOverlap(candTest, q.test)) { ok = false; break; }
           }
           if (ok) { chosen = { dx, dy }; placed.push({ test: candTest, bounds: cb }); continue outer; }
         }
@@ -509,8 +511,8 @@ export function matchLayoutToRepeat(layout: MarkerLayout, match: PatternMatching
     const shift = chosen ?? { dx: 0, dy: 0 };
     if (!chosen) {
       // keep the unmatched original placement occupied so later pieces avoid it
-      const test = gapMm > 0 ? nestOffsetPoly(pl.poly, gapMm * 0.49) : pl.poly;
-      placed.push({ test, bounds: nestPolyBounds(test) });
+      const test = gapMm > 0 ? geometryOffsetPolygon(pl.poly, gapMm * 0.49) : pl.poly;
+      placed.push({ test, bounds: polyBounds(test) });
     }
     out.set(pl, shift);
     usedLength = Math.max(usedLength, b.maxY + shift.dy + gapMm);

@@ -1,12 +1,16 @@
 <script lang="ts">
+	import type { Editor } from '@atelier/core';
+	import { editorState } from '@atelier/svelte';
 	import type { Pattern } from '@seamer/pattern-model';
 	import { validatePattern, type Issue } from '$lib/utils/patternValidation';
-	import { selectedPieceIds, selectedPathIds } from '$lib/stores/pattern';
 
 	interface Props {
 		currentPattern: Pattern;
+		editor: Editor<Pattern>;
 	}
-	let { currentPattern }: Props = $props();
+	let { currentPattern, editor }: Props = $props();
+	// svelte-ignore state_referenced_locally -- parent keys this component by Editor identity
+	const editorView = editorState(editor);
 
 	let open = $state(false);
 	let issues = $derived<Issue[]>(validatePattern(currentPattern));
@@ -17,11 +21,9 @@
 		if (!issue.targetId) return;
 		// best-effort: select whichever collection the id belongs to
 		if (currentPattern.pieces.some((p) => p.id === issue.targetId)) {
-			selectedPieceIds.set(new Set([issue.targetId]));
-			selectedPathIds.set(new Set());
+			editor.setSelection(editorView.selection.replace('piece', [issue.targetId]).clear('path'));
 		} else if (currentPattern.paths.some((p) => p.id === issue.targetId)) {
-			selectedPathIds.set(new Set([issue.targetId]));
-			selectedPieceIds.set(new Set());
+			editor.setSelection(editorView.selection.replace('path', [issue.targetId]).clear('piece'));
 		}
 	}
 </script>

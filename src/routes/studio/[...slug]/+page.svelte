@@ -11,8 +11,10 @@
   import MaterialPanel from '$lib/components/MaterialPanel.svelte';
   import SeamPanel from '$lib/components/SeamPanel.svelte';
   import ObjectBrowser from '$lib/components/ObjectBrowser.svelte';
-  import { pattern, patternEditor, selectedPointIds, selectedPathIds, selectedPieceIds, pushUndo, undo, redo, undoLabel, redoLabel, restoreHistory, pendingPaste, panelRequest, installSeamerAutomation, getPatternEditor } from '$lib/stores/pattern';
+  import { pattern, patternEditor, pushUndo, undo, redo, undoLabel, redoLabel, restoreHistory, pendingPaste, panelRequest, installSeamerAutomation, getPatternEditor } from '$lib/stores/pattern';
   import EditorStateBridge from '$lib/components/EditorStateBridge.svelte';
+  import type { Selection } from '@atelier/core';
+  import type { EditorState } from '@atelier/svelte';
   import { loadPattern, savePattern as saveToDB } from '$lib/stores/localDB';
   import { EMPTY_PATTERN, type Pattern, type Piece, type ConstrainablePoint, type ConstrainablePath } from '@seamer/pattern-model';
   import type { PendingPaste } from '$lib/stores/pattern';
@@ -78,6 +80,15 @@
   let saveCount = $state(0);
 
   let currentPattern = $state<Pattern>(structuredClone(EMPTY_PATTERN));
+  let editorView = $state<EditorState<Pattern> | null>(null);
+  const selection = $derived(editorView?.selection ?? getPatternEditor().selection);
+  const pointIds = $derived(selection.get('point'));
+  const pathIds = $derived(selection.get('path'));
+  const pieceIds = $derived(selection.get('piece'));
+  function setSelection(update: (current: Selection) => Selection): void {
+    const editor = getPatternEditor();
+    editor.setSelection(update(editor.selection));
+  }
   let saved = $state(true);
   let viewMode = $state<'2d' | '3d' | 'both'>('both');
   let leftTab = $state<'layers' | 'body' | 'materials' | 'seams'>('layers');
@@ -491,13 +502,10 @@
   }
 
   function handlePieceSelect(id: string | null) {
-    // no-op when the selection is already exactly this piece: writing fresh Sets always
-    // notifies subscribers, which can re-trigger the 3D highlight effect in a cycle
-    const cur = get(selectedPieceIds);
-    if ((id ? cur.size === 1 && cur.has(id) : cur.size === 0) && get(selectedPointIds).size === 0 && get(selectedPathIds).size === 0) return;
-    selectedPieceIds.set(id ? new Set([id]) : new Set());
-    selectedPointIds.set(new Set());
-    selectedPathIds.set(new Set());
+    // Avoid redundant 3D highlight work when this is already the exact cross-view selection.
+    const cur = pieceIds;
+    if ((id ? cur.size === 1 && cur.has(id) : cur.size === 0) && pointIds.size === 0 && pathIds.size === 0) return;
+    setSelection((current) => current.replace('piece', id ? [id] : []).clear('point').clear('path'));
   }
 
   function handleUndo() { const prev = undo($state.snapshot(currentPattern) as Pattern); if (prev) { currentPattern = prev; patternName = prev.name; pattern.set(prev); saved = false; } }
@@ -523,7 +531,7 @@
     if (e.key === '?' && !e.metaKey && !e.ctrlKey) { e.preventDefault(); showShortcuts = !showShortcuts; }
     // Selection batch transforms (no modifier): arrows nudge, [ ] rotate, < > scale, M mirror.
     {
-      const hasSel = $selectedPointIds.size || $selectedPathIds.size || $selectedPieceIds.size;
+      const hasSel = pointIds.size || pathIds.size || pieceIds.size;
       if (hasSel && !e.metaKey && !e.ctrlKey && !e.altKey) {
         const step = e.shiftKey ? 10 : 1;
         const move = (dx: number, dy: number) => { e.preventDefault(); window.seamer?.execute('selection.move', { dx, dy }); };
@@ -541,14 +549,12 @@
       let changed = false;
       // Cascading deletes via patternMutations: folding sequentially so deleting points + paths +
       // pieces in one keystroke accumulates into a single update (and removes dependent edges/seams).
-      for (const id of $selectedPointIds) { p = deletePoint(p, id); changed = true; }
-      for (const id of $selectedPathIds) { p = deletePath(p, id); changed = true; }
-      for (const id of $selectedPieceIds) { p = deletePiece(p, id); changed = true; }
+      for (const id of pointIds) { p = deletePoint(p, id); changed = true; }
+      for (const id of pathIds) { p = deletePath(p, id); changed = true; }
+      for (const id of pieceIds) { p = deletePiece(p, id); changed = true; }
       if (changed) {
         handlePatternUpdate(p, 'Delete');
-        selectedPointIds.set(new Set());
-        selectedPathIds.set(new Set());
-        selectedPieceIds.set(new Set());
+        setSelection((current) => current.clear('point').clear('path').clear('piece'));
         toastSuccess('Deleted');
       }
     }
@@ -560,14 +566,14 @@
 
   function handleCopy() {
     const p = $pattern;
-    if ($selectedPieceIds.size > 0) {
-      const items = p.pieces.filter(pc => $selectedPieceIds.has(pc.id)).map(pc => structuredClone($state.snapshot(pc)) as Piece);
+    if (pieceIds.size > 0) {
+      const items = p.pieces.filter(pc => pieceIds.has(pc.id)).map(pc => structuredClone($state.snapshot(pc)) as Piece);
       clipboard = { kind: 'pieces', items };
       toastSuccess(`${plural(items.length)} copied to clipboard`);
-    } else if ($selectedPathIds.size > 0) {
+    } else if (pathIds.size > 0) {
       // paths copy with their anchor points (paste decides whether to reuse or duplicate them)
       const items = p.paths
-        .filter(pa => $selectedPathIds.has(pa.id))
+        .filter(pa => pathIds.has(pa.id))
         .map(pa => ({
           path: structuredClone($state.snapshot(pa)) as ConstrainablePath,
           points: pa.pathPoints
@@ -577,8 +583,8 @@
         }));
       clipboard = { kind: 'paths', items };
       toastSuccess(`${plural(items.length)} copied to clipboard`);
-    } else if ($selectedPointIds.size > 0) {
-      const items = p.points.filter(pt => $selectedPointIds.has(pt.id)).map(pt => structuredClone($state.snapshot(pt)) as ConstrainablePoint);
+    } else if (pointIds.size > 0) {
+      const items = p.points.filter(pt => pointIds.has(pt.id)).map(pt => structuredClone($state.snapshot(pt)) as ConstrainablePoint);
       clipboard = { kind: 'points', items };
       toastSuccess(`${plural(items.length)} copied to clipboard`);
     }
@@ -596,9 +602,9 @@
   }
 
   function duplicateSelectedPiece() {
-    if ($selectedPieceIds.size !== 1) return;
+    if (pieceIds.size !== 1) return;
     const p = $pattern;
-    const piece = p.pieces.find(pc => $selectedPieceIds.has(pc.id));
+    const piece = p.pieces.find(pc => pieceIds.has(pc.id));
     if (!piece) return;
     const uid = (pre: string) => `${pre}_${crypto.randomUUID().replace(/-/g, '').slice(0, 9)}`;
     const clone = structuredClone($state.snapshot(piece));
@@ -607,13 +613,13 @@
     clone.position = { x: piece.position.x + 50, y: piece.position.y - 50 };
     for (const pp of [...clone.mainPaths, ...clone.internalPaths]) pp.id = uid('PiecePath');
     handlePatternUpdate({ ...p, pieces: [...p.pieces, clone], hasChanged: true }, 'Duplicate piece');
-    selectedPieceIds.set(new Set([clone.id]));
+    setSelection((current) => current.replace('piece', [clone.id]));
     toastSuccess(`Duplicated "${piece.name}"`);
   }
 </script>
 
 {#key $patternEditor}
-  <EditorStateBridge editor={$patternEditor} />
+  <EditorStateBridge editor={$patternEditor} onstate={(state) => (editorView = state)} />
 {/key}
 
 <svelte:window onkeydown={handleKeydown} />
@@ -682,7 +688,7 @@
       <button class="btn btn-xs" class:btn-active={showObjectBrowser} onclick={() => showObjectBrowser = !showObjectBrowser} title="Toggle object browser">
         <span class="material-symbols-rounded notranslate align-middle" style="font-size:18px">view_list</span>
       </button>
-      <ErrorsPanel {currentPattern} />
+      {#key $patternEditor}<ErrorsPanel {currentPattern} editor={$patternEditor} />{/key}
       <HistoryMenu onundo={(n) => { for (let i = 0; i < n; i++) handleUndo(); }} onredo={handleRedo} />
       <button class="btn btn-ghost btn-xs" onclick={() => showVersions = true} title="Version history" aria-label="Version history">
         <span class="material-symbols-rounded notranslate align-middle" style="font-size:18px">history</span>
@@ -726,28 +732,28 @@
 
     <div class="flex-1 flex overflow-hidden">
       {#if viewMode === 'both'}
-        <div class="w-1/2 border-r relative" data-tour-id="tour-canvas-2d"><PatternCanvas2D {currentPattern} onchange={handlePatternUpdate} /></div>
-        <div class="w-1/2 relative" data-tour-id="tour-canvas-3d"><PatternScene3D {currentPattern} selectedPieceId={[...$selectedPieceIds][0] ?? null} onpieceselect={handlePieceSelect} ondrapesettled={handleDrapeSettled} onpatternupdate={handlePatternUpdate} oncamerachange={handleCameraChange} {labelDisplay} /></div>
+        <div class="w-1/2 border-r relative" data-tour-id="tour-canvas-2d">{#key $patternEditor}<PatternCanvas2D {currentPattern} editor={$patternEditor} onchange={handlePatternUpdate} />{/key}</div>
+        <div class="w-1/2 relative" data-tour-id="tour-canvas-3d"><PatternScene3D {currentPattern} selectedPieceId={[...pieceIds][0] ?? null} onpieceselect={handlePieceSelect} ondrapesettled={handleDrapeSettled} onpatternupdate={handlePatternUpdate} oncamerachange={handleCameraChange} {labelDisplay} /></div>
       {:else if viewMode === '2d'}
-        <div class="flex-1 relative" data-tour-id="tour-canvas-2d"><PatternCanvas2D {currentPattern} onchange={handlePatternUpdate} /></div>
+        <div class="flex-1 relative" data-tour-id="tour-canvas-2d">{#key $patternEditor}<PatternCanvas2D {currentPattern} editor={$patternEditor} onchange={handlePatternUpdate} />{/key}</div>
       {:else}
-        <div class="flex-1 relative" data-tour-id="tour-canvas-3d"><PatternScene3D {currentPattern} selectedPieceId={[...$selectedPieceIds][0] ?? null} onpieceselect={handlePieceSelect} ondrapesettled={handleDrapeSettled} onpatternupdate={handlePatternUpdate} oncamerachange={handleCameraChange} {labelDisplay} /></div>
+        <div class="flex-1 relative" data-tour-id="tour-canvas-3d"><PatternScene3D {currentPattern} selectedPieceId={[...pieceIds][0] ?? null} onpieceselect={handlePieceSelect} ondrapesettled={handleDrapeSettled} onpatternupdate={handlePatternUpdate} oncamerachange={handleCameraChange} {labelDisplay} /></div>
       {/if}
     </div>
 
     {#if showRightPanel}
-      <PropertyPanel {currentPattern} onchange={handlePatternUpdate} onclose={() => (showRightPanel = false)} {labelDisplay} onlabeldisplaychange={(v) => (labelDisplay = v)} ongrading={() => (showGrading = true)} onalterations={() => (showAlterations = true)} />
+      {#key $patternEditor}<PropertyPanel {currentPattern} editor={$patternEditor} onchange={handlePatternUpdate} onclose={() => (showRightPanel = false)} {labelDisplay} onlabeldisplaychange={(v) => (labelDisplay = v)} ongrading={() => (showGrading = true)} onalterations={() => (showAlterations = true)} />{/key}
     {/if}
   </div>
 
   <div class="h-10 border-t bg-base-200 shrink-0" data-tour-id="tour-toolbar">
-    <StudioToolbar {currentPattern} onchange={handlePatternUpdate} />
+    {#key $patternEditor}<StudioToolbar {currentPattern} editor={$patternEditor} onchange={handlePatternUpdate} />{/key}
   </div>
 
-  <StatusBar {currentPattern} {saved} />
+  {#key $patternEditor}<StatusBar {currentPattern} {saved} editor={$patternEditor} />{/key}
 
   {#if showObjectBrowser}
-    <ObjectBrowser {currentPattern} onchange={handlePatternUpdate} bind:open={showObjectBrowser} />
+    {#key $patternEditor}<ObjectBrowser {currentPattern} editor={$patternEditor} onchange={handlePatternUpdate} bind:open={showObjectBrowser} />{/key}
   {/if}
 </div>
 

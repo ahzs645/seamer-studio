@@ -1,8 +1,7 @@
 <script lang="ts">
   // Cutting Room — nest pieces onto fabric, preview the marker, track which pieces have been cut,
-  // then export/print. Offers the fast shelf packer and a true-shape genetic nester with rotations
-  // (a faithful-in-spirit port of the original studio's cutting room). Settings + cut state persist
-  // in pattern.markerSettings.
+  // then export/print. Offers the fast shelf packer and Atelier true-shape nesting, either on the
+  // main thread or in a cancellable worker. Settings + cut state persist in pattern.markerSettings.
   import type { Pattern } from '@seamer/pattern-model';
   import {
     nestPieces, nestPiecesTrueShape, markerToSVG, type MarkerLayout, type CutOffType
@@ -22,12 +21,9 @@
     fabricWidthMm: number;
     gapMm: number;
     allowedRotations: number[];
-    generations: number;
     cutOff: CutOffType;
     cutIds: string[];
     maxLengthMm?: number;
-    gravity?: 'bottom' | 'left' | 'right' | 'top';
-    curveToleranceMm?: number;
   }
   // svelte-ignore state_referenced_locally -- intentional one-time read of persisted settings on open
   const saved = (currentPattern.markerSettings ?? null) as Partial<MarkerSettings> | null;
@@ -37,9 +33,6 @@
   let gapMm = $state(saved?.gapMm ?? 10);
   let maxLengthMm = $state(saved?.maxLengthMm ?? 0); // 0 = unlimited (single sheet)
   let rotationMode = $state(rotationsToMode(saved?.allowedRotations));
-  let generations = $state(saved?.generations ?? 12);
-  let gravity = $state<'bottom' | 'left' | 'right' | 'top'>(saved?.gravity ?? 'bottom');
-  let curveToleranceMm = $state(saved?.curveToleranceMm ?? 1);
   // fabric distortion compensation (the original's TPS warpToMesh), applied to machine cut files
   let fabricBowMm = $state(0);
   let fabricSkewMm = $state(0);
@@ -71,22 +64,22 @@
   }
 
   function persist() {
-    const settings: MarkerSettings = { algorithm, fabricWidthMm, gapMm, maxLengthMm, allowedRotations: modeToRotations(), generations, cutOff, cutIds: [...cutIds], gravity, curveToleranceMm };
+    const settings: MarkerSettings = { algorithm, fabricWidthMm, gapMm, maxLengthMm, allowedRotations: modeToRotations(), cutOff, cutIds: [...cutIds] };
     onchange({ ...currentPattern, markerSettings: settings, hasChanged: true }, 'Cutting room settings');
   }
 
   async function nest() {
     busy = true;
     progress = null;
-    // yield so the spinner paints before a (possibly heavy) GA run
+    // yield so the spinner paints before a potentially heavy true-shape run
     await new Promise((r) => setTimeout(r, 10));
     try {
       if (algorithm === 'nfp') {
-        // worker-based NFP nest: streams per-generation progress, cancellable
+        // worker-based Atelier nest: cancellable without blocking the modal
         job?.cancel();
         job = nestInWorker(
           currentPattern,
-          { fabricWidthMm, gapMm, maxLengthMm, allowedRotations: modeToRotations(), generations, strategy: 'nfp', gravity, curveToleranceMm },
+          { fabricWidthMm, gapMm, maxLengthMm, allowedRotations: modeToRotations() },
           (p) => (progress = p)
         );
         layout = await job.promise;
@@ -94,7 +87,7 @@
       } else {
         layout = algorithm === 'fast'
           ? nestPieces(currentPattern, fabricWidthMm, gapMm)
-          : nestPiecesTrueShape(currentPattern, { fabricWidthMm, gapMm, allowedRotations: modeToRotations(), generations });
+          : nestPiecesTrueShape(currentPattern, { fabricWidthMm, gapMm, allowedRotations: modeToRotations() });
       }
       if (layout.placements.length && matchEnabled) {
         // plaid/print matching: align every piece to the repeat grid so the print lands identically
@@ -229,8 +222,8 @@
         <label class="flex flex-col gap-1">Algorithm
           <select class="select select-bordered select-sm" bind:value={algorithm}>
             <option value="fast">Fast (bounding box)</option>
-            <option value="trueShape">True shape (rotations + GA)</option>
-            <option value="nfp">True shape (NFP, background)</option>
+            <option value="trueShape">True shape (Atelier)</option>
+            <option value="nfp">True shape (Atelier, background)</option>
           </select>
         </label>
         <label class="flex flex-col gap-1">Fabric width (mm)
@@ -250,8 +243,6 @@
               <option value="free">Free (8 angles)</option>
             </select>
           </label>
-          <label class="flex flex-col gap-1">Search effort (generations): {generations}
-            <input type="range" min="0" max="40" step="1" class="range range-xs" bind:value={generations} /></label>
         {/if}
         <label class="flex items-center gap-2 text-sm" title="Snap pieces onto the print's repeat grid so checks/stripes land identically on every piece">
           <input type="checkbox" class="checkbox checkbox-sm" bind:checked={matchEnabled} /> Pattern matching
@@ -263,18 +254,6 @@
             <label class="flex flex-col gap-1 text-xs">Repeat H (mm)
               <input type="number" min="1" step="1" class="input input-bordered input-xs" bind:value={matchCellHmm} /></label>
           </div>
-        {/if}
-        {#if algorithm === 'nfp'}
-          <label class="flex flex-col gap-1" title="Which fabric edge pieces snug toward">Gravity
-            <select class="select select-bordered select-sm" bind:value={gravity}>
-              <option value="bottom">Bottom</option>
-              <option value="top">Top</option>
-              <option value="left">Left</option>
-              <option value="right">Right</option>
-            </select>
-          </label>
-          <label class="flex flex-col gap-1" title="Simplification tolerance for curved cut outlines — coarser = faster nesting">Curve tolerance (mm)
-            <input type="number" min="0.2" max="5" step="0.2" class="input input-bordered input-sm" bind:value={curveToleranceMm} /></label>
         {/if}
         <label class="flex flex-col gap-1">Cut-off boundary
           <select class="select select-bordered select-sm" bind:value={cutOff}>

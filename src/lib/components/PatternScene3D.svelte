@@ -15,7 +15,8 @@
   import { show3dStats, simAnchors, selectedTool, seamTool, selectedSeamId, bodyZoomRequest } from '$lib/stores/pattern';
   import { get } from 'svelte/store';
   import { applySeamPick, type SeamPick } from '$lib/utils/seamTool';
-  import { toast } from '$lib/stores/toast';
+  import { downloadBlob, sceneToGLTF } from '$lib/utils/exporters';
+  import { toast, toastError, toastSuccess } from '$lib/stores/toast';
 
   // lightweight FPS meter for the optional stats overlay (Settings → 3D stats)
   let fps = $state(0);
@@ -400,6 +401,20 @@
     const bytes = new Uint8Array(stl.buffer as ArrayBuffer, stl.byteOffset, stl.byteLength);
     downloadFile(new Blob([bytes], { type: 'model/stl' }), 'stl');
   }
+  async function downloadGLTF() {
+    if (!renderer) return;
+    const base = currentPattern.name.replace(/\s+/g, '_') || 'garment';
+    try {
+      const gltf = await sceneToGLTF(renderer.exportScene());
+      const blob = gltf instanceof ArrayBuffer
+        ? new Blob([gltf], { type: 'model/gltf-binary' })
+        : new Blob([JSON.stringify(gltf, null, 2)], { type: 'model/gltf+json' });
+      downloadBlob(`${base}.${gltf instanceof ArrayBuffer ? 'glb' : 'gltf'}`, blob);
+      toastSuccess('Exported glTF');
+    } catch (error) {
+      toastError(error instanceof Error ? error.message : 'glTF export failed');
+    }
+  }
   function downloadFile(blob: Blob, ext: string) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -467,7 +482,8 @@
     { label: 'Simulation controls', icon: 'tune', onClick: toggleSimPanel, active: () => showSimPanel },
     { label: dark ? 'Light mode' : 'Dark mode', icon: dark ? 'light_mode' : 'dark_mode', onClick: toggleDark, active: () => dark, sep: true },
     { label: 'Download as OBJ', icon: 'download', onClick: downloadOBJ },
-    { label: 'Download as STL', icon: 'deployed_code', onClick: () => void downloadSTL() }
+    { label: 'Download as STL', icon: 'deployed_code', onClick: () => void downloadSTL() },
+    { label: 'Download as glTF', icon: 'view_in_ar', onClick: () => void downloadGLTF() }
   ]);
 </script>
 

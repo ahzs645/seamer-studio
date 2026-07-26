@@ -2,24 +2,31 @@
   // Bottom status bar: live cursor position (mm), current tool, selection counts and a saved/unsaved
   // indicator — mirroring the original studio's readout strip. The coordinate readout (cursor +
   // single-selection position) is gated by the persisted "Show coordinates" setting.
-  import { cursorMm, selectedTool, selectedPointIds, selectedPathIds, selectedPieceIds, showCoordinates } from '$lib/stores/pattern';
+  import type { Editor } from '@atelier/core';
+  import { editorState } from '@atelier/svelte';
+  import { cursorMm, selectedTool, showCoordinates } from '$lib/stores/pattern';
   import type { Pattern } from '@seamer/pattern-model';
 
-  let { currentPattern, saved }: { currentPattern: Pattern; saved: boolean } = $props();
+  let { currentPattern, saved, editor }: { currentPattern: Pattern; saved: boolean; editor: Editor<Pattern> } = $props();
 
-  const selCount = $derived($selectedPointIds.size + $selectedPathIds.size + $selectedPieceIds.size);
+  // svelte-ignore state_referenced_locally -- parent keys this component by Editor identity
+  const editorView = editorState(editor);
+  const pointIds = $derived(editorView.selection.get('point'));
+  const pathIds = $derived(editorView.selection.get('path'));
+  const pieceIds = $derived(editorView.selection.get('piece'));
+  const selCount = $derived(pointIds.size + pathIds.size + pieceIds.size);
   const unit = $derived(currentPattern.lengthUnit ?? 'mm');
   const toUnit = (mm: number) => (unit === 'cm' ? mm / 10 : unit === 'inch' ? mm / 25.4 : mm);
   const fmt = (mm: number) => toUnit(mm).toFixed(unit === 'inch' ? 2 : 1);
 
   // Position of the active selection (a single point's drafting coords, or a single piece's placement).
   const selPos = $derived.by<{ label: string; x: number; y: number } | null>(() => {
-    if ($selectedPointIds.size === 1) {
-      const p = currentPattern.points.find((q) => q.id === [...$selectedPointIds][0]);
+    if (pointIds.size === 1) {
+      const p = currentPattern.points.find((q) => q.id === [...pointIds][0]);
       return p ? { label: p.name, x: p.x, y: p.y } : null;
     }
-    if ($selectedPieceIds.size === 1) {
-      const pc = currentPattern.pieces.find((q) => q.id === [...$selectedPieceIds][0]);
+    if (pieceIds.size === 1) {
+      const pc = currentPattern.pieces.find((q) => q.id === [...pieceIds][0]);
       return pc ? { label: pc.name, x: pc.position.x, y: pc.position.y } : null;
     }
     return null;

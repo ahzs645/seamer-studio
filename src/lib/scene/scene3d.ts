@@ -1894,6 +1894,11 @@ export class PatternRenderer {
     return exporter.parse(this.buildExportGroup(), { binary: true }) as DataView;
   }
 
+  /** Detached snapshot of the live avatar + draped garment for shared scene exporters. */
+  exportScene(): THREE.Group {
+    return this.buildExportGroup();
+  }
+
   /** Avatar + visible cloth meshes cloned into a detached group with current world matrices. */
   private buildExportGroup(): THREE.Group {
     const group = new THREE.Group();

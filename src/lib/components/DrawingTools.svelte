@@ -1,6 +1,12 @@
 <script lang="ts">
-  import { get } from 'svelte/store';
-  import { selectedTool, selectedPointIds, selectedPathIds, selectedPieceIds } from '$lib/stores/pattern';
+  import type { Editor } from '@atelier/core';
+  import { editorState } from '@atelier/svelte';
+  import type { Pattern } from '@seamer/pattern-model';
+  import { selectedTool } from '$lib/stores/pattern';
+
+  let { editor }: { editor: Editor<Pattern> } = $props();
+  // svelte-ignore state_referenced_locally -- PatternCanvas2D is keyed by Editor identity
+  const editorView = editorState(editor);
 
   // Right-hand drawing toolbar matching the original 2D editor. Some entries are
   // GROUPS that reveal sub-tools in a flyout (Arc/circle, Seam) — like the source.
@@ -53,7 +59,7 @@
     if (ev.shiftKey) return;
     // M doubles as "mirror selection" (studio page handler) — an active selection wins over the tool.
     if (ev.key.toLowerCase() === 'm' &&
-        (get(selectedPointIds).size || get(selectedPathIds).size || get(selectedPieceIds).size)) return;
+        (editorView.selection.get('point').size || editorView.selection.get('path').size || editorView.selection.get('piece').size)) return;
     const all: Item[] = [];
     for (const e of entries) { if (e.id) all.push(e as Item); if (e.sub) all.push(...e.sub); }
     const t = all.find((x) => x.hotkey && !x.hotkey.includes('+') && x.hotkey.toLowerCase() === ev.key.toLowerCase());

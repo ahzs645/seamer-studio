@@ -2,10 +2,14 @@
 // pattern, posts them to the worker, streams progress, and supports cancellation (terminate).
 
 import type { Pattern } from '@seamer/pattern-model';
-import { buildNestItems, type MarkerLayout, type NestOptions } from './markerLayout';
-import type { CoreItem, CoreLayout, CoreOptions, CoreProgress, NestStrategy, NestGravity } from './nestCore';
+import { buildNestItems, type MarkerLayout, type NestItem, type NestOptions } from './markerLayout';
 
-export type { CoreProgress as NestProgress } from './nestCore';
+export interface NestProgress {
+  generation: number;
+  generations: number;
+  bestLengthMm: number;
+  efficiency: number;
+}
 
 export interface NestJob {
   promise: Promise<MarkerLayout>;
@@ -13,39 +17,30 @@ export interface NestJob {
 }
 
 export interface WorkerNestOptions extends NestOptions {
-  /** 'nfp' (default): no-fit-polygon vertex-contact placement; 'corners': bbox shelf candidates. */
-  strategy?: NestStrategy;
-  /** which fabric edge pieces snug toward (the original's gravityDirection). Default 'bottom'. */
-  gravity?: NestGravity;
-  /** Douglas-Peucker tolerance (mm) for cut-polygon simplification (the original's curveTolerance). */
-  curveToleranceMm?: number;
+  /** max marker length per fabric sheet (mm); overflow spills into more bins. 0 = unlimited. */
+  maxLengthMm?: number;
 }
 
 /** Nest off the main thread. Resolves with the layout; rejects with Error('cancelled') on cancel. */
 export function nestInWorker(
   pattern: Pattern,
   opts: WorkerNestOptions = {},
-  onProgress?: (p: CoreProgress) => void
+  onProgress?: (p: NestProgress) => void
 ): NestJob {
   return nestItemsInWorker(buildNestItems(pattern), opts, onProgress);
 }
 
 /** Lower-level variant taking pre-built nest items (used by /test-nfp and tests). */
 export function nestItemsInWorker(
-  items: CoreItem[],
+  items: NestItem[],
   opts: WorkerNestOptions = {},
-  onProgress?: (p: CoreProgress) => void
+  onProgress?: (p: NestProgress) => void
 ): NestJob {
-  const options: CoreOptions = {
+  const options = {
     fabricWidthMm: opts.fabricWidthMm ?? 1400,
     gapMm: opts.gapMm ?? 10,
     rotations: opts.allowedRotations?.length ? opts.allowedRotations : [0, 180],
-    generations: opts.generations ?? 12,
-    population: Math.max(4, opts.population ?? 16),
-    strategy: opts.strategy ?? 'nfp',
-    maxLengthMm: opts.maxLengthMm && opts.maxLengthMm > 0 ? opts.maxLengthMm : null,
-    gravity: opts.gravity ?? 'bottom',
-    simplifyTolMm: opts.curveToleranceMm && opts.curveToleranceMm > 0 ? opts.curveToleranceMm : 1
+    ...(opts.maxLengthMm && opts.maxLengthMm > 0 ? { maxLengthMm: opts.maxLengthMm } : {})
   };
 
   const worker = new Worker(new URL('../workers/nesting.worker.ts', import.meta.url), { type: 'module' });
@@ -56,11 +51,11 @@ export function nestItemsInWorker(
     worker.onmessage = (e: MessageEvent<{ type: string } & Record<string, unknown>>) => {
       const msg = e.data;
       if (msg.type === 'progress') {
-        onProgress?.(msg as unknown as CoreProgress);
+        onProgress?.(msg as unknown as NestProgress);
       } else if (msg.type === 'done') {
         settled = true;
         worker.terminate();
-        resolve(msg.layout as CoreLayout as MarkerLayout);
+        resolve(msg.layout as MarkerLayout);
       } else if (msg.type === 'error') {
         settled = true;
         worker.terminate();

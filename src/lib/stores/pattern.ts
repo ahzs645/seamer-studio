@@ -75,9 +75,6 @@ function syncEditorState(): void {
   undoLabelValue.set(activeEditor.undoLabel);
   redoLabelValue.set(activeEditor.redoLabel);
   historyLabelsValue.set([...activeEditor.historyLabels]);
-  selectedPointIdsValue.set(new Set(activeEditor.selection.get('point')));
-  selectedPathIdsValue.set(new Set(activeEditor.selection.get('path')));
-  selectedPieceIdsValue.set(new Set(activeEditor.selection.get('piece')));
 }
 
 function connectEditor(): void {
@@ -197,29 +194,6 @@ export const selectedTool = writable<string>('select');
 export const zoom = writable<number>(1);
 
 export const panOffset = writable<{ x: number; y: number }>({ x: 0, y: 0 });
-
-const selectedPointIdsValue = writable<Set<string>>(new Set());
-const selectedPathIdsValue = writable<Set<string>>(new Set());
-const selectedPieceIdsValue = writable<Set<string>>(new Set());
-
-function selectionStore(
-  kind: 'point' | 'path' | 'piece',
-  value: Writable<Set<string>>
-): Writable<Set<string>> {
-  const setIds = (ids: Set<string>): void => {
-    activeEditor.setSelection(activeEditor.selection.replace(kind, ids));
-  };
-  return {
-    subscribe: value.subscribe,
-    set: setIds,
-    update: (fn) => setIds(fn(new Set(activeEditor.selection.get(kind))))
-  };
-}
-
-/** Compatibility views; Atelier's single immutable Selection is the canonical state. */
-export const selectedPointIds = selectionStore('point', selectedPointIdsValue);
-export const selectedPathIds = selectionStore('path', selectedPathIdsValue);
-export const selectedPieceIds = selectionStore('piece', selectedPieceIdsValue);
 
 export const showGrid = writable<boolean>(true);
 

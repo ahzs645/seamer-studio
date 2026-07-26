@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
+  import type { Editor } from '@atelier/core';
+  import { editorState } from '@atelier/svelte';
   import {
     layerDashPattern,
     layerStrokeColor,
@@ -16,7 +18,7 @@
   import DrawingTools from '$lib/components/DrawingTools.svelte';
   import ContextMenu, { type MenuItem } from '$lib/components/ContextMenu.svelte';
   import { toast } from '$lib/stores/toast';
-  import { selectedTool, zoom, panOffset, selectedPointIds, selectedPathIds, selectedPieceIds, selectedSeamId, seamTool, pathPickRequest, cursorMm, interactionMode, frozenSnapshotOpacity, pendingPaste, type PendingPaste } from '$lib/stores/pattern';
+  import { selectedTool, zoom, panOffset, selectedSeamId, seamTool, pathPickRequest, cursorMm, interactionMode, frozenSnapshotOpacity, pendingPaste, type PendingPaste } from '$lib/stores/pattern';
   import { EMPTY_SEAM_TOOL, applySeamPick, advanceSeamToolPhase, samePick, type SeamPick } from '$lib/utils/seamTool';
   import {
     indexPoints,
@@ -53,10 +55,19 @@
 
   interface Props {
     currentPattern: Pattern;
+    editor: Editor<Pattern>;
     onchange: (p: Pattern, label?: string) => void;
   }
 
-  let { currentPattern, onchange }: Props = $props();
+  let { currentPattern, editor, onchange }: Props = $props();
+  // svelte-ignore state_referenced_locally -- parent keys this component by Editor identity
+  const editorView = editorState(editor);
+  const pointIds = $derived(editorView.selection.get('point'));
+  const pathIds = $derived(editorView.selection.get('path'));
+  const pieceIds = $derived(editorView.selection.get('piece'));
+  const setPointIds = (ids: Iterable<string>) => editor.setSelection(editor.selection.replace('point', ids));
+  const setPathIds = (ids: Iterable<string>) => editor.setSelection(editor.selection.replace('path', ids));
+  const setPieceIds = (ids: Iterable<string>) => editor.setSelection(editor.selection.replace('piece', ids));
 
   let canvasEl: HTMLCanvasElement;
   let ctx: CanvasRenderingContext2D | null = $state(null);
@@ -464,12 +475,12 @@
     points: ReturnType<typeof indexPoints>
   ) {
     // the selected edge = the (selected) piece's path matching the single selected ConstrainablePath
-    if ($selectedPathIds.size !== 1) return;
-    const pathId = [...$selectedPathIds][0];
+    if (pathIds.size !== 1) return;
+    const pathId = [...pathIds][0];
     let owner: { piece: Piece; pp: import('@seamer/pattern-model').PiecePath } | null = null;
     for (const piece of currentPattern.pieces) {
       if (piece.hidden) continue;
-      if ($selectedPieceIds.size > 0 && !$selectedPieceIds.has(piece.id)) continue;
+      if (pieceIds.size > 0 && !pieceIds.has(piece.id)) continue;
       const pp = [...piece.mainPaths, ...piece.internalPaths].find((x) => x.path === pathId);
       if (pp) { owner = { piece, pp }; break; }
     }
@@ -563,10 +574,6 @@
     if (canvasEl.parentElement) observer.observe(canvasEl.parentElement);
     const unsubZoom = zoom.subscribe((v) => { currentZoom = v; render(); });
     const unsubPan = panOffset.subscribe((v) => { currentPanX = v.x; currentPanY = v.y; render(); });
-    // re-render when selection changes (e.g. driven from the 3D view)
-    const unsubSelPc = selectedPieceIds.subscribe(() => render());
-    const unsubSelPt = selectedPointIds.subscribe(() => render());
-    const unsubSelPath = selectedPathIds.subscribe(() => render());
     const unsubTool = selectedTool.subscribe(() => render());
     const unsubSelSeam = selectedSeamId.subscribe(() => render());
     // mirror the shared seam-tool selection (2D + 3D picks) into the render locals
@@ -600,7 +607,13 @@
     isDark = isDarkTheme();
     const unsubTheme = onThemeChange(() => { isDark = isDarkTheme(); render(); });
     render();
-    return () => { observer.disconnect(); unsubZoom(); unsubPan(); unsubSelPc(); unsubSelPt(); unsubSelPath(); unsubTool(); unsubSelSeam(); unsubSeamTool(); unsubTheme(); window.removeEventListener('keydown', onKey); };
+    return () => { observer.disconnect(); unsubZoom(); unsubPan(); unsubTool(); unsubSelSeam(); unsubSeamTool(); unsubTheme(); window.removeEventListener('keydown', onKey); };
+  });
+
+  // Repaint when immutable Editor selection identity changes, including picks driven by the 3D view.
+  $effect(() => {
+    void editorView.selection;
+    untrack(() => render());
   });
 
   let lastFitKey = '';
@@ -677,13 +690,13 @@
    * or null. Tested in canvas pixels since the handles are drawn at a fixed pixel radius.
    */
   function hitTestHandle(cx: number, cy: number, px = 9): { pathId: string; pointId: string; which: 'v1' | 'v2'; invert: (w: Vec2) => Vec2; anchor: Vec2 } | null {
-    if ($selectedPathIds.size !== 1) return null;
-    const pathId = [...$selectedPathIds][0];
+    if (pathIds.size !== 1) return null;
+    const pathId = [...pathIds][0];
     const points = indexPoints(currentPattern);
     let owner: { piece: Piece; pp: import('@seamer/pattern-model').PiecePath } | null = null;
     for (const piece of currentPattern.pieces) {
       if (piece.hidden) continue;
-      if ($selectedPieceIds.size > 0 && !$selectedPieceIds.has(piece.id)) continue;
+      if (pieceIds.size > 0 && !pieceIds.has(piece.id)) continue;
       const pp = [...piece.mainPaths, ...piece.internalPaths].find((x) => x.path === pathId);
       if (pp) { owner = { piece, pp }; break; }
     }
@@ -814,7 +827,7 @@
 
     for (const piece of currentPattern.pieces) {
       if (piece.hidden || !layerVisible(piece.layerId)) continue; // hidden piece or hidden layer
-      const isSelected = $selectedPieceIds.has(piece.id);
+      const isSelected = pieceIds.has(piece.id);
       const outline = pieceWorldOutline(currentPattern, piece, paths, points, 4);
       if (outline.length < 2) continue;
 
@@ -1033,7 +1046,7 @@
     const selSeam = $selectedSeamId;
     if (showSeams || isSeamToolActive() || selSeam) {
       const onlySelected = !showSeams && !isSeamToolActive();
-      const sel = $selectedPieceIds;
+      const sel = pieceIds;
       for (const sg of allSeamGeometry(currentPattern, paths, points, 4)) {
         if (onlySelected && sg.id !== selSeam) continue;
         const isSel = sg.id === selSeam;
@@ -1074,7 +1087,7 @@
     if (showConstruction) {
       for (const path of currentPattern.paths) {
         if (usedPaths.has(path.id) || !layerVisible(path.layerId)) continue;
-        const isSelected = $selectedPathIds.has(path.id);
+        const isSelected = pathIds.has(path.id);
         const st = (layerOf(path.layerId)?.style ?? null) as LayerStyle | null;
         c.save();
         c.globalAlpha = st?.opacity ?? 1;
@@ -1088,7 +1101,7 @@
     }
 
     if (baseScale() > 0.12) {
-      const selPieces = $selectedPieceIds;
+      const selPieces = pieceIds;
       const showLabels = baseScale() > 0.18;
       for (const pp of placedPoints(currentPattern, points)) {
         if (!layerVisible(points.get(pp.pointId)?.layerId)) continue;
@@ -1097,7 +1110,7 @@
         const pt = pp.world;
         const cp = toCanvas(pt);
         const isHovered = hoveredPointId === pp.pointId;
-        const isSelected = $selectedPointIds.has(pp.pointId);
+        const isSelected = pointIds.has(pp.pointId);
         const onSelPiece = pp.pieceId !== '' && selPieces.has(pp.pieceId);
         const r = isHovered ? POINT_RADIUS + 2 : isSelected ? POINT_RADIUS + 1 : POINT_RADIUS;
         c.beginPath();
@@ -1307,13 +1320,13 @@
     clone.origin = { ...piece.origin, id: uid('Point') };
     for (const pp of [...clone.mainPaths, ...clone.internalPaths]) pp.id = uid('PiecePath');
     mutatePieces((ps) => [...ps, clone]);
-    selectedPieceIds.set(new Set([clone.id]));
+    setPieceIds([clone.id]);
     toast(`Duplicated "${piece.name}"`, 'success');
   }
   function deletePiece(piece: Piece) {
     // cascade: also drop seams that sewed this piece's edges
     onchange(deletePieceCascade(currentPattern, piece.id));
-    selectedPieceIds.set(new Set());
+    setPieceIds([]);
     toast(`Deleted "${piece.name}"`);
   }
   function togglePieceHidden(piece: Piece) {
@@ -1373,7 +1386,7 @@
 
   /** Mirror the selected points across their centroid (horizontal or vertical axis). */
   function flipSelectedPoints(axis: 'h' | 'v') {
-    const ids = $selectedPointIds; if (ids.size === 0) return;
+    const ids = pointIds; if (ids.size === 0) return;
     const sel = currentPattern.points.filter((p) => ids.has(p.id));
     const cx = sel.reduce((s, p) => s + p.x, 0) / sel.length, cy = sel.reduce((s, p) => s + p.y, 0) / sel.length;
     const points = currentPattern.points.map((p) =>
@@ -1414,7 +1427,7 @@
 
   /** Rotate the selected construction points around their centre (degrees). */
   function rotateSelectedPoints(deg: number) {
-    const ids = $selectedPointIds; if (ids.size === 0) return;
+    const ids = pointIds; if (ids.size === 0) return;
     const sel = currentPattern.points.filter((p) => ids.has(p.id));
     const cx = sel.reduce((s, p) => s + p.x, 0) / sel.length, cy = sel.reduce((s, p) => s + p.y, 0) / sel.length;
     const r = (deg * Math.PI) / 180, cos = Math.cos(r), sin = Math.sin(r);
@@ -1429,7 +1442,7 @@
 
   /** Scale the selected construction points around their centre (percent). */
   function scaleSelectedPoints(pct: number) {
-    const ids = $selectedPointIds; if (ids.size === 0) return;
+    const ids = pointIds; if (ids.size === 0) return;
     const sel = currentPattern.points.filter((p) => ids.has(p.id));
     const cx = sel.reduce((s, p) => s + p.x, 0) / sel.length, cy = sel.reduce((s, p) => s + p.y, 0) / sel.length;
     const f = pct / 100;
@@ -1490,9 +1503,9 @@
     // right-click a point → point ops (incl. rotate/scale a multi-selection)
     const ptHit = hitTestPlaced(pos.x, pos.y);
     if (ptHit) {
-      if (!$selectedPointIds.has(ptHit.pointId)) { selectedPointIds.set(new Set([ptHit.pointId])); selectedPieceIds.set(new Set()); selectedPathIds.set(new Set()); }
+      if (!pointIds.has(ptHit.pointId)) { setPointIds([ptHit.pointId]); setPieceIds([]); setPathIds([]); }
       render();
-      const n = $selectedPointIds.size;
+      const n = pointIds.size;
       const items: MenuItem[] = [];
       if (n > 1) {
         items.push({ label: `Rotate ${n} points…`, icon: 'rotate_right', onClick: () => { const d = prompt('Degrees to rotate selected points:', '90'); if (d) rotateSelectedPoints(parseFloat(d) || 0); } });
@@ -1522,9 +1535,9 @@
         }
       }
       items.push({ label: `Delete point${n > 1 ? 's' : ''}`, icon: 'delete', danger: true, sep: items.length > 0, onClick: () => {
-        const ids = $selectedPointIds;
+        const ids = pointIds;
         onchange({ ...currentPattern, points: currentPattern.points.filter((p) => !ids.has(p.id)), hasChanged: true });
-        selectedPointIds.set(new Set()); toast('Deleted points');
+        setPointIds([]); toast('Deleted points');
       } });
       contextMenu = { x: e.clientX, y: e.clientY, items };
       return;
@@ -1536,7 +1549,7 @@
       const owner = pieceOwnerOf(edgePP);
       const path = owner ? indexPaths(currentPattern).get(owner.pp.path) : null;
       if (owner && path) {
-        selectedPieceIds.set(new Set([owner.piece.id])); selectedPathIds.set(new Set([path.id])); selectedPointIds.set(new Set());
+        setPieceIds([owner.piece.id]); setPathIds([path.id]); setPointIds([]);
         render();
         const isCurve = path.pathType === 'curve';
         const world = toPattern(pos.x, pos.y);
@@ -1558,9 +1571,9 @@
 
     const piece = pieceAt(pos);
     if (!piece) { contextMenu = null; return; }
-    selectedPieceIds.set(new Set([piece.id]));
-    selectedPointIds.set(new Set());
-    selectedPathIds.set(new Set());
+    setPieceIds([piece.id]);
+    setPointIds([]);
+    setPathIds([]);
     render();
     contextMenu = {
       x: e.clientX, y: e.clientY,
@@ -1762,7 +1775,7 @@
     if (tool === 'internal') {
       // Attach the drafted polyline to the selected piece as an internal path (dart / fold line).
       if (penDraft.length < 2) { cancelDraft(); return; }
-      const pieceId = [...$selectedPieceIds][0];
+      const pieceId = [...pieceIds][0];
       const piece = pieceId ? currentPattern.pieces.find((p) => p.id === pieceId) : null;
       if (!piece || !draftPathId) { toast('Select a piece first, then draw the internal path', 'error'); cancelDraft(); return; }
       const from = penDraft[0], to = penDraft[penDraft.length - 1];
@@ -1841,7 +1854,7 @@
       }
     };
     onchange({ ...p, paths: [...p.paths, ...newPaths], pieces: [...p.pieces, piece], hasChanged: true }, 'Trace piece');
-    selectedPieceIds.set(new Set([piece.id]));
+    setPieceIds([piece.id]);
     toast(`Traced "${piece.name}" (${ids.length} points)`, 'success');
     selectedTool.set('select');
     render();
@@ -1922,7 +1935,7 @@
       case 'point': return 'Click to add a point';
       case 'pen': return penDraft.length ? 'Click to add points · Enter to finish · Esc to cancel' : 'Click to start a path';
       case 'piece': return penDraft.length ? 'Click points to outline the piece · click the first point to close' : 'Click points to outline a new piece';
-      case 'internal': return $selectedPieceIds.size !== 1 ? 'Select one piece first, then draw a dart / fold line' : penDraft.length ? 'Click to add points · Enter to attach to the piece · Esc to cancel' : 'Click to start an internal path in the selected piece';
+      case 'internal': return pieceIds.size !== 1 ? 'Select one piece first, then draw a dart / fold line' : penDraft.length ? 'Click to add points · Enter to attach to the piece · Esc to cancel' : 'Click to start an internal path in the selected piece';
       case 'seam': case 'seam-single': return seamFromPicks.length
         ? 'Click the matching edge to sew it (near the end where the seam starts)'
         : 'Click an edge to start a seam — click near the end where the seam starts';
@@ -2526,8 +2539,8 @@
 
   /** Canvas-space gizmo geometry for the current multi-point selection (null = no gizmo). */
   function selectionGizmo(): { min: Vec2; max: Vec2; rotate: Vec2; scale: Vec2 } | null {
-    if ($selectedTool !== 'select' || $selectedPointIds.size < 2) return null;
-    const sel = $selectedPointIds;
+    if ($selectedTool !== 'select' || pointIds.size < 2) return null;
+    const sel = pointIds;
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     let n = 0;
     for (const pp of placedPoints(currentPattern)) {
@@ -2551,7 +2564,7 @@
     const kind = near(g.rotate) ? 'rotate' : near(g.scale) ? 'scale' : null;
     if (!kind) return false;
     const orig = currentPattern.points
-      .filter((q) => $selectedPointIds.has(q.id))
+      .filter((q) => pointIds.has(q.id))
       .map((q) => ({ id: q.id, x: q.x, y: q.y }));
     const center = {
       x: orig.reduce((s, q) => s + q.x, 0) / orig.length,
@@ -2640,7 +2653,7 @@
         return c;
       });
       onchange({ ...p, pieces: [...p.pieces, ...clones], hasChanged: true }, 'Paste');
-      selectedPieceIds.set(new Set(clones.map((c) => c.id)));
+      setPieceIds(clones.map((c) => c.id));
     } else if (pp.kind === 'paths') {
       // Plain paste REUSES surviving anchor points (a referencing copy that follows them);
       // "Paste as copy" duplicates the points so the new path is fully independent.
@@ -2662,7 +2675,7 @@
         newPaths.push(path);
       }
       onchange({ ...p, points: [...p.points, ...newPoints], paths: [...p.paths, ...newPaths], hasChanged: true }, 'Paste');
-      selectedPathIds.set(new Set(newPaths.map((q) => q.id)));
+      setPathIds(newPaths.map((q) => q.id));
     } else {
       const prefix = p.pointPrefix || 'A';
       let n = p.points.length;
@@ -2670,7 +2683,7 @@
       const nextName = () => { while (names.has(`${prefix}${n}`)) n++; const nm = `${prefix}${n}`; names.add(nm); return nm; };
       const clones = pp.items.map((src) => ({ ...structuredClone(src), id: uid('ConstrainablePoint'), name: nextName(), x: src.x + dx, y: src.y + dy }));
       onchange({ ...p, points: [...p.points, ...clones], hasChanged: true }, 'Paste');
-      selectedPointIds.set(new Set(clones.map((c) => c.id)));
+      setPointIds(clones.map((c) => c.id));
     }
     pendingPaste.set(null);
     toast(`Pasted ${pp.items.length === 1 ? '1 item' : `${pp.items.length} items`}`, 'success');
@@ -2886,16 +2899,16 @@
 
     const hit = hitTestPlaced(pos.x, pos.y);
     if (hit) {
-      const cur = new Set($selectedPointIds);
+      const cur = new Set(pointIds);
       const wasSelected = cur.has(hit.pointId);
       if (e.shiftKey) {
         // shift-click toggles the point in the selection
         if (cur.has(hit.pointId)) cur.delete(hit.pointId); else cur.add(hit.pointId);
-        selectedPointIds.set(cur);
+        setPointIds(cur);
       } else if (!wasSelected) {
-        selectedPointIds.set(new Set([hit.pointId]));
-        selectedPathIds.set(new Set());
-        selectedPieceIds.set(new Set());
+        setPointIds([hit.pointId]);
+        setPathIds([]);
+        setPieceIds([]);
       }
       // Safe (select first) mode: a drag starting on an unselected point only selects it —
       // moving requires starting the drag on an already-selected point.
@@ -2907,7 +2920,7 @@
       dragDraftStart = hit.invert(toPattern(pos.x, pos.y));
       const origPt = currentPattern.points.find((q) => q.id === hit.pointId);
       dragOrigDraft = origPt ? { x: origPt.x, y: origPt.y } : null;
-      const sel = $selectedPointIds;
+      const sel = pointIds;
       multiDrag = sel.size > 1
         ? currentPattern.points.filter((p) => sel.has(p.id)).map((p) => ({ id: p.id, x: p.x, y: p.y }))
         : null;
@@ -2919,9 +2932,9 @@
       if (edgePP) {
         const owner = pieceOwnerOf(edgePP);
         if (owner) {
-          selectedPieceIds.set(new Set([owner.piece.id]));
-          selectedPathIds.set(new Set([owner.pp.path]));
-          selectedPointIds.set(new Set());
+          setPieceIds([owner.piece.id]);
+          setPathIds([owner.pp.path]);
+          setPointIds([]);
           render();
           return;
         }
@@ -2935,15 +2948,15 @@
         if (pointInPolygon(pat, pieceWorldOutline(currentPattern, piece, paths, points, 6))) { hitPiece = piece.id; break; }
       }
       if (hitPiece) {
-        selectedPointIds.set(new Set());
-        selectedPathIds.set(new Set());
-        selectedPieceIds.set(new Set([hitPiece]));
+        setPointIds([]);
+        setPathIds([]);
+        setPieceIds([hitPiece]);
       } else {
         // empty space → start a marquee (rubber-band) selection
         isMarquee = true;
         marqueeStart = { ...pos };
         marqueeCur = { ...pos };
-        if (!e.shiftKey) { selectedPointIds.set(new Set()); selectedPathIds.set(new Set()); selectedPieceIds.set(new Set()); }
+        if (!e.shiftKey) { setPointIds([]); setPathIds([]); setPieceIds([]); }
       }
     }
     render();
@@ -3054,13 +3067,13 @@
       const x0 = Math.min(marqueeStart.x, marqueeCur.x), x1 = Math.max(marqueeStart.x, marqueeCur.x);
       const y0 = Math.min(marqueeStart.y, marqueeCur.y), y1 = Math.max(marqueeStart.y, marqueeCur.y);
       if (x1 - x0 > 3 || y1 - y0 > 3) {
-        const sel = new Set($selectedPointIds); // shift-drag adds to the existing selection
+        const sel = new Set(pointIds); // shift-drag adds to the existing selection
         for (const pp of placedPoints(currentPattern)) {
           const cp = toCanvas(pp.world);
           if (cp.x >= x0 && cp.x <= x1 && cp.y >= y0 && cp.y <= y1) sel.add(pp.pointId);
         }
-        selectedPointIds.set(sel);
-        if (sel.size) { selectedPieceIds.set(new Set()); selectedPathIds.set(new Set()); }
+        setPointIds(sel);
+        if (sel.size) { setPieceIds([]); setPathIds([]); }
       }
       isMarquee = false;
     }
@@ -3306,7 +3319,7 @@
   </div>
 {/if}
 
-<DrawingTools />
+<DrawingTools {editor} />
 
 {#if toolStatus}
   <!-- active-tool status bar (matches the source's "Click to place text" popup) -->

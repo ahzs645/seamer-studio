@@ -54,26 +54,10 @@ Atelier viewport do not create separate runtime instances.
 Explicit migration gaps, not completed features. Verified against the code on
 2026-07-26 — earlier revisions of this list overstated what remained.
 
-**Selection compatibility layer.** Eight files still read the
-`selectedPointIds` / `selectedPathIds` / `selectedPieceIds` compatibility
-stores rather than `@atelier/core`'s single immutable `Selection`
-(`EditorState.selection` has zero direct consumers today):
-`components/{StatusBar,PropertyPanel,DrawingTools,ErrorsPanel,PatternCanvas2D,ObjectBrowser,StudioToolbar}.svelte`
-and `routes/studio/[...slug]/+page.svelte`. The stores already write through to
-the canonical `Selection`, so this is cleanup, not a correctness bug.
-
 **2D canvas.** `components/PatternCanvas2D.svelte` (3317 LOC) remains a
 hand-rolled `CanvasRenderingContext2D` renderer. Porting it to the engine's
 `projection: '2d'` is MIGRATION.md Phase 6 and is **explicitly out of scope and
 not recommended** — it buys architectural consistency, not capability.
-
-**Geometry duplication.** `utils/markerLayout.ts` (531 LOC) and
-`utils/nestCore.ts` (492 LOC) still hold packing logic that overlaps
-`@atelier/geometry`'s `nest()`. Most of `markerLayout.ts` is legitimately
-Pattern-specific; only the packing core is engine work.
-
-**glTF export has no UI.** `sceneToGLTF` is wired but no Studio action exposes
-it.
 
 **Unverifiable headlessly.** WebGPU cloth drape (wired via `SolverRunner`, GPU
 execution and visual parity unconfirmed) and the Playwright suite under
@@ -84,6 +68,12 @@ execution and visual parity unconfirmed) and the Playwright suite under
 
 ### Completed since the first port
 
+- Selection UI reads `EditorState.selection` directly; the three compatibility
+  stores and `selectionStore()` are gone.
+- True-shape packing delegates to `@atelier/geometry.nest()` while
+  Pattern-specific cut-instance, marker, fabric, and label handling remains
+  app-side.
+- The 3D export rail exposes the live draped scene as glTF.
 - 3D scene migrated onto `Viewport` / `CameraRig` / `PickService` /
   `OverlayLayer` / `GizmoService`; `scene3d.ts` 2570 → 1941 LOC.
 - AO now injected through the engine's `aoPassFactory`, keeping the real

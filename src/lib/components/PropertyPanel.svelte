@@ -16,7 +16,9 @@
     type Notch,
     type NotchType
   } from '@seamer/pattern-model';
-  import { selectedPointIds, selectedPathIds, selectedPieceIds, panelRequest, pathPickRequest } from '$lib/stores/pattern';
+  import type { Editor } from '@atelier/core';
+  import { editorState } from '@atelier/svelte';
+  import { panelRequest, pathPickRequest } from '$lib/stores/pattern';
   import FormulaDialog from '$lib/components/FormulaDialog.svelte';
   import { toastSuccess, toastError } from '$lib/stores/toast';
   import {
@@ -29,6 +31,7 @@
 
   interface Props {
     currentPattern: Pattern;
+    editor: Editor<Pattern>;
     onchange: (p: Pattern, label?: string) => void;
     onclose?: () => void;
     labelDisplay?: 'off' | 'billboard' | 'flat';
@@ -37,26 +40,31 @@
     onalterations?: () => void;
   }
 
-  let { currentPattern, onchange, onclose, labelDisplay = 'flat', onlabeldisplaychange, ongrading, onalterations }: Props = $props();
+  let { currentPattern, editor, onchange, onclose, labelDisplay = 'flat', onlabeldisplaychange, ongrading, onalterations }: Props = $props();
 
+  // svelte-ignore state_referenced_locally -- parent keys this component by Editor identity
+  const editorView = editorState(editor);
+  const pointIds = $derived(editorView.selection.get('point'));
+  const pathIds = $derived(editorView.selection.get('path'));
+  const pieceIds = $derived(editorView.selection.get('piece'));
   const editingPoint = $derived<ConstrainablePoint | null>(
-    $selectedPointIds.size === 1 ? currentPattern.points.find((p) => p.id === [...$selectedPointIds][0]) ?? null : null
+    pointIds.size === 1 ? currentPattern.points.find((p) => p.id === [...pointIds][0]) ?? null : null
   );
   const editingPiece = $derived<Piece | null>(
-    $selectedPieceIds.size === 1 ? currentPattern.pieces.find((p) => p.id === [...$selectedPieceIds][0]) ?? null : null
+    pieceIds.size === 1 ? currentPattern.pieces.find((p) => p.id === [...pieceIds][0]) ?? null : null
   );
 
   // A single selected boundary edge (its ConstrainablePath + two endpoints). Clicking a line in the
   // 2D view selects it; this lets you retype the edge's length/angle (moves the `to` point in
   // drafting space so the edge takes the requested length/angle relative to `from`).
   const editingEdge = $derived.by<{ path: ConstrainablePath; from: ConstrainablePoint; to: ConstrainablePoint } | null>(() => {
-    if ($selectedPathIds.size !== 1) return null;
-    const pathId = [...$selectedPathIds][0];
+    if (pathIds.size !== 1) return null;
+    const pathId = [...pathIds][0];
     const path = currentPattern.paths.find((p) => p.id === pathId);
     if (!path) return null;
     const byId = (id: string) => currentPattern.points.find((q) => q.id === id) ?? null;
     for (const piece of currentPattern.pieces) {
-      if ($selectedPieceIds.size > 0 && !$selectedPieceIds.has(piece.id)) continue;
+      if (pieceIds.size > 0 && !pieceIds.has(piece.id)) continue;
       const pp = [...piece.mainPaths, ...piece.internalPaths].find((x) => x.path === pathId);
       if (pp) { const from = byId(pp.from), to = byId(pp.to); if (from && to) return { path, from, to }; }
     }
@@ -89,8 +97,8 @@
 
   // ---- Parametric arc (selected path carrying ArcParams from the arc/circle tools) ----------------
   const editingArc = $derived.by<ConstrainablePath | null>(() => {
-    if ($selectedPathIds.size !== 1) return null;
-    const path = currentPattern.paths.find((p) => p.id === [...$selectedPathIds][0]);
+    if (pathIds.size !== 1) return null;
+    const path = currentPattern.paths.find((p) => p.id === [...pathIds][0]);
     return path?.arc ? path : null;
   });
   const rad2deg = (r: number) => (r * 180) / Math.PI;
@@ -224,7 +232,7 @@
     updatePiece((p) => ({ ...p, settings3d: { ...p.settings3d, arrangement: { ...p.settings3d.arrangement, [field]: value } } }));
   }
   function selectPath(pp: PiecePath) {
-    selectedPathIds.set(new Set([pp.path]));
+    editor.setSelection(editor.selection.replace('path', [pp.path]));
   }
   function removeMainPath(pp: PiecePath) {
     updatePiece((p) => ({ ...p, mainPaths: p.mainPaths.filter((x) => x.id !== pp.id) }), 'Remove edge');
@@ -949,7 +957,7 @@
                 {#each list as pp}
                   {@const notchCount = pp.notches?.length ?? 0}
                   <div class="rounded-md border my-0.5"
-                    class:border-accent={$selectedPathIds.has(pp.path)} class:border-base-200={!$selectedPathIds.has(pp.path)}>
+                    class:border-accent={pathIds.has(pp.path)} class:border-base-200={!pathIds.has(pp.path)}>
                     <div class="flex items-center px-2 py-1 gap-1">
                       <button class="font-bold text-sm cursor-pointer hover:text-accent text-left" onclick={() => selectPath(pp)}>{pathName(pp.path)}</button>
                       <span class="mx-1 text-xs opacity-70">({pointName(pp.from)} → {pointName(pp.to)})</span>

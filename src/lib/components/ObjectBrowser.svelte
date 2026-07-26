@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { get } from 'svelte/store';
-	import { selectedPointIds, selectedPathIds, selectedPieceIds, selectedSeamId } from '$lib/stores/pattern';
+	import type { Editor } from '@atelier/core';
+	import { editorState } from '@atelier/svelte';
+	import { selectedSeamId } from '$lib/stores/pattern';
 	import type { Pattern, Seam } from '@seamer/pattern-model';
 	import { indexPiecePathOwners, seamLabel as computeSeamLabel } from '@seamer/pattern-model';
 	import {
@@ -14,12 +16,18 @@
 
 	interface Props {
 		currentPattern: Pattern;
+		editor: Editor<Pattern>;
 		onchange: (p: Pattern) => void;
 		/** Whether the panel is shown. Bindable so the parent can reopen it. */
 		open?: boolean;
 	}
 
-	let { currentPattern, onchange, open = $bindable(true) }: Props = $props();
+	let { currentPattern, editor, onchange, open = $bindable(true) }: Props = $props();
+	// svelte-ignore state_referenced_locally -- parent keys this component by Editor identity
+	const editorView = editorState(editor);
+	const pointIds = $derived(editorView.selection.get('point'));
+	const pathIds = $derived(editorView.selection.get('path'));
+	const pieceIds = $derived(editorView.selection.get('piece'));
 
 	// ---- Panel chrome (drag + minimize) -------------------------------------
 	let pos = $state({ x: 524, y: 69 });
@@ -70,23 +78,17 @@
 	let seams = $derived(currentPattern.seams.filter((s) => hit(seamLabel(s))));
 	let texts = $derived(currentPattern.texts.filter((t) => hit(textLabel(t))));
 
-	// ---- Selection (drives the canvas via the shared stores) ----------------
+	// ---- Selection (drives the canvas through the shared Editor) ------------
 	function selectPoint(id: string) {
-		selectedPointIds.set(new Set([id]));
-		selectedPathIds.set(new Set());
-		selectedPieceIds.set(new Set());
+		editor.setSelection(editor.selection.replace('point', [id]).clear('path').clear('piece'));
 		selectedKey = id;
 	}
 	function selectPath(id: string) {
-		selectedPathIds.set(new Set([id]));
-		selectedPointIds.set(new Set());
-		selectedPieceIds.set(new Set());
+		editor.setSelection(editor.selection.replace('path', [id]).clear('point').clear('piece'));
 		selectedKey = id;
 	}
 	function selectPiece(id: string) {
-		selectedPieceIds.set(new Set([id]));
-		selectedPointIds.set(new Set());
-		selectedPathIds.set(new Set());
+		editor.setSelection(editor.selection.replace('piece', [id]).clear('point').clear('path'));
 		selectedKey = id;
 	}
 	const selectOther = (id: string) => (selectedKey = id);
@@ -186,7 +188,7 @@
 									{#each paths as path (path.id)}
 										<div role="listitem" draggable="true"
 											class="select-none rounded-md px-2 py-1 transition-colors hover:bg-base-200 active:bg-base-300 flex items-center gap-2 cursor-[ns-resize]"
-											class:bg-base-200={$selectedPathIds.has(path.id)}
+											class:bg-base-200={pathIds.has(path.id)}
 											ondragstart={() => rowDragStart('paths', path.id)}
 											ondragover={(e) => e.preventDefault()}
 											ondrop={(e) => { e.preventDefault(); rowDrop('paths', path.id); }}>
@@ -234,7 +236,7 @@
 									{#each pieces as piece (piece.id)}
 										<div role="listitem" draggable="true"
 											class="select-none rounded-md px-2 py-1 transition-colors hover:bg-base-200 active:bg-base-300 flex items-center gap-2 cursor-[ns-resize]"
-											class:bg-base-200={$selectedPieceIds.has(piece.id)}
+											class:bg-base-200={pieceIds.has(piece.id)}
 											ondragstart={() => rowDragStart('pieces', piece.id)}
 											ondragover={(e) => e.preventDefault()}
 											ondrop={(e) => { e.preventDefault(); rowDrop('pieces', piece.id); }}>
@@ -286,7 +288,7 @@
 									{#each points as point (point.id)}
 										<div role="listitem" draggable="true"
 											class="select-none rounded-md px-2 py-1 transition-colors hover:bg-base-200 active:bg-base-300 flex items-center gap-2 cursor-[ns-resize]"
-											class:bg-base-200={$selectedPointIds.has(point.id)}
+											class:bg-base-200={pointIds.has(point.id)}
 											ondragstart={() => rowDragStart('points', point.id)}
 											ondragover={(e) => e.preventDefault()}
 											ondrop={(e) => { e.preventDefault(); rowDrop('points', point.id); }}>

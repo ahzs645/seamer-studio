@@ -1,10 +1,8 @@
 <script lang="ts">
-  // /test-nfp — developer playground for the no-fit-polygon nesting worker (mirrors the original
-  // studio's NFP test page). Nests a fixed set of awkward shapes with both placement strategies so
-  // the NFP improvement (pieces tucking into concavities) is visible side by side.
+  // /test-nfp — developer playground for Atelier's no-fit-polygon nesting worker.
   import { nestItemsInWorker, type NestProgress } from '$lib/utils/nestingClient';
-  import { markerToSVG, type MarkerLayout } from '$lib/utils/markerLayout';
-  import type { CoreItem, Vec2 } from '$lib/utils/nestCore';
+  import { markerToSVG, type MarkerLayout, type NestItem } from '$lib/utils/markerLayout';
+  import type { Vec2 } from '@seamer/pattern-model';
 
   const poly = (pts: [number, number][]): Vec2[] => pts.map(([x, y]) => ({ x, y }));
   const area = (p: Vec2[]) => {
@@ -12,10 +10,10 @@
     for (let i = 0; i < p.length; i++) { const u = p[i], v = p[(i + 1) % p.length]; a += u.x * v.y - v.x * u.y; }
     return Math.abs(a) / 2;
   };
-  const item = (id: string, p: Vec2[]): CoreItem => ({ pieceId: id, name: id, cut: p, outline: p, instanceId: id, area: area(p) });
+  const item = (id: string, p: Vec2[]): NestItem => ({ pieceId: id, name: id, cut: p, outline: p, instanceId: id, area: area(p) });
 
   // Awkward test shapes (mm): two Ls, a T, a triangle, a notch plate and filler squares.
-  const SHAPES: CoreItem[] = [
+  const SHAPES: NestItem[] = [
     item('L-large', poly([[0, 0], [120, 0], [120, 120], [240, 120], [240, 240], [0, 240]])),
     item('L-small', poly([[0, 0], [80, 0], [80, 80], [160, 80], [160, 160], [0, 160]])),
     item('T-shape', poly([[0, 0], [210, 0], [210, 60], [140, 60], [140, 180], [70, 180], [70, 60], [0, 60]])),
@@ -29,21 +27,19 @@
 
   let fabricWidthMm = $state(500);
   let gapMm = $state(6);
-  let generations = $state(8);
-
   interface RunState { layout: MarkerLayout | null; progress: NestProgress | null; busy: boolean; ms: number }
-  let nfp = $state<RunState>({ layout: null, progress: null, busy: false, ms: 0 });
-  let corners = $state<RunState>({ layout: null, progress: null, busy: false, ms: 0 });
+  let fixed = $state<RunState>({ layout: null, progress: null, busy: false, ms: 0 });
+  let rotated = $state<RunState>({ layout: null, progress: null, busy: false, ms: 0 });
 
   async function run() {
-    for (const [strategy, slot] of [['nfp', nfp], ['corners', corners]] as const) {
+    for (const [rotations, slot] of [[[0], fixed], [[0, 90, 180, 270], rotated]] as const) {
       slot.busy = true;
       slot.layout = null;
       const t0 = performance.now();
       try {
         const job = nestItemsInWorker(
           SHAPES,
-          { fabricWidthMm, gapMm, allowedRotations: [0, 90, 180, 270], generations, strategy },
+          { fabricWidthMm, gapMm, allowedRotations: [...rotations] },
           (p) => (slot.progress = p)
         );
         slot.layout = await job.promise;
@@ -69,8 +65,7 @@
   <h1 class="text-3xl font-bold font-lexend mb-2">NFP nesting test</h1>
   <p class="mb-6 opacity-70">
     Developer playground for the no-fit-polygon nesting worker. The same shapes are nested with the
-    NFP vertex-contact strategy and the legacy bounding-box-corner strategy — NFP should tuck pieces
-    into the concavities and produce a shorter marker.
+    Atelier's NFP nester packs the same awkward shapes with fixed and quarter-turn rotations.
   </p>
 
   <div class="flex flex-wrap items-end gap-3 mb-6">
@@ -78,16 +73,14 @@
       <input type="number" min="200" step="10" class="input input-bordered input-sm w-32" bind:value={fabricWidthMm} /></label>
     <label class="flex flex-col gap-1 text-sm">Gap (mm)
       <input type="number" min="0" step="1" class="input input-bordered input-sm w-24" bind:value={gapMm} /></label>
-    <label class="flex flex-col gap-1 text-sm">Generations: {generations}
-      <input type="range" min="0" max="30" step="1" class="range range-xs w-44" bind:value={generations} /></label>
-    <button class="btn btn-primary btn-sm" onclick={run} disabled={nfp.busy || corners.busy}>
-      {#if nfp.busy || corners.busy}<span class="loading loading-spinner loading-xs"></span>{/if}
-      Run both strategies
+    <button class="btn btn-primary btn-sm" onclick={run} disabled={fixed.busy || rotated.busy}>
+      {#if fixed.busy || rotated.busy}<span class="loading loading-spinner loading-xs"></span>{/if}
+      Run both rotation sets
     </button>
   </div>
 
   <div class="grid md:grid-cols-2 gap-6">
-    {#each [{ title: 'NFP (vertex contacts)', s: nfp }, { title: 'Bounding-box corners', s: corners }] as col}
+    {#each [{ title: 'Fixed grain (0°)', s: fixed }, { title: 'Quarter turns', s: rotated }] as col}
       <div>
         <div class="flex items-baseline justify-between mb-2">
           <h2 class="text-xl font-bold">{col.title}</h2>
