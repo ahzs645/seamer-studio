@@ -51,50 +51,45 @@ Atelier viewport do not create separate runtime instances.
 
 ## Not yet ported
 
-These are explicit migration gaps, not completed features:
+Explicit migration gaps, not completed features. Verified against the code on
+2026-07-26 — earlier revisions of this list overstated what remained.
 
-- Thin Atelier viewport orchestration is partial. The existing
-  `seamer/src/lib/scene/scene3d.ts` `PatternRenderer` is still the main
-  renderer. It consumes the extracted avatar/cloth packages, engine
-  `createSurfaceMaterial`, r181 addon APIs, and `SolverRunner`, but it has not
-  yet been decomposed onto `Viewport`, `CameraRig`, `LightingRig`, `PostFX`,
-  `PickService`, `OverlayLayer`, and `GizmoService`.
-- The incremental viewport migration still uses Seamer's N8AO composer chain
-  from `seamer/src/lib/scene/scene3d.ts`. Moving the whole renderer to
-  `Viewport.post` (GTAO) and visually tuning garment/skin parity remains.
-- `PatternCanvas2D.svelte` still reads compatibility selection stores instead
-  of using `EditorState.selection` directly. Source:
-  `seamer/src/lib/components/PatternCanvas2D.svelte`. Replacing Canvas2D with
-  Atelier's 2D projection remains explicitly out of scope (migration Phase 6).
-- Most panels still read the point/path/piece compatibility selection views.
-  Direct `Selection` migration remains for
-  `seamer/src/lib/components/{StudioToolbar,ObjectBrowser,DrawingTools,StatusBar,ErrorsPanel,PropertyPanel}.svelte`.
-- The command palette and MCP adapter still retain the local compatibility
-  dispatcher while browser automation uses `Editor`. Sources:
-  `seamer/src/lib/components/CommandPalette.svelte`,
-  `seamer/src/lib/stores/mcpSession.ts`, and
-  `seamer/src/lib/commands/execute.ts`.
-- The command, creation, arc, formula, import, linked-path, symmetry, avatar,
-  and cloth-build tests have moved to the packages and run against the engine
-  registry. Broader UI interaction coverage still comes from the original
-  Playwright suite under `seamer/e2e/`, which was not copied or run because it
-  requires a development server.
-- `packages/pattern-model/src/utils/patternGeometry.ts` still includes the
-  source's domain-free helper implementations. The remaining cleanup is to
-  retain only Pattern resolvers and replace duplicated helpers with
-  `@atelier/geometry`. Source:
-  `seamer/src/lib/utils/patternGeometry.ts`.
-- SVG uses the new single `Pattern → Drawing` flattener and `@atelier/io`.
-  DXF, CSV, PDF, HPGL, PNG, print, and cut-file UI paths still use compatibility
-  implementations from `seamer/src/lib/utils/{exporters,pdf,hpgl,cutfile}.ts`;
-  migration to `@atelier/io` remains.
-- glTF is available as `sceneToGLTF` from the exporter module, but no Studio UI
-  action exposes it yet. The current 3D export UI lives in
-  `seamer/src/lib/scene/scene3d.ts` and
-  `seamer/src/routes/studio/[...slug]/+page.svelte`.
-- WebGPU cloth is wired as `clothSolverPlugin` and the live renderer uses
-  `SolverRunner`, but GPU execution and visual drape parity are unverified in
-  this headless environment.
-- The product/server surface was copied for continuity, not exhaustively
-  exercised here: `seamer/src/routes/api/**`, `seamer/src/lib/server/**`,
-  `seamer/src/hooks.server.ts`, and the marketing/docs routes.
+**Selection compatibility layer.** Eight files still read the
+`selectedPointIds` / `selectedPathIds` / `selectedPieceIds` compatibility
+stores rather than `@atelier/core`'s single immutable `Selection`
+(`EditorState.selection` has zero direct consumers today):
+`components/{StatusBar,PropertyPanel,DrawingTools,ErrorsPanel,PatternCanvas2D,ObjectBrowser,StudioToolbar}.svelte`
+and `routes/studio/[...slug]/+page.svelte`. The stores already write through to
+the canonical `Selection`, so this is cleanup, not a correctness bug.
+
+**2D canvas.** `components/PatternCanvas2D.svelte` (3317 LOC) remains a
+hand-rolled `CanvasRenderingContext2D` renderer. Porting it to the engine's
+`projection: '2d'` is MIGRATION.md Phase 6 and is **explicitly out of scope and
+not recommended** — it buys architectural consistency, not capability.
+
+**Geometry duplication.** `utils/markerLayout.ts` (531 LOC) and
+`utils/nestCore.ts` (492 LOC) still hold packing logic that overlaps
+`@atelier/geometry`'s `nest()`. Most of `markerLayout.ts` is legitimately
+Pattern-specific; only the packing core is engine work.
+
+**glTF export has no UI.** `sceneToGLTF` is wired but no Studio action exposes
+it.
+
+**Unverifiable headlessly.** WebGPU cloth drape (wired via `SolverRunner`, GPU
+execution and visual parity unconfirmed) and the Playwright suite under
+`seamer/e2e/`, which needs a dev server.
+
+**Carried for continuity, not exercised.** `routes/api/**`, `lib/server/**`,
+`hooks.server.ts`, and the marketing/docs routes.
+
+### Completed since the first port
+
+- 3D scene migrated onto `Viewport` / `CameraRig` / `PickService` /
+  `OverlayLayer` / `GizmoService`; `scene3d.ts` 2570 → 1941 LOC.
+- AO now injected through the engine's `aoPassFactory`, keeping the real
+  `N8AOPass` and all four persisted `n8ao*` document fields intact.
+- The duplicate `src/lib/commands/` layer (11 files, 2103 LOC) deleted; its
+  reducers merged into `@seamer/pattern-model`.
+- DXF, CSV, PDF, HPGL, PNG, print and cut-file paths migrated to `@atelier/io`.
+- SVG import added (`SvgImportDialog` + `fromSVG`).
+- Five commands added to match the original production registry.
