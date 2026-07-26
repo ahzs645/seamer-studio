@@ -5,8 +5,12 @@
   "type": "module",
   "packageManager": "pnpm@10.18.1",
   "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json && pnpm -r typecheck",
     "test:unit": "vitest run",
+    "test:unit:watch": "vitest",
     "lint": "eslint .",
     "dev:link": "pnpm -r --parallel typecheck --watch"
   },
@@ -31,7 +35,7 @@
     "@eslint/js": "^9.39.2",
     "@sveltejs/adapter-auto": "^3.0.0",
     "@sveltejs/kit": "^2.0.0",
-    "@sveltejs/vite-plugin-svelte": "^4.0.0",
+    "@sveltejs/vite-plugin-svelte": "^7.2.0",
     "@types/node": "^25.9.1",
     "@types/three": "0.184.1",
     "autoprefixer": "^10.4.20",
