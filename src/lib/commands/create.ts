@@ -7,7 +7,9 @@ import type {
   Pattern, ConstrainablePath, PathPoint, BezierHandle, Piece, PiecePath, PiecePoint, PropertyFormula, Seam, SeamRef, Notch,
   NotchType, Variable, Material, TextureSlot, Layer, PatternText, ArcParams, SeamCornerJoinType
 } from '@seamer/pattern-model';
-import { arcAnchors, ellipseAnchors, centerArcAngles, threePointArcAngles, type ArcAnchor, type Vec2 } from '$lib/utils/arcGeometry';
+import {
+  arcAnchors, ellipseAnchors, centerArcAngles, threePointArcAngles, type ArcAnchor, type Vec2
+} from '@seamer/pattern-model';
 
 type Uid = (prefix: string) => string;
 

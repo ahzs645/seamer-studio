@@ -2,7 +2,7 @@
 	import { get } from 'svelte/store';
 	import { selectedPointIds, selectedPathIds, selectedPieceIds, selectedSeamId } from '$lib/stores/pattern';
 	import type { Pattern, Seam } from '@seamer/pattern-model';
-	import { indexPiecePathOwners, seamLabel as computeSeamLabel } from '$lib/utils/patternGeometry';
+	import { indexPiecePathOwners, seamLabel as computeSeamLabel } from '@seamer/pattern-model';
 	import {
 		deletePath,
 		deletePoint,

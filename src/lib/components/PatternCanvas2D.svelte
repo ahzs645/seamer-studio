@@ -32,7 +32,7 @@
     pieceAllowancePolygon,
     type Vec2,
     type PlacedPoint
-  } from '$lib/utils/patternGeometry';
+  } from '@seamer/pattern-model';
   import { deletePiece as deletePieceCascade } from '$lib/utils/patternMutations';
   import * as ops from '$lib/utils/pathPointOps';
   import { breakoutPiece, type BreakoutMode } from '$lib/utils/breakout';
@@ -230,7 +230,7 @@
   async function loadHpgl(e: Event) {
     const file = (e.currentTarget as HTMLInputElement).files?.[0];
     if (!file) return;
-    const { parseHPGL } = await import('$lib/utils/hpgl');
+    const { parseHPGL } = await import('@atelier/io');
     hpglPolys = parseHPGL(await file.text());
     render();
   }

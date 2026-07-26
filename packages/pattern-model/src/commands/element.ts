@@ -56,6 +56,25 @@ export function elementRename(p: Pattern, id: string, name: string): Pattern {
   }
 }
 
+/** Set or clear the free-text reference label shared by resolvable pattern elements. */
+export function elementUpdateLabel(p: Pattern, id: string, label: string | null): Pattern {
+  const kind = elementKind(p, id);
+  switch (kind) {
+    case 'point':
+      return { ...p, points: p.points.map((x) => (x.id === id ? { ...x, label } : x)), hasChanged: true };
+    case 'path':
+      return { ...p, paths: p.paths.map((x) => (x.id === id ? { ...x, label } : x)), hasChanged: true };
+    case 'piece':
+      return { ...p, pieces: p.pieces.map((x) => (x.id === id ? { ...x, label } : x)), hasChanged: true };
+    case 'seam':
+      return { ...p, seams: p.seams.map((x) => (x.id === id ? { ...x, label } : x)), hasChanged: true };
+    case 'text':
+      return { ...p, texts: p.texts.map((x) => (x.id === id ? { ...x, label } : x)), hasChanged: true };
+    default:
+      return p;
+  }
+}
+
 /** Assign any layer-addressable element (point / path / piece / text) to a layer. */
 export function elementMoveToLayer(p: Pattern, id: string, layerId: string): Pattern {
   const kind = elementKind(p, id);

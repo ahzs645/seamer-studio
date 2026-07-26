@@ -12,6 +12,10 @@
 //
 // The genetic search (order crossover + rotation mutation) is shared by both strategies and reports
 // per-generation progress so a worker host can stream it to the UI.
+//
+// @atelier/geometry.nest covers the single-bin bottom-left NFP kernel, but it does not yet expose
+// this worker contract's genetic ordering, progress, seeded runs, strategy/gravity choices, or
+// multi-bin metadata. Keep this compatibility core until those behaviors exist engine-side.
 
 export interface Vec2 { x: number; y: number }
 

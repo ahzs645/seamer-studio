@@ -1,7 +1,7 @@
 import { writable, derived, type Writable } from 'svelte/store';
 import { browser } from '$app/environment';
 import type { Pattern, Piece, ConstrainablePoint, ConstrainablePath } from '@seamer/pattern-model';
-import { EMPTY_PATTERN, createPatternRegistry } from '@seamer/pattern-model';
+import { COMMAND_LIST, EMPTY_PATTERN, createPatternRegistry } from '@seamer/pattern-model';
 import {
   CommandRegistry,
   Editor,
@@ -95,6 +95,14 @@ function connectEditor(): void {
 }
 
 interface InstalledAutomation {
+  commands?: () => Array<{
+    type: string;
+    category: string;
+    summary: string;
+    inputs: string[];
+    example: Record<string, unknown> | null;
+    replayable: boolean;
+  }>;
   getContent: () => Pattern;
   getPattern?: () => Pattern;
   getSelection: () => unknown;
@@ -104,6 +112,14 @@ function patchAutomationSurface(): void {
   const target = globalThis as typeof globalThis & { seamer?: InstalledAutomation };
   const api = target.seamer;
   if (!api) return;
+  api.commands = () => COMMAND_LIST.map((command) => ({
+    type: command.type,
+    category: command.category,
+    summary: command.summary,
+    inputs: [...command.inputs],
+    example: command.example ?? null,
+    replayable: command.replayable ?? true
+  }));
   const getSelection = (): Selection => activeEditor.selection;
   api.getPattern = api.getContent;
   api.getSelection = () => ({

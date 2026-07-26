@@ -4,7 +4,7 @@
   import {
     indexPaths, indexPoints, pieceWorldOutline, pieceWorldInternalPolylines,
     pathPolyline, type Vec2
-  } from '$lib/utils/patternGeometry';
+  } from '@seamer/pattern-model';
   import { hasConstraints, solveForSize } from '@seamer/pattern-model/solver/solve';
   import { applyRulOffsetsToPattern } from '$lib/utils/rulImport';
 

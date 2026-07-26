@@ -1,7 +1,15 @@
 import { describe, it, expect } from 'vitest';
-import { buildPdf, polylinesToPDF, tilePageCount, PAGE_SIZES_MM, type MmPoly } from './pdf';
-import { toHPGL } from './hpgl';
-import { patternToSVG2 } from './exporters';
+import {
+  buildPdf, polylinesToHPGL as toHPGL, polylinesToPDF, tilePageCount, PAGE_SIZES_MM, type MmPoly
+} from '@atelier/io';
+import {
+  patternToCSV,
+  patternToDXF,
+  patternToHPGL,
+  patternToPDF,
+  patternToSVG,
+  patternToSVG2
+} from './exporters';
 import { dxfToPattern } from './patternImport';
 
 const decode = (bytes: Uint8Array) => { let s = ''; for (const b of bytes) s += String.fromCharCode(b); return s; };
@@ -89,6 +97,22 @@ function svg2Fixture() {
   p.seamAllowance = 10;
   return p;
 }
+
+describe('Pattern export adapters', () => {
+  it('emits the existing SVG, DXF, PDF, HPGL, and identity-aware CSV surfaces', async () => {
+    const pattern = svg2Fixture();
+    pattern.texts.push({ id: 'note', value: 'Cut note', x: 5, y: 5 });
+    expect(patternToSVG(pattern)).toContain('Cut note');
+    const dxf = patternToDXF(pattern);
+    expect(dxf).toContain('LWPOLYLINE');
+    expect(dxf).not.toContain('Cut note');
+    expect(decode(new Uint8Array(await (await patternToPDF(pattern)).arrayBuffer()))).toMatch(/^%PDF-1\.4/);
+    const hpgl = await patternToHPGL(pattern);
+    expect(hpgl).toContain('PU');
+    expect(hpgl).toContain('PD');
+    expect(patternToCSV(pattern)).toMatch(/^point,x_mm,y_mm\n/);
+  });
+});
 
 describe('patternToSVG2 (Beta)', () => {
   const svg = patternToSVG2(svg2Fixture());

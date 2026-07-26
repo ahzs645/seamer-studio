@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import { viewport as viewportAction } from '@atelier/svelte';
+  import { docToWorld, type Viewport } from '@atelier/viewport';
   import type { Pattern } from '@seamer/pattern-model';
   import { PatternRenderer, type RendererStatus, type SceneMode } from '$lib/scene/scene3d';
   import type { SimConfig } from '@seamer/cloth-sim';
@@ -39,7 +41,11 @@
 
   let { currentPattern, selectedPieceId = null, onpieceselect, labelDisplay = 'flat', ondrapesettled, onpatternupdate, oncamerachange }: Props = $props();
 
-  let containerEl: HTMLDivElement;
+  const docMmToWorld = (mm: number): number => docToWorld({ x: mm, y: 0 }).x;
+  const worldToDocMm = (metres: number): number =>
+    metres / docToWorld({ x: 1, y: 0 }).x;
+
+  let viewportInstance: Viewport | null = null;
   let renderer: PatternRenderer | null = null;
   let status = $state<RendererStatus>('idle');
   let statusMessage = $state('');
@@ -99,6 +105,11 @@
   function patternKey(p: Pattern, sigs = pieceSigs(p)): string {
     return JSON.stringify({
       body: p.body,
+      sim3d: {
+        particleDistance: p.settings3d.globalParticleDistanceOverride,
+        fixTop: p.settings3d.fixTop,
+        mirrored: p.settings3d.drapeMirroredPieces
+      },
       pieces: p.pieces.map((pc) => ({ id: pc.id, g: sigs.get(pc.id), a: pc.settings3d.arrangement, f: pc.settings3d.frozen, h: pc.hidden, fn: pc.settings3d.flipNormals, cl: pc.settings3d.collisionLayer, fc: pc.settings3d.filterExternalCollisionsByClothNormal })),
       seams: p.seams.length,
       // texture-map urls can be multi-MB data URLs — sign with length + tail instead of the full string
@@ -119,7 +130,12 @@
   onMount(() => {
     applyStoredTheme();
     dark = isDarkTheme();
-    renderer = new PatternRenderer(containerEl);
+    if (!viewportInstance) {
+      status = 'error';
+      statusMessage = '3D viewport failed to initialize';
+      return;
+    }
+    renderer = new PatternRenderer(viewportInstance);
     webgpu = renderer.webgpuAvailable();
     renderer.onStatus = (s, msg) => {
       status = s; statusMessage = msg ?? '';
@@ -176,6 +192,10 @@
       renderer?.setShowSeams(currentPattern.settings3d.showSeams ?? false);
     });
   });
+
+  function handleViewportReady(viewport: Viewport): void {
+    viewportInstance = viewport;
+  }
 
   onDestroy(() => {
     clearTimeout(rebuildTimer);
@@ -269,6 +289,36 @@
 
   // arrangement-point overlay toggle
   $effect(() => { renderer?.setShowArrangementPoints(currentPattern.settings3d.showArrangementPoints ?? false); });
+
+  // Persisted scene switches remain live when changed outside this component (PropertyPanel,
+  // undo/redo, document restore, or automation).
+  $effect(() => {
+    const s = currentPattern.settings3d;
+    showAvatar = s.avatarEnabled !== false && s.showAvatar;
+    renderer?.setAvatarVisible(showAvatar);
+  });
+  $effect(() => {
+    showTriangles = currentPattern.settings3d.showTriangles;
+    renderer?.setShowTriangles(showTriangles);
+  });
+  $effect(() => {
+    lightingMode = currentPattern.settings3d.lightingMode || 'flat';
+    renderer?.setLightingMode(lightingMode);
+  });
+  $effect(() => {
+    const s = currentPattern.settings3d;
+    renderer?.setCameraState(s.cameraPosition, s.controlsTarget, s.cameraFov);
+  });
+  $effect(() => {
+    const s = currentPattern.settings3d;
+    void renderer?.setSimConfig({
+      gravity: [...s.gravity],
+      handleSelfCollisions: s.handleSelfCollisions
+    });
+  });
+  $effect(() => {
+    renderer?.setDebugFocusPoint(currentPattern.settings3d.debugFocusPoint);
+  });
 
   // render quality: SMAA supersample scale + "Force low-performance mode"
   $effect(() => {
@@ -419,7 +469,14 @@
 <svelte:window onkeydown={handleKey} />
 
 <div class="w-full h-full relative">
-  <div bind:this={containerEl} class="w-full h-full"></div>
+  <div
+    class="w-full h-full"
+    use:viewportAction={{
+      projection: '3d',
+      postProcessing: false,
+      onReady: handleViewportReady
+    }}
+  ></div>
   {#if $show3dStats}
     <div class="absolute bottom-2 right-2 z-20 font-mono text-[11px] bg-black/60 text-green-300 rounded px-2 py-1 pointer-events-none">{fps} fps</div>
   {/if}
@@ -517,8 +574,8 @@
         { key: 'globalDamping', label: 'Global damping', min: 0, max: 1, step: 0.01, get: () => simCfg!.globalDamping, set: (v: number) => setSim({ globalDamping: v }), fmt: (v: number) => v.toFixed(2) },
         { key: 'localDamping', label: 'Local damping', min: 0, max: 1, step: 0.01, get: () => simCfg!.localDamping, set: (v: number) => setSim({ localDamping: v }), fmt: (v: number) => v.toFixed(2) },
         { key: 'nearDamping', label: 'Near damping', min: 0, max: 1, step: 0.01, get: () => simCfg!.nearDamping, set: (v: number) => setSim({ nearDamping: v }), fmt: (v: number) => v.toFixed(2) },
-        { key: 'simulationThickness', label: 'Simulation thickness', min: 0, max: 20, step: 0.5, get: () => simCfg!.simulationThickness * 1000, set: (v: number) => setSim({ simulationThickness: v / 1000 }), fmt: (v: number) => `${v.toFixed(1)} mm` },
-        { key: 'edgeThickness', label: 'Simulation edge thickness', min: 0, max: 20, step: 0.5, get: () => simCfg!.edgeThickness * 1000, set: (v: number) => setSim({ edgeThickness: v / 1000 }), fmt: (v: number) => `${v.toFixed(1)} mm` },
+        { key: 'simulationThickness', label: 'Simulation thickness', min: 0, max: 20, step: 0.5, get: () => worldToDocMm(simCfg!.simulationThickness), set: (v: number) => setSim({ simulationThickness: docMmToWorld(v) }), fmt: (v: number) => `${v.toFixed(1)} mm` },
+        { key: 'edgeThickness', label: 'Simulation edge thickness', min: 0, max: 20, step: 0.5, get: () => worldToDocMm(simCfg!.edgeThickness), set: (v: number) => setSim({ edgeThickness: docMmToWorld(v) }), fmt: (v: number) => `${v.toFixed(1)} mm` },
         { key: 'selfCollisionFriction', label: 'Self friction', min: 0, max: 1, step: 0.05, get: () => simCfg!.selfCollisionFriction, set: (v: number) => setSim({ selfCollisionFriction: v }), fmt: (v: number) => v.toFixed(2) },
         { key: 'externalCollisionFriction', label: 'Body friction', min: 0, max: 1, step: 0.05, get: () => simCfg!.externalCollisionFriction, set: (v: number) => setSim({ externalCollisionFriction: v }), fmt: (v: number) => v.toFixed(2) },
         { key: 'seamStrength', label: 'Seam strength', min: 0, max: 2, step: 0.1, get: () => simCfg!.seamStrength, set: (v: number) => setSim({ seamStrength: v }), fmt: (v: number) => v.toFixed(1) },

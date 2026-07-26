@@ -3,8 +3,7 @@
 // clicked region, then marching-squares boundary). Outlines are simplified with
 // Douglas-Peucker so the resulting piece has a manageable number of points.
 
-import type { Vec2 } from './patternGeometry';
-import { pointInPolygon } from './patternGeometry';
+import { pointInPolygon, type Vec2 } from '@seamer/pattern-model';
 
 const dist = (a: Vec2, b: Vec2) => Math.hypot(a.x - b.x, a.y - b.y);
 

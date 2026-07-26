@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mirrorHalfOutline, type Vec2 } from './patternGeometry';
+import { mirrorHalfOutline, type Vec2 } from '@seamer/pattern-model';
 
 const bbox = (pts: Vec2[]) => ({
   minX: Math.min(...pts.map((p) => p.x)), maxX: Math.max(...pts.map((p) => p.x)),

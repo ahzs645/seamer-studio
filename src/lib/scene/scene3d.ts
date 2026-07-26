@@ -1,20 +1,14 @@
-// 3D scene: WebGLRenderer + camera + OrbitControls + lighting + floor, the parametric avatar, and
-// the garment cloth meshes. Rendering runs on requestAnimationFrame; the WebGPU cloth solve runs in
-// a separate self-paced async loop and writes results back into the cloth geometry.
+// Thin app-level orchestration over @atelier/viewport plus seamer-owned cloth/avatar semantics.
+// The WebGPU cloth solve runs in a separate self-paced async loop and writes results back into the
+// cloth geometry; every write invalidates the on-demand viewport frame.
 
 import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import type { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
 import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { OBJExporter } from 'three/addons/exporters/OBJExporter.js';
-import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
-import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
-import { N8AOPass } from 'n8ao';
-import { BokehPass } from 'three/addons/postprocessing/BokehPass.js';
-import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
 import type { Pattern, Material } from '@seamer/pattern-model';
 import { AvatarController } from '@seamer/avatar';
 import { buildCylinders, type CylinderFrame } from '@seamer/cloth-sim';
@@ -23,12 +17,18 @@ import { prepareCloth, ClothSimulation, type PreparedCloth } from '@seamer/cloth
 import { SIM_CONFIG, type SimConfig } from '@seamer/cloth-sim';
 import { cylinderRefit } from '@seamer/cloth-sim';
 import { SolverRunner, requestDevice, isWebGPUAvailable } from '@atelier/sim';
+import {
+  docToWorld,
+  worldToDoc,
+  type Viewport
+} from '@atelier/viewport';
 import { createGarmentMaterial, createAvatarMaterial, hasSeparateBack, disposeGarmentMaterial } from './materials';
 import { createPieceTexture, pieceNeedsBake } from './pieceTexture';
 import { indexPoints, pieceInternalPolylines, seamColor } from '$lib/utils/patternGeometry';
-import { isDarkTheme, onThemeChange } from '$lib/utils/theme';
 import { samePick, type SeamPick, type SeamToolState } from '$lib/utils/seamTool';
 import { measurementSegment } from '@seamer/avatar';
+import { SeamerPostFX, type SeamerPostSettings } from './n8aoPost';
+import { SeamerLighting } from './seamerLighting';
 
 export type RendererStatus = 'idle' | 'loading' | 'ready' | 'simulating' | 'error';
 
@@ -61,35 +61,21 @@ interface ArrangeEntry {
 export type SceneMode = 'view' | 'arrange';
 
 export class PatternRenderer {
-  private container: HTMLElement;
-  private scene = new THREE.Scene();
+  private readonly viewport: Viewport;
+  private readonly container: HTMLElement;
+  private readonly scene: THREE.Scene;
   private camera: THREE.PerspectiveCamera;
-  private renderer: THREE.WebGLRenderer;
-  private controls: OrbitControls;
+  private readonly renderer: THREE.WebGLRenderer;
+  private readonly controls: OrbitControls;
+  private readonly lighting: SeamerLighting;
   private clothGroup = new THREE.Group();
-  private floor: THREE.Mesh | null = null;
-  private grid: THREE.GridHelper | null = null;
-  private themeUnsub: () => void = () => {};
-  private lightRig: THREE.Object3D[] = [];
-  private lightRigBase: number[] = []; // base intensities, scaled down when an HDRI env is active
-  private pmrem: THREE.PMREMGenerator | null = null;
-  private envCache = new Map<string, THREE.Texture>();
   private lightingMode = 'flat';
-  // Post-processing: screen-space ambient occlusion (soft contact darkening in folds/seams/leg-gap
-  // and where the garment meets the body) + SMAA edge AA, matching the source's polished look. N8AOPass
-  // replaces RenderPass and composits AO in one pass. Guarded — if the composer fails to build, we fall
-  // back to direct rendering.
-  private composer: EffectComposer | null = null;
-  private aoPass: N8AOPass | null = null;
-  private bokehPass: BokehPass | null = null;
-  private postEnabled = true;
+  private readonly post: SeamerPostFX;
   private bokehFStop = 0; // 0 = depth of field off; focus auto-tracks the orbit target each frame
 
   // camera persistence: fired (debounced) after the user orbits/zooms so the app can save the view
   onCameraChanged: (pos: [number, number, number], target: [number, number, number], fov: number) => void = () => {};
   private cameraSaveTimer: ReturnType<typeof setTimeout> | undefined;
-  // camera view tween (animated front/back/left/… transitions)
-  private camTween: { fromPos: THREE.Vector3; toPos: THREE.Vector3; fromTgt: THREE.Vector3; toTgt: THREE.Vector3; start: number; dur: number } | null = null;
 
   // Named arrangement-point markers from base_model.json: rendered on the body when enabled;
   // in arrange mode, clicking one snaps the selected piece's arrangement to that point.
@@ -153,8 +139,8 @@ export class PatternRenderer {
   }
 
   private pattern: Pattern | null = null;
-  private rafId = 0;
   private disposed = false;
+  private resizeObserver: ResizeObserver | null = null;
 
   // body-change tracking: savedPositions are valid only for the body they were authored on, so a
   // measurement/gender edit means the cached drape is stale and simulation must re-drape.
@@ -297,54 +283,67 @@ export class PatternRenderer {
     (this.outlineMesh.geometry as LineSegmentsGeometry).setPositions(arr);
   }
 
-  constructor(container: HTMLElement, opts: { preserveDrawingBuffer?: boolean } = {}) {
-    this.container = container;
-    const w = Math.max(1, container.clientWidth);
-    const h = Math.max(1, container.clientHeight);
+  constructor(viewport: Viewport) {
+    this.viewport = viewport;
+    this.container = viewport.renderer.domElement.parentElement
+      ?? viewport.renderer.domElement;
+    this.scene = viewport.scene;
+    this.renderer = viewport.renderer;
+    const camera = viewport.camera.camera;
+    if (!(camera instanceof THREE.PerspectiveCamera)) {
+      throw new Error('PatternRenderer requires a 3D perspective viewport');
+    }
+    this.camera = camera;
+    this.controls = viewport.camera.controls;
+    const w = Math.max(1, this.container.clientWidth);
+    const h = Math.max(1, this.container.clientHeight);
 
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance', preserveDrawingBuffer: opts.preserveDrawingBuffer ?? false });
+    // Preserve seamer's depth range while CameraRig owns projection and resize.
+    this.camera.near = 0.01;
+    this.camera.far = 100;
+    this.camera.updateProjectionMatrix();
     this.isMobile = typeof navigator !== 'undefined' && /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
     this.lowEnd = this.detectLowEndHardware();
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    this.renderer.setSize(w, h);
-    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
-    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.0;
-    this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-    container.appendChild(this.renderer.domElement);
-
-    this.scene.background = new THREE.Color('#dfe3e8');
-    this.camera = new THREE.PerspectiveCamera(54, w / h, 0.01, 100);
-    this.camera.position.set(0.5, 0.9, 1.6);
-
-    this.controls = new OrbitControls(this.camera, this.renderer.domElement);
-    this.controls.target.set(0, 0.9, 0);
-    this.controls.enableDamping = true;
-    this.controls.dampingFactor = 0.1;
     this.controls.minDistance = 0.3;
     this.controls.maxDistance = 6;
     this.controls.update();
     // persist the view: debounce-fire after each completed orbit/zoom/pan interaction
-    this.controls.addEventListener('end', () => this.queueCameraSave());
-    this.controls.addEventListener('start', () => { this.camTween = null; }); // user grabbed: stop tweening
+    this.controls.addEventListener('end', this.handleControlsEnd);
+    this.controls.addEventListener('start', this.handleControlsStart);
 
     this.scene.add(this.clothGroup);
     this.scene.add(this.apGroup);
     this.scene.add(this.measureGroup);
-    this.setupLights();
-    this.setupFloor();
+    // LightingRig cannot currently represent seamer's analyzed HDRI directional rigs or a "none"
+    // preset. Dispose its default studio rig before installing the lossless app-owned lighting path;
+    // Viewport.dispose() is idempotent and safely cascades through it again.
+    this.viewport.lighting.dispose();
+    this.lighting = new SeamerLighting(
+      this.scene,
+      this.renderer,
+      () => this.invalidate(),
+      () => this.lowEnd || this.forceLowEnd
+    );
     this.setupGrab();
-    this.setupComposer(w, h);
-    this.applySceneTheme(isDarkTheme());
-    this.themeUnsub = onThemeChange(() => this.applySceneTheme(isDarkTheme()));
+    // AO decision (a): the engine composer is deliberately disabled. N8AO is persisted document
+    // semantics, so seamer keeps its real N8AO/Bokeh/SMAA chain until Viewport accepts an AO pass
+    // factory or a custom render-composer hook.
+    this.viewport.post.setEnabled(false);
+    this.post = new SeamerPostFX(this.renderer, this.scene, this.camera, w, h);
 
     this.applyRenderQuality();
     // orbit/zoom/pan must repaint under render-on-demand
-    this.controls.addEventListener('change', () => this.invalidate());
+    this.controls.addEventListener('change', this.handleControlsChange);
 
-    this.renderLoop();
-    window.addEventListener('resize', this.onResize);
+    this.invalidate();
+    const ResizeObserverConstructor =
+      this.renderer.domElement.ownerDocument.defaultView?.ResizeObserver;
+    if (ResizeObserverConstructor) {
+      this.resizeObserver = new ResizeObserverConstructor(() => this.onResize());
+      this.resizeObserver.observe(this.container);
+    } else {
+      window.addEventListener('resize', this.onResize);
+    }
   }
 
   // ---- Adaptive render quality + render-on-demand (the original's applyHdrAaSettings /
@@ -353,13 +352,27 @@ export class PatternRenderer {
   private lowEnd = false;
   private forceLowEnd = false;
   private smaaScale = 2;
-  private renderInvalidated = true;
-  private framesSinceRender = 0;
+  private appFrame = 0;
 
-  /** Request a repaint (render-on-demand: frames only draw when something changed). */
+  /**
+   * Request the app-owned composite frame. Viewport owns OrbitControls damping and schedules its
+   * direct fallback frame; this second on-demand frame is required because option (a) preserves the
+   * N8AO composer until the engine exposes a custom pass/composer hook.
+   */
   invalidate(): void {
-    this.renderInvalidated = true;
+    if (this.disposed || this.appFrame !== 0) return;
+    this.appFrame = window.requestAnimationFrame(this.renderFrame);
   }
+
+  private readonly handleControlsChange = (): void => this.invalidate();
+  private readonly handleControlsEnd = (): void => this.queueCameraSave();
+  private readonly handleTransformChange = (): void => this.invalidate();
+  private readonly handleControlsStart = (): void => {
+    // CameraRig has no public cancelFly(); re-applying its current state cancels an active fly
+    // without changing the view when the user takes control.
+    this.viewport.camera.setState(this.viewport.camera.getState());
+    this.invalidate();
+  };
 
   /** Low-end heuristics: few cores / little memory / known mobile-class GPU strings. */
   private detectLowEndHardware(): boolean {
@@ -387,23 +400,12 @@ export class PatternRenderer {
         ? Math.min(1, dpr)
         : Math.min(2, dpr * (hdr ? Math.max(2, this.smaaScale) : 1));
     this.renderer.setPixelRatio(ratio);
-    if (this.composer) {
-      const samples = lowEnd ? 0 : hdr ? 16 : 4;
-      this.composer.renderTarget1.samples = samples;
-      this.composer.renderTarget2.samples = samples;
-      this.composer.setPixelRatio(ratio);
-    }
     const sm = lowEnd ? 512 : 2048;
-    const key = this.lightRig[0] as THREE.DirectionalLight | undefined;
-    if (key?.shadow && key.shadow.mapSize.width !== sm) {
-      key.shadow.mapSize.set(sm, sm);
-      key.shadow.map?.dispose();
-      key.shadow.map = null as unknown as THREE.WebGLRenderTarget;
-    }
+    this.lighting.setShadowMapSize(sm);
     const w = Math.max(1, this.container.clientWidth);
     const h = Math.max(1, this.container.clientHeight);
     this.renderer.setSize(w, h);
-    this.composer?.setSize(w, h);
+    this.post.setQuality(ratio, lowEnd ? 0 : hdr ? 16 : 4, w, h);
     this.invalidate();
   }
 
@@ -417,316 +419,22 @@ export class PatternRenderer {
     this.applyRenderQuality();
   }
 
-  // Build the post-processing chain: N8AO (renders beauty + applies ambient occlusion) -> Bokeh ->
-  // SMAA (edge AA) -> OutputPass (tone map + sRGB). Fully guarded: any failure leaves composer null
-  // -> direct render.
-  private setupComposer(w: number, h: number) {
-    try {
-      const composer = new EffectComposer(this.renderer);
-      const ao = new N8AOPass(this.scene, this.camera, w, h);
-      ao.setDisplayMode('Combined'); // beauty × AO
-      // World-space radii tuned for human/garment scale (metres): subtle contact darkening.
-      ao.configuration.aoRadius = 0.15;
-      ao.configuration.distanceFalloff = 1.0;
-      ao.configuration.intensity = 3.0;
-      ao.configuration.aoSamples = 16;
-      // OutputPass handles final gamma correction; N8AO should not double-correct.
-      ao.configuration.gammaCorrection = false;
-      composer.addPass(ao);
-      // Depth of field (the source's bokeh camera setting). Disabled until a positive f-stop is
-      // applied; the focus distance auto-tracks the orbit target in the render loop.
-      const bokeh = new BokehPass(this.scene, this.camera, { focus: 1.0, aperture: 0, maxblur: 0.01 });
-      bokeh.enabled = false;
-      composer.addPass(bokeh);
-      // r181 sizes SMAA through EffectComposer.setSize(); its constructor has no dimensions.
-      composer.addPass(new SMAAPass());
-      composer.addPass(new OutputPass());
-      this.composer = composer;
-      this.aoPass = ao;
-      this.bokehPass = bokeh;
-    } catch (e) {
-      this.composer = null; this.aoPass = null; this.bokehPass = null;
-      console.warn('Post-processing unavailable, using direct render:', e);
-    }
-  }
-
   /** Apply the pattern's post-processing settings: AO enable/intensity/radius/falloff + bokeh f-stop. */
-  applyPostSettings(s: { aoEnabled?: boolean; aoIntensity?: number; aoRadius?: number; aoFalloff?: number; bokehFStop?: number }): void {
+  applyPostSettings(s: SeamerPostSettings): void {
     this.invalidate();
-    if (this.aoPass) {
-      this.aoPass.enabled = s.aoEnabled !== false;
-      if (typeof s.aoIntensity === 'number' && Number.isFinite(s.aoIntensity)) {
-        this.aoPass.configuration.intensity = Math.max(0, Math.min(5, s.aoIntensity));
-      }
-      const radius = typeof s.aoRadius === 'number' && s.aoRadius > 0 ? s.aoRadius : 0.15;
-      const falloff = typeof s.aoFalloff === 'number' && s.aoFalloff > 0 ? s.aoFalloff : 1.0;
-      this.aoPass.configuration.aoRadius = radius;
-      this.aoPass.configuration.distanceFalloff = falloff;
-    }
-    if (this.bokehPass) {
-      this.bokehFStop = typeof s.bokehFStop === 'number' && s.bokehFStop > 0 ? s.bokehFStop : 0;
-      this.bokehPass.enabled = this.bokehFStop > 0;
-      // BokehPass aperture: smaller f-stop -> wider aperture -> more blur.
-      const uniforms = this.bokehPass.uniforms as unknown as Record<string, { value: number }>;
-      uniforms['aperture'].value = this.bokehFStop > 0 ? Math.min(0.05, 0.025 / this.bokehFStop) : 0;
-      uniforms['maxblur'].value = 0.01;
-    }
+    this.bokehFStop = this.post.apply(s);
   }
 
   /** Toggle AO/SMAA post-processing (falls back to direct render when off). */
   setPostProcessing(on: boolean) {
-    this.postEnabled = on;
+    this.post.setEnabled(on);
+    this.invalidate();
   }
-
-  private setupLights() {
-    const key = new THREE.DirectionalLight(0xffffff, 2.35);
-    key.position.set(5, 15, 10);
-    key.castShadow = true;
-    key.shadow.mapSize.set(2048, 2048);
-    const cam = key.shadow.camera as THREE.OrthographicCamera;
-    cam.near = 0.1; cam.far = 50; cam.left = -10; cam.right = 10; cam.top = 10; cam.bottom = -10;
-    key.shadow.bias = 0.0005;
-    key.shadow.normalBias = 0.03;
-    const fill = new THREE.DirectionalLight(0xfff3a6, 1.05);
-    fill.position.set(-5, 10, -5);
-    const rim = new THREE.DirectionalLight(0xffffff, 0.85);
-    rim.position.set(0, 10, -10);
-    const ambient = new THREE.AmbientLight(0xffffff, 1.25);
-    this.lightRig = [key, fill, rim, ambient];
-    this.lightRigBase = this.lightRig.map((l) => (l as THREE.Light).intensity);
-    for (const l of this.lightRig) this.scene.add(l);
-  }
-
-  // Lighting modes mirror the source's tabs: Flat (the bare light rig, no environment) plus three
-  // image-based-lighting presets backed by the HDRIs already in static/3d/hdri/. An HDRI env provides
-  // realistic soft lighting + reflections, so we dim the directional rig (keep some for crisp shadows).
-  private static readonly HDRI: Record<string, string> = {
-    studio1: '/3d/hdri/photo_studio_london_hall_1k.hdr',
-    studio2: '/3d/hdri/studio_small_08_1k.hdr',
-    sunset: '/3d/hdri/cedar_bridge_sunset_1_1k.hdr'
-  };
 
   /** Switch lighting mode: 'flat' | 'studio1' | 'studio2' | 'sunset'. */
   setLightingMode(mode: string): void {
-    // Mobile GPUs can't afford the HDRI path (supersampling + PMREM): force flat, like the original.
-    if (this.isMobile && PatternRenderer.HDRI[mode]) mode = 'flat';
-    this.lightingMode = mode;
+    this.lightingMode = this.lighting.setMode(mode, this.isMobile);
     this.applyRenderQuality(); // HDRI modes supersample (smaaScale), flat returns to 1×
-    const url = PatternRenderer.HDRI[mode];
-    if (this.grid) this.grid.visible = !url; // the original hides the grid in HDRI modes
-    this.invalidate();
-    if (!url) {
-      // Flat: bare rig at full intensity, no environment.
-      this.scene.environment = null;
-      this.renderer.toneMappingExposure = this.themeExposure;
-      this.lightRig.forEach((l, i) => { (l as THREE.Light).intensity = this.lightRigBase[i]; });
-      this.clearEnvRig();
-      return;
-    }
-    // HDRI: the environment carries the ambient light; a per-mode directional rig (replaced by
-    // HDR texel analysis once the file loads) provides crisp shadows matched to the environment.
-    this.renderer.toneMappingExposure = 1.0;
-    this.lightRig.forEach((l) => { (l as THREE.Light).intensity = 0; });
-    this.applyEnvLightRig(PatternRenderer.ENV_RIGS[mode] ?? []);
-    const cached = this.envCache.get(url);
-    if (cached) { this.scene.environment = cached; this.applyAnalyzedRig(url, mode); return; }
-    this.loadHdri(url, mode, 0);
-  }
-
-  /** Load + PMREM an HDRI with retry/backoff (the original's scheduleHdriRetry). */
-  private loadHdri(url: string, mode: string, attempt: number): void {
-    if (!this.pmrem) { this.pmrem = new THREE.PMREMGenerator(this.renderer); this.pmrem.compileEquirectangularShader(); }
-    new RGBELoader().setDataType(THREE.FloatType).load(url, (hdr) => {
-      if (this.disposed || !this.pmrem) { hdr.dispose(); return; }
-      // analyze BEFORE PMREM consumes the texel data
-      const img = hdr.image as unknown as { data: Float32Array; width: number; height: number };
-      if (img?.data) this.hdriLightCache.set(url, PatternRenderer.analyzeHdriLights(img, 3));
-      hdr.mapping = THREE.EquirectangularReflectionMapping;
-      const env = this.pmrem.fromEquirectangular(hdr).texture;
-      hdr.dispose();
-      this.envCache.set(url, env);
-      if (this.lightingMode === mode) {
-        this.scene.environment = env;
-        this.applyAnalyzedRig(url, mode);
-        this.invalidate();
-      }
-    }, undefined, () => {
-      if (this.disposed || attempt >= 3) return; // keep the hand-tuned rig
-      setTimeout(() => { if (this.lightingMode === mode) this.loadHdri(url, mode, attempt + 1); }, 1000 * Math.pow(1.5, attempt));
-    });
-  }
-
-  // ---- HDRI light rigs: hand-tuned per-mode directionals, replaced by lights extracted from the
-  // HDR's brightest texel regions when available (the original's analyzeHdriLights). ----
-  private envRig: THREE.DirectionalLight[] = [];
-  private hdriLightCache = new Map<string, { dir: [number, number, number]; color: [number, number, number]; intensity: number }[]>();
-
-  private static readonly ENV_RIGS: Record<string, { dir: [number, number, number]; color: number; intensity: number }[]> = {
-    studio1: [
-      { dir: [2, 3, 2], color: 0xffffff, intensity: 2.0 },
-      { dir: [-2.5, 2, -1], color: 0xe8ecf5, intensity: 0.8 },
-      { dir: [0, 2.5, -3], color: 0xffffff, intensity: 1.0 }
-    ],
-    studio2: [
-      { dir: [3, 4, 1], color: 0xfff4e0, intensity: 1.8 },
-      { dir: [-3, 2, 2], color: 0xdfe8ff, intensity: 0.7 },
-      { dir: [0, 3, -3], color: 0xffffff, intensity: 0.9 }
-    ],
-    sunset: [
-      { dir: [-4, 1.5, 3], color: 0xffb070, intensity: 2.2 },
-      { dir: [3, 2, -2], color: 0x7088b8, intensity: 0.6 },
-      { dir: [0, 2, -4], color: 0xffd0a0, intensity: 0.8 }
-    ]
-  };
-
-  private clearEnvRig(): void {
-    for (const l of this.envRig) { this.scene.remove(l); l.dispose(); }
-    this.envRig = [];
-  }
-
-  private applyEnvLightRig(rig: { dir: [number, number, number]; color: number | [number, number, number]; intensity: number }[]): void {
-    this.clearEnvRig();
-    rig.forEach((spec, i) => {
-      const light = new THREE.DirectionalLight(
-        Array.isArray(spec.color) ? new THREE.Color(...spec.color) : spec.color,
-        spec.intensity
-      );
-      light.position.set(spec.dir[0], spec.dir[1], spec.dir[2]);
-      if (i === 0) {
-        // the key light carries the shadows
-        light.castShadow = true;
-        const lowEnd = this.lowEnd || this.forceLowEnd;
-        light.shadow.mapSize.set(lowEnd ? 512 : 2048, lowEnd ? 512 : 2048);
-        const cam = light.shadow.camera as THREE.OrthographicCamera;
-        cam.near = 0.1; cam.far = 50; cam.left = -10; cam.right = 10; cam.top = 10; cam.bottom = -10;
-        light.shadow.bias = 0.0005;
-        light.shadow.normalBias = 0.03;
-      }
-      this.scene.add(light);
-      this.envRig.push(light);
-    });
-    this.invalidate();
-  }
-
-  private applyAnalyzedRig(url: string, mode: string): void {
-    const analyzed = this.hdriLightCache.get(url);
-    if (!analyzed?.length || this.lightingMode !== mode) return;
-    this.applyEnvLightRig(analyzed.map((a) => ({ dir: a.dir, color: a.color, intensity: a.intensity })));
-  }
-
-  /** Extract the N brightest directional regions of an equirect HDR: coarse-grid luminance with
-   *  neighbourhood suppression; returns directions + normalized colors + relative intensities. */
-  private static analyzeHdriLights(
-    img: { data: Float32Array; width: number; height: number },
-    n: number
-  ): { dir: [number, number, number]; color: [number, number, number]; intensity: number }[] {
-    const GW = 32, GH = 16;
-    const stride = img.data.length / (img.width * img.height) >= 4 ? 4 : 3;
-    const cells: { lum: number; r: number; g: number; b: number }[] = [];
-    for (let cy = 0; cy < GH; cy++) {
-      for (let cx = 0; cx < GW; cx++) {
-        let r = 0, g = 0, b = 0, cnt = 0;
-        const x0 = Math.floor((cx * img.width) / GW), x1 = Math.floor(((cx + 1) * img.width) / GW);
-        const y0 = Math.floor((cy * img.height) / GH), y1 = Math.floor(((cy + 1) * img.height) / GH);
-        for (let y = y0; y < y1; y += 2) {
-          for (let x = x0; x < x1; x += 2) {
-            const o = (y * img.width + x) * stride;
-            r += img.data[o]; g += img.data[o + 1]; b += img.data[o + 2];
-            cnt++;
-          }
-        }
-        if (cnt > 0) { r /= cnt; g /= cnt; b /= cnt; }
-        cells.push({ lum: 0.2126 * r + 0.7152 * g + 0.0722 * b, r, g, b });
-      }
-    }
-    const picked: number[] = [];
-    const out: { dir: [number, number, number]; color: [number, number, number]; intensity: number }[] = [];
-    let maxLum = 0;
-    for (const c of cells) maxLum = Math.max(maxLum, c.lum);
-    if (maxLum <= 0) return out;
-    for (let k = 0; k < n; k++) {
-      let best = -1, bestLum = -1;
-      for (let i = 0; i < cells.length; i++) {
-        if (cells[i].lum <= bestLum) continue;
-        // suppress neighbours of already-picked cells (wrap-around in x)
-        const cx = i % GW, cy = Math.floor(i / GW);
-        const near = picked.some((p) => {
-          const px = p % GW, py = Math.floor(p / GW);
-          const dx = Math.min(Math.abs(px - cx), GW - Math.abs(px - cx));
-          return dx <= 3 && Math.abs(py - cy) <= 2;
-        });
-        if (near) continue;
-        best = i; bestLum = cells[i].lum;
-      }
-      if (best < 0) break;
-      picked.push(best);
-      const c = cells[best];
-      const cx = (best % GW + 0.5) / GW, cy = (Math.floor(best / GW) + 0.5) / GH;
-      // equirect uv -> direction (three's convention: u wraps longitude, v=0 is the top)
-      const phi = cy * Math.PI;
-      const theta = cx * 2 * Math.PI - Math.PI;
-      const dir: [number, number, number] = [
-        Math.sin(phi) * Math.sin(theta) * 5,
-        Math.max(0.5, Math.cos(phi) * 5),
-        Math.sin(phi) * Math.cos(theta) * 5
-      ];
-      const m = Math.max(c.r, c.g, c.b) || 1;
-      out.push({
-        dir,
-        color: [c.r / m, c.g / m, c.b / m],
-        intensity: k === 0 ? 2.0 : 0.5 + 1.0 * (c.lum / maxLum)
-      });
-    }
-    return out;
-  }
-
-  private setupFloor() {
-    const floorMat = new THREE.MeshStandardMaterial({ color: '#c7ccd4', roughness: 0.9, metalness: 0, depthWrite: false });
-    this.floor = new THREE.Mesh(new THREE.PlaneGeometry(100, 100), floorMat);
-    this.floor.rotation.x = -Math.PI / 2;
-    this.floor.receiveShadow = true;
-    this.scene.add(this.floor);
-    // Grid opacity is driven by the theme palette (0.28 dark / 0.1 light) in applySceneTheme.
-    this.grid = new THREE.GridHelper(20, 20, 0x151515, 0x151515);
-    this.grid.position.y = 0.002;
-    this.scene.add(this.grid);
-  }
-
-  // Light/dark theme for the 3D canvas: scene background + floor + grid. HDRI modes set
-  // scene.environment (lighting) but leave background = the theme colour, so dark mode reads as a
-  // dark studio. Driven by the app's data-theme (see utils/theme).
-  private themeExposure = 1.0;
-
-  private applySceneTheme(dark: boolean) {
-    // Source main scene palette (src/recovered-chunks/B1dxpMBM/ze.js getThemePalette)
-    const bg = dark ? '#1a202b' : '#d5dae4';
-    const floor = dark ? '#27313f' : '#c7ccd4';
-    const grid = dark ? '#5a6475' : '#151515';
-    const gridOpacity = dark ? 0.28 : 0.1;
-    if (this.scene.background instanceof THREE.Color) this.scene.background.set(bg);
-    else this.scene.background = new THREE.Color(bg);
-    // The source uses a linear scene fog with near=10 / far=45 to dissolve the stage gradually.
-    if (this.scene.fog instanceof THREE.Fog) {
-      this.scene.fog.color.set(bg);
-      this.scene.fog.near = 10;
-      this.scene.fog.far = 45;
-    } else {
-      this.scene.fog = new THREE.Fog(bg, 10, 45);
-    }
-    // per-theme exposure (source's applyRendererTheme passes exposure from the palette)
-    this.themeExposure = dark ? 1.05 : 1.0;
-    if (this.lightingMode === 'flat') this.renderer.toneMappingExposure = this.themeExposure;
-    if (this.floor) (this.floor.material as THREE.MeshStandardMaterial).color.set(floor);
-    if (this.grid) {
-      const g = this.grid as unknown as { material: THREE.LineBasicMaterial[] | THREE.LineBasicMaterial };
-      const mats = Array.isArray(g.material) ? g.material : [g.material];
-      for (const m of mats) {
-        m.color.set(grid);
-        m.opacity = gridOpacity;
-        m.transparent = true;
-      }
-    }
-    this.invalidate();
   }
 
   /** Mouse interaction: grab a cloth particle and drag it (pulls the fabric, like the reference). */
@@ -755,9 +463,13 @@ export class PatternRenderer {
         // current (and refresh bounds) so the raycast hits the piece at its NEW location.
         this.arrangeGroup.updateMatrixWorld(true);
         for (const e of this.arrangeEntries) e.mesh.geometry.computeBoundingSphere();
-        this.raycaster.setFromCamera(ndc, this.camera);
-        const hits = this.raycaster.intersectObjects(this.arrangeEntries.map((e) => e.mesh), false);
-        const idx = hits[0] ? this.arrangeEntries.findIndex((e) => e.mesh === hits[0].object) : -1;
+        const hit = this.viewport.picking.pick(ev, {
+          kinds: ['face'],
+          filter: (object) => this.arrangeEntries.some((entry) => entry.mesh === object)
+        });
+        const idx = hit
+          ? this.arrangeEntries.findIndex((entry) => entry.mesh === hit.object)
+          : -1;
         this.selectArrange(idx);
         return;
       }
@@ -771,11 +483,11 @@ export class PatternRenderer {
         if (pick) this.onSeamEdgePick(pick);
         return; // miss -> orbit, but never enter manipulate/grab while the seam tool is up
       }
-      this.raycaster.setFromCamera(ndc, this.camera);
-      const hits = this.raycaster.intersectObjects(this.clothMeshes.map((e) => e.mesh), false);
-      const hit = hits[0];
-      const face = hit?.face;
-      if (!hit || !face) return; // not on cloth -> let OrbitControls orbit
+      const hit = this.viewport.picking.pick(ev, {
+        kinds: ['face'],
+        filter: (object) => this.clothMeshes.some((entry) => entry.mesh === object)
+      });
+      if (!hit || hit.faceIndex === undefined) return; // not on cloth -> let OrbitControls orbit
       const entry = this.clothMeshes.find((e) => e.mesh === hit.object);
       if (!entry) return;
       // selecting/highlighting the picked piece so the 2D editor stays in sync — but only while
@@ -798,9 +510,18 @@ export class PatternRenderer {
 
       // Shift+drag: grab and pull the live fabric (soft-body); starts the sim if not already running.
       const pos = entry.geometry.getAttribute('position') as THREE.BufferAttribute;
-      let bestL = face.a;
+      const index = entry.geometry.getIndex();
+      const triangleStart = hit.faceIndex * 3;
+      const triangle = index
+        ? [
+            index.getX(triangleStart),
+            index.getX(triangleStart + 1),
+            index.getX(triangleStart + 2)
+          ]
+        : [triangleStart, triangleStart + 1, triangleStart + 2];
+      let bestL = triangle[0];
       let bd = Infinity;
-      for (const l of [face.a, face.b, face.c]) {
+      for (const l of triangle) {
         const dx = pos.getX(l) - hit.point.x, dy = pos.getY(l) - hit.point.y, dz = pos.getZ(l) - hit.point.z;
         const d = dx * dx + dy * dy + dz * dz;
         if (d < bd) { bd = d; bestL = l; }
@@ -899,55 +620,30 @@ export class PatternRenderer {
     if (this.disposed) return;
     const w = Math.max(1, this.container.clientWidth);
     const h = Math.max(1, this.container.clientHeight);
-    this.camera.aspect = w / h;
-    this.camera.updateProjectionMatrix();
-    this.renderer.setSize(w, h);
-    this.composer?.setSize(w, h);
+    this.viewport.resize();
+    this.post.resize(w, h);
     this.updateOutlineResolution();
     this.updateSeamLineResolution();
     this.invalidate();
   };
 
-  private renderLoop = () => {
+  private renderFrame = () => {
+    this.appFrame = 0;
     if (this.disposed) return;
-    this.rafId = requestAnimationFrame(this.renderLoop);
-    // animated camera-view transition (eased; cancelled by user interaction)
-    if (this.camTween) {
-      const t = Math.min(1, (performance.now() - this.camTween.start) / this.camTween.dur);
-      const e = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; // easeInOutCubic
-      this.camera.position.lerpVectors(this.camTween.fromPos, this.camTween.toPos, e);
-      this.controls.target.lerpVectors(this.camTween.fromTgt, this.camTween.toTgt, e);
-      if (t >= 1) { this.camTween = null; this.queueCameraSave(); }
-      this.renderInvalidated = true;
-    }
-    const moved = this.controls.update();
-    // Render-on-demand (the original's invalidateRender): draw only when the sim is running, the
-    // camera moved, something invalidated, or an interaction is live. A ~1 s heartbeat repaints
-    // anything a mutator forgot to invalidate.
-    this.framesSinceRender++;
-    const needs = this.simulating || this.userSimulating || this.grabbing || moved ||
-      this.renderInvalidated || !!(this.transform && (this.transform.dragging || this.transform.axis)) ||
-      this.framesSinceRender > 60;
-    if (!needs) return;
-    this.renderInvalidated = false;
-    this.framesSinceRender = 0;
     // Photographic depth of field (the original): aperture derives from the 35mm-equivalent focal
     // length and the f-stop; focus autofocuses on whatever is at screen centre (clamped around the
     // orbit-target distance); the effect pauses while editing/selecting/grabbing so manipulation
     // stays crisp.
-    if (this.bokehPass) {
-      const wantBokeh = this.bokehFStop > 0 && this.mode === 'view' && !this.grabbing && !this.highlightId && !this.seamToolState;
-      this.bokehPass.enabled = wantBokeh;
-      if (wantBokeh) {
-        const u = this.bokehPass.uniforms as unknown as Record<string, { value: number }>;
-        u['focus'].value = this.computeFocusDistance();
-        const focal = 18 / Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2)); // 36mm-frame equivalent
-        u['aperture'].value = focal / Math.max(0.7, this.bokehFStop) / 36 * 0.012;
-        u['maxblur'].value = 0.01;
-      }
-    }
-    if (this.composer && this.postEnabled) this.composer.render();
-    else this.renderer.render(this.scene, this.camera);
+    this.post.render({
+      bokehFStop: this.bokehFStop,
+      focusDistance: this.computeFocusDistance(),
+      fov: this.camera.fov,
+      allowBokeh:
+        this.mode === 'view'
+        && !this.grabbing
+        && !this.highlightId
+        && !this.seamToolState
+    });
   };
 
   // Autofocus: raycast the screen centre against the garment, clamped to 0.5×–1.5× the orbit-target
@@ -956,6 +652,13 @@ export class PatternRenderer {
   private focusNdc = new THREE.Vector2(0, 0);
   private lastFocusAt = 0;
   private lastFocusDist = 0;
+  private debugFocusPoint = false;
+
+  setDebugFocusPoint(show: boolean): void {
+    this.debugFocusPoint = show;
+    if (!show) this.viewport.overlays.remove('seamer-debug-focus');
+    this.invalidate();
+  }
 
   private computeFocusDistance(): number {
     const tdist = this.camera.position.distanceTo(this.controls.target);
@@ -967,7 +670,28 @@ export class PatternRenderer {
       for (const e of this.clothMeshes) e.geometry.computeBoundingSphere();
       this.raycaster.setFromCamera(this.focusNdc, this.camera);
       const hits = this.raycaster.intersectObjects(this.clothMeshes.map((e) => e.mesh), false);
-      if (hits[0]) dist = Math.max(0.5 * tdist, Math.min(1.5 * tdist, hits[0].distance));
+      if (hits[0]) {
+        dist = Math.max(0.5 * tdist, Math.min(1.5 * tdist, hits[0].distance));
+        if (this.debugFocusPoint) {
+          this.viewport.overlays.addPoints(
+            'seamer-debug-focus',
+            new Float32Array(hits[0].point.toArray()),
+            { color: '#f43f5e', size: 8 }
+          );
+          this.invalidate();
+        }
+      } else if (this.debugFocusPoint) {
+        const point = this.camera.position.clone().addScaledVector(
+          this.raycaster.ray.direction,
+          dist
+        );
+        this.viewport.overlays.addPoints(
+          'seamer-debug-focus',
+          new Float32Array(point.toArray()),
+          { color: '#f43f5e', size: 8 }
+        );
+        this.invalidate();
+      }
     }
     this.lastFocusDist = dist;
     return dist;
@@ -986,6 +710,8 @@ export class PatternRenderer {
   /** Build or update the avatar + cloth for a pattern. */
   async setPattern(pattern: Pattern, changedPieces?: Set<string>): Promise<void> {
     this.pattern = pattern;
+    this.showTriangles = pattern.settings3d.showTriangles;
+    this.debugFocusPoint = pattern.settings3d.debugFocusPoint;
     // Source parity (transferToScene's `wasSimulatorRunning`): capture whether a user-run sim was live
     // BEFORE we stop+rebuild, so we can restart it afterwards. The source re-settles an edited piece
     // ONLY if the sim was already running; a cold edit stays manual (press Simulate) — which we match.
@@ -1011,6 +737,10 @@ export class PatternRenderer {
         await this.avatar.setBody(pattern.body);
         this.avatar.setMaterial(createAvatarMaterial(pattern.body.bodyColor));
       }
+      this.setAvatarVisible(
+        pattern.settings3d.avatarEnabled !== false
+        && pattern.settings3d.showAvatar
+      );
       this.applyCameraFromSettings(pattern);
       this.setLightingMode(pattern.settings3d.lightingMode || 'flat');
       this.rebuildCloth(pattern, changedPieces);
@@ -1028,10 +758,27 @@ export class PatternRenderer {
 
   private applyCameraFromSettings(pattern: Pattern) {
     const s = pattern.settings3d;
-    if (s.cameraPosition) this.camera.position.set(s.cameraPosition[0], s.cameraPosition[1], s.cameraPosition[2]);
-    if (s.controlsTarget) this.controls.target.set(s.controlsTarget[0], s.controlsTarget[1], s.controlsTarget[2]);
-    if (s.cameraFov) { this.camera.fov = s.cameraFov; this.camera.updateProjectionMatrix(); }
-    this.controls.update();
+    this.setCameraState(s.cameraPosition, s.controlsTarget, s.cameraFov);
+  }
+
+  setCameraState(
+    position: [number, number, number],
+    target: [number, number, number],
+    fov: number
+  ): void {
+    const current = this.viewport.camera.getState();
+    const same =
+      current.position.every((value, index) => value === position[index])
+      && current.target.every((value, index) => value === target[index])
+      && current.fov === fov;
+    if (same) return;
+    this.viewport.camera.setState({
+      ...current,
+      position,
+      target,
+      fov: fov || current.fov
+    });
+    this.invalidate();
   }
 
   /** Triangulate + arrange the garment and (re)build the static cloth meshes.
@@ -1077,7 +824,7 @@ export class PatternRenderer {
       // visualizationThickness extrudes the sheet into front/back shells + an edge strip
       const shellMm = pieceMat?.visualizationThickness ?? 0;
       const dualShell = separateBack || shellMm > 0;
-      const shellM = shellMm > 0 ? shellMm / 2000 : 0; // half thickness, meters
+      const shellM = shellMm > 0 ? docToWorld({ x: shellMm / 2, y: 0 }).x : 0;
       const srcPiece = pattern.pieces.find((p) => p.id === piece.pieceId);
       const name = srcPiece?.name ?? 'Piece';
       const hidden = !!srcPiece?.hidden; // object-browser visibility toggle
@@ -1135,6 +882,7 @@ export class PatternRenderer {
       mesh.frustumCulled = false;
       mesh.visible = !hidden;
       this.clothGroup.add(mesh);
+      this.viewport.picking.register(mesh, piece.pieceId, 'piece', ['face']);
       // back shell: a second mesh on the same (deforming) geometry — distinct back texture and/or
       // the inner face of a thick fabric (offset inward by half the visual thickness)
       let backMesh: THREE.Mesh | undefined;
@@ -1280,6 +1028,7 @@ export class PatternRenderer {
     this.triangleOverlays = [];
     this.clearMeasurements(); // particle indices die with the meshes; rebuilt after the new build
     for (const e of this.clothMeshes) {
+      this.viewport.picking.unregister(e.mesh);
       this.clothGroup.remove(e.mesh);
       e.geometry.dispose();
       disposeGarmentMaterial(e.mesh.material as THREE.Material);
@@ -1437,6 +1186,7 @@ export class PatternRenderer {
       const mesh = this.clothMeshes.find((e) => e.pieceId === l.pieceId)?.mesh;
       l.obj.visible = this.showLabels && !flat && (mesh ? mesh.visible : true);
     }
+    this.invalidate();
   }
 
   private lastClothPositions: Float32Array | null = null;
@@ -1447,6 +1197,7 @@ export class PatternRenderer {
     if (this.avatar && this.sim) {
       this.sim.rebuildBodyGrid(this.avatar.vertexPositions, this.avatar.indices);
     }
+    this.invalidate();
   }
 
   poseNames(): string[] {
@@ -1635,8 +1386,13 @@ export class PatternRenderer {
       const arr = new Array(piece.count * 5);
       for (let i = 0; i < piece.count; i++) {
         const g = piece.start + i;
-        arr[i * 5] = sd.positions2d[g * 4] * 1000;
-        arr[i * 5 + 1] = sd.positions2d[g * 4 + 1] * 1000;
+        const plan = worldToDoc(new THREE.Vector3(
+          sd.positions2d[g * 4],
+          sd.positions2d[g * 4 + 1],
+          0
+        ));
+        arr[i * 5] = plan.x;
+        arr[i * 5 + 1] = plan.y;
         arr[i * 5 + 2] = pos[g * 4];
         arr[i * 5 + 3] = pos[g * 4 + 1];
         arr[i * 5 + 4] = pos[g * 4 + 2];
@@ -1738,6 +1494,7 @@ export class PatternRenderer {
       group.add(mesh);
       group.visible = !this.pattern!.pieces.find((p) => p.id === piece.pieceId)?.hidden;
       this.arrangeGroup.add(group);
+      this.viewport.picking.register(mesh, piece.pieceId, 'piece', ['face']);
       this.arrangeEntries.push({ pieceId: piece.pieceId, start: piece.start, count: piece.count, group, mesh, baseLocal });
     }
 
@@ -1747,6 +1504,9 @@ export class PatternRenderer {
       this.transform.setSpace('local');
       // disable orbit while dragging the gizmo
       this.transform.addEventListener('dragging-changed', (e) => { this.controls.enabled = !(e as unknown as { value: boolean }).value; });
+      // TransformControls emits on every pointer-driven object update; this explicitly holds the
+      // on-demand composite path open for the duration of a gizmo drag.
+      this.transform.addEventListener('change', this.handleTransformChange);
       this.scene.add(this.transform.getHelper());
     }
     this.selectArrange(-1);
@@ -1772,6 +1532,7 @@ export class PatternRenderer {
       this.transform?.detach();
       this.emitModeChange(null);
     }
+    this.invalidate();
   }
 
   /** Fire onModeChange with the current mode + edit kind (arrange vs in-place manipulate). */
@@ -1783,6 +1544,7 @@ export class PatternRenderer {
   /** Gizmo mode while arranging. */
   setArrangeTransformMode(m: 'translate' | 'rotate'): void {
     this.transform?.setMode(m);
+    this.invalidate();
   }
 
   /** Global stride-4 seed positions = each piece's flat-on-body base transformed by its gizmo. */
@@ -1807,6 +1569,7 @@ export class PatternRenderer {
     this.selectArrange(-1);
     this.transform?.detach();
     for (const e of this.arrangeEntries) {
+      this.viewport.picking.unregister(e.mesh);
       this.arrangeGroup.remove(e.group);
       e.mesh.geometry.dispose();
       disposeGarmentMaterial(e.mesh.material as THREE.Material);
@@ -1817,6 +1580,7 @@ export class PatternRenderer {
     this.mode = 'view';
     this.arrangeFromDrape = false;
     this.emitModeChange(null);
+    this.invalidate();
   }
 
   /** Drape from the current arrangement: seed the sim with the moved pieces and simulate. */
@@ -1852,10 +1616,12 @@ export class PatternRenderer {
 
   setAvatarVisible(v: boolean) {
     if (this.avatar?.mesh) this.avatar.mesh.visible = v;
+    this.invalidate();
   }
 
   setClothVisible(v: boolean) {
     this.clothGroup.visible = v;
+    this.invalidate();
   }
 
   /** Overlay the cloth triangle mesh (wireframe). */
@@ -1906,6 +1672,15 @@ export class PatternRenderer {
    * resume — the cloth keeps its shape and the new params take effect immediately.
    */
   async setSimConfig(partial: Partial<SimConfig>): Promise<void> {
+    const keys = Object.keys(partial) as Array<keyof SimConfig>;
+    const changed = keys.some((key) => {
+      const next = partial[key];
+      const current = SIM_CONFIG[key];
+      return Array.isArray(next) && Array.isArray(current)
+        ? next.length !== current.length || next.some((value, index) => value !== current[index])
+        : next !== current;
+    });
+    if (!changed) return;
     Object.assign(SIM_CONFIG, partial);
     // deltaT is derived from timeStep/subSteps (the shaders bake it), so keep it in sync.
     if ('timeStep' in partial || 'subSteps' in partial) {
@@ -1963,6 +1738,7 @@ export class PatternRenderer {
     }
     this.scene.add(group);
     this.snapshotGroup = group;
+    this.invalidate();
   }
 
   clearSnapshot(): void {
@@ -1974,11 +1750,13 @@ export class PatternRenderer {
       (m.material as THREE.Material).dispose();
     }
     this.snapshotGroup = null;
+    this.invalidate();
   }
 
   setSnapshotOpacity(o: number): void {
     if (!this.snapshotGroup) return;
     for (const c of this.snapshotGroup.children) ((c as THREE.Mesh).material as THREE.MeshStandardMaterial).opacity = o;
+    this.invalidate();
   }
 
   hasSnapshot(): boolean {
@@ -2016,7 +1794,7 @@ export class PatternRenderer {
     const pts = new Array<{ x: number; y: number }>(sp.count);
     for (let i = 0; i < sp.count; i++) {
       const g = sp.start + i;
-      pts[i] = { x: p2d[g * 4] * 1000, y: p2d[g * 4 + 1] * 1000 };
+      pts[i] = worldToDoc(new THREE.Vector3(p2d[g * 4], p2d[g * 4 + 1], 0));
     }
     const pos3 = arrangeParticles(pts, arr, this.cylinders.get(marker.cylinderName) ?? null, { flipNormals: piece.settings3d.flipNormals });
     const geo = new THREE.BufferGeometry();
@@ -2331,15 +2109,11 @@ export class PatternRenderer {
   zoomToBodyMeasurement(name: string): boolean {
     const cam = this.avatar?.measurementCamera(name);
     if (!cam) return false;
-    this.camTween = {
-      fromPos: this.camera.position.clone(),
-      toPos: new THREE.Vector3(cam.position[0], cam.position[1], cam.position[2]),
-      fromTgt: this.controls.target.clone(),
-      toTgt: new THREE.Vector3(cam.target[0], cam.target[1], cam.target[2]),
-      start: performance.now(),
-      dur: 700
-    };
-    this.invalidate();
+    void this.viewport.camera.flyTo(
+      new THREE.Vector3(cam.position[0], cam.position[1], cam.position[2]),
+      new THREE.Vector3(cam.target[0], cam.target[1], cam.target[2]),
+      700
+    ).then(() => this.queueCameraSave());
     return true;
   }
 
@@ -2361,31 +2135,32 @@ export class PatternRenderer {
       else off.set(0, dist, 0.001); // top (tiny z avoids a degenerate up vector)
       toPos = toTgt.clone().add(off);
     }
-    this.camTween = {
-      fromPos: this.camera.position.clone(),
-      toPos,
-      fromTgt: this.controls.target.clone(),
-      toTgt,
-      start: performance.now(),
-      dur: 450
-    };
+    void this.viewport.camera.flyTo(toPos, toTgt, 450).then(() => this.queueCameraSave());
   }
 
   /** Camera field of view (degrees). */
   getCameraFov(): number {
-    return this.camera.fov;
+    return this.viewport.camera.getFov();
   }
   setCameraFov(deg: number): void {
-    this.camera.fov = Math.max(10, Math.min(120, deg));
-    this.camera.updateProjectionMatrix();
+    this.viewport.camera.setFov(deg);
+    this.invalidate();
     this.queueCameraSave();
   }
 
   /** Capture the current 3D view as a PNG data URL. Renders a fresh frame first, then reads the
    *  canvas in the same tick (so it works without preserveDrawingBuffer). */
   captureImage(): string {
-    if (this.composer && this.postEnabled) this.composer.render();
-    else this.renderer.render(this.scene, this.camera);
+    this.post.render({
+      bokehFStop: this.bokehFStop,
+      focusDistance: this.computeFocusDistance(),
+      fov: this.camera.fov,
+      allowBokeh:
+        this.mode === 'view'
+        && !this.grabbing
+        && !this.highlightId
+        && !this.seamToolState
+    });
     return this.renderer.domElement.toDataURL('image/png');
   }
 
@@ -2417,6 +2192,7 @@ export class PatternRenderer {
   setShowArrangementPoints(on: boolean): void {
     this.showArrangementPointsFlag = on;
     this.rebuildArrangementMarkers();
+    this.invalidate();
   }
 
   private clearArrangementMarkers(): void {
@@ -2460,6 +2236,7 @@ export class PatternRenderer {
   setMeasurements(defs: { id: string; name: string; a: { x: number; y: number }; b: { x: number; y: number }; unit: string }[]): void {
     this.measureDefs = defs;
     this.rebuildMeasurements();
+    this.invalidate();
   }
 
   private clearMeasurements(): void {
@@ -2481,7 +2258,8 @@ export class PatternRenderer {
     const count = sd.positions2d.length / 4;
     // nearest particle by plan-space (2D) distance; measurement endpoints are mm, positions2d metres
     const nearest = (pt: { x: number; y: number }): number => {
-      const px = pt.x / 1000, py = pt.y / 1000;
+      const world = docToWorld(pt);
+      const px = world.x, py = world.y;
       let best = -1, bd = 0.025 * 0.025; // 25 mm snap tolerance
       for (let i = 0; i < count; i++) {
         const dx = sd.positions2d[i * 4] - px, dy = sd.positions2d[i * 4 + 1] - py;
@@ -2521,7 +2299,11 @@ export class PatternRenderer {
       attr.setXYZ(1, bx, by, bz);
       attr.needsUpdate = true;
       e.label.position.set((ax + bx) / 2, (ay + by) / 2 + 0.02, (az + bz) / 2);
-      const lenMm = Math.hypot(bx - ax, by - ay, bz - az) * 1000;
+      const lenMm = worldToDoc(new THREE.Vector3(
+        Math.hypot(bx - ax, by - ay, bz - az),
+        0,
+        0
+      )).x;
       // re-bake the label text only on meaningful change, at most ~4×/s
       if (Math.abs(lenMm - e.lastLen) > 0.5 && now - e.lastTextAt > 250) {
         e.lastLen = lenMm;
@@ -2539,16 +2321,23 @@ export class PatternRenderer {
   }
 
   dispose() {
+    if (this.disposed) return;
     this.disposed = true;
     this.simulating = false;
-    cancelAnimationFrame(this.rafId);
+    if (this.appFrame !== 0) window.cancelAnimationFrame(this.appFrame);
+    this.appFrame = 0;
     clearTimeout(this.cameraSaveTimer);
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
     window.removeEventListener('resize', this.onResize);
-    this.themeUnsub();
+    this.controls.removeEventListener('change', this.handleControlsChange);
+    this.controls.removeEventListener('end', this.handleControlsEnd);
+    this.controls.removeEventListener('start', this.handleControlsStart);
     this.clearArrangementMarkers();
     this.apGeo?.dispose();
     this.clearMeasurements();
     if (this.mode === 'arrange') this.exitArrangeMode();
+    this.transform?.removeEventListener('change', this.handleTransformChange);
     this.transform?.detach();
     this.transform?.dispose();
     this.disposeSimFrame?.();
@@ -2556,15 +2345,8 @@ export class PatternRenderer {
     this.sim?.dispose();
     this.clearClothMeshes();
     this.avatar?.dispose();
-    this.scene.environment = null;
-    this.clearEnvRig();
-    for (const t of this.envCache.values()) t.dispose();
-    this.envCache.clear();
-    this.pmrem?.dispose();
-    try { this.composer?.dispose(); } catch { /* ignore */ }
-    this.renderer.dispose();
-    if (this.renderer.domElement.parentElement === this.container) {
-      this.container.removeChild(this.renderer.domElement);
-    }
+    this.lighting.dispose();
+    this.post.dispose();
+    this.viewport.dispose();
   }
 }

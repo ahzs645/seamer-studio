@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Pattern, Seam } from '@seamer/pattern-model';
-  import { indexPiecePathOwners, seamLabel } from '$lib/utils/patternGeometry';
+  import { indexPiecePathOwners, seamLabel } from '@seamer/pattern-model';
   import { seamReverse } from '$lib/commands/create';
   import { selectedSeamId } from '$lib/stores/pattern';
 

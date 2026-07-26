@@ -6,7 +6,7 @@
 import type { Pattern } from '@seamer/pattern-model';
 import {
   indexPaths, indexPoints, pieceWorldOutline, pieceAllowancePolygon, pieceCutCounts, type Vec2
-} from './patternGeometry';
+} from '@seamer/pattern-model';
 import { boundingBox, convexHull, concaveHull } from './hull';
 
 export interface Placement {

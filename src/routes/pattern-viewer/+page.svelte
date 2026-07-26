@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Pattern } from '@seamer/pattern-model';
-  import { pieceWorldOutline, type Vec2 } from '$lib/utils/patternGeometry';
+  import { pieceWorldOutline, type Vec2 } from '@seamer/pattern-model';
 
   interface ViewPiece {
     name: string;

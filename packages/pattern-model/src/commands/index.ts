@@ -2,6 +2,7 @@
 export * from './types';
 export * from './selection';
 export * from './element';
+export * from './compatibility';
 export * from './structural';
 export * from './piece';
 export {

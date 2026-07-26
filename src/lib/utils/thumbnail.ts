@@ -3,7 +3,7 @@
 // JPEG data URL in pattern.thumbnailUrl at save time and shown on the pattern list.
 
 import type { Pattern } from '@seamer/pattern-model';
-import { indexPaths, indexPoints, pieceWorldOutline, type Vec2 } from './patternGeometry';
+import { indexPaths, indexPoints, pieceWorldOutline, type Vec2 } from '@seamer/pattern-model';
 
 export function patternThumbnail(pattern: Pattern, w = 320, h = 240): string | null {
   if (typeof document === 'undefined') return null;

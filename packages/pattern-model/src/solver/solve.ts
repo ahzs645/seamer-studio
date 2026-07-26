@@ -3,6 +3,7 @@
 // `constraint` keep their fixed x/y. Enables measurement-driven re-drafting and true grading.
 
 import type { Pattern, ConstrainablePoint, ConstrainablePath, AlterationDelta, AlterationTrack, PathPoint, BezierHandle, PiecePath } from '../pattern';
+import { cubicLength } from '@atelier/geometry';
 import { evalExpr, referencedNames } from './formula';
 
 export type Scope = Record<string, number>;
@@ -67,11 +68,6 @@ function pointAlong(anchors: Pt[], dist: number): Pt {
 const UNIT_MM: Record<string, number> = { cm: 10, mm: 1, inch: 25.4, in: 25.4 };
 const unitToMm = (u?: string) => UNIT_MM[u ?? ''] ?? 1;
 
-function cubicAt(a: Pt, c1: Pt, c2: Pt, b: Pt, t: number): Pt {
-  const mt = 1 - t, w0 = mt * mt * mt, w1 = 3 * mt * mt * t, w2 = 3 * mt * t * t, w3 = t * t * t;
-  return { x: w0 * a.x + w1 * c1.x + w2 * c2.x + w3 * b.x, y: w0 * a.y + w1 * c1.y + w2 * c2.y + w3 * b.y };
-}
-
 /** Geometric length (mm) of a path from its currently-solved anchors (cubic when handles exist). */
 function pathLengthMm(path: ConstrainablePath, solved: Map<string, Pt>): number | null {
   const seq = path.pathPoints.map((pp) => ({ p: solved.get(pp.id), h: pp.handle }));
@@ -83,8 +79,7 @@ function pathLengthMm(path: ConstrainablePath, solved: Map<string, Pt>): number 
     if (out || inc) {
       const c1 = out ? { x: a.x + out.x, y: a.y + out.y } : a;
       const c2 = inc ? { x: b.x + inc.x, y: b.y + inc.y } : b;
-      let prev = a;
-      for (let s = 1; s <= 16; s++) { const q = cubicAt(a, c1, c2, b, s / 16); L += Math.hypot(q.x - prev.x, q.y - prev.y); prev = q; }
+      L += cubicLength({ p0: a, c0: c1, c1: c2, p1: b }, 16);
     } else L += Math.hypot(b.x - a.x, b.y - a.y);
   }
   return L;

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { polysOverlap, placeBottomLeft, type NestItem } from './markerLayout';
-import type { Vec2 } from './patternGeometry';
+import type { Vec2 } from '@seamer/pattern-model';
 
 const square = (s: number): Vec2[] => [{ x: 0, y: 0 }, { x: s, y: 0 }, { x: s, y: s }, { x: 0, y: s }];
 

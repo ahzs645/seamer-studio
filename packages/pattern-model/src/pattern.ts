@@ -27,6 +27,7 @@ export type PointConstraint =
 export interface ConstrainablePoint {
   id: string;
   name: string;
+  label?: string | null;
   x: number; // millimeters (solved value, or fixed when no constraint)
   y: number; // millimeters
   constraint?: PointConstraint; // parametric construction (optional)
@@ -57,6 +58,8 @@ export interface Variable {
 
 /** Cubic Bézier control tangents stored on a curve path point (offsets in mm, relative to anchor). */
 export interface BezierHandle {
+  /** Stable id when supplied by imported/source data; older files address handles by anchor id. */
+  id?: string;
   v1: { x: number; y: number }; // incoming control offset
   v2: { x: number; y: number }; // outgoing control offset
   sameLength: boolean;
@@ -80,6 +83,7 @@ export interface SlidingPoint {
 export interface ConstrainablePath {
   id: string;
   name: string;
+  label?: string | null;
   layerId?: string; // layer membership (defaults to the 'default' layer)
   pathType: 'line' | 'curve' | 'referenced' | string;
   pathPoints: PathPoint[];
@@ -242,6 +246,7 @@ export interface PiecePoint {
 export interface Piece {
   id: string;
   name: string;
+  label?: string | null;
   layerId?: string; // layer membership (defaults to the 'default' layer)
   type: 'dynamic' | string; // "dynamic" => closed simulatable cloth piece
   materialId: string;
@@ -331,6 +336,7 @@ export interface SeamRef {
 export interface Seam {
   id: string;
   name: string;
+  label?: string | null;
   fromPaths: SeamRef[];
   toPaths: SeamRef[];
 }
@@ -474,6 +480,7 @@ export interface PatternImage {
 export interface PatternText {
   id: string;
   value: string;
+  label?: string | null;
   x: number; // mm (plan space)
   y: number;
   fontSize?: number; // mm

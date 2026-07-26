@@ -2,11 +2,9 @@
   // Command palette — the human face of the unified command bus (Ctrl/Cmd+K). Lists every
   // registered command (the same surface exposed to automation via window.seamer), lets you
   // filter, fill parameters, and run. Selection-based commands act on the current editor selection.
-  import { COMMAND_LIST } from '$lib/commands/registry';
-  import { executeCommand, type ExecuteHost } from '$lib/commands/execute';
-  import type { CommandDef } from '$lib/commands/types';
+  import { COMMAND_LIST, type CommandDef } from '@seamer/pattern-model';
 
-  let { host, onclose }: { host: ExecuteHost; onclose: () => void } = $props();
+  let { onclose }: { onclose: () => void } = $props();
 
   let query = $state('');
   let selectedType = $state<string | null>(null);
@@ -41,7 +39,8 @@
         return;
       }
     }
-    const res = executeCommand(host, cmd.type, params);
+    const res = window.seamer?.execute(cmd.type, params);
+    if (!res) { paramError = 'Command API unavailable'; return; }
     if (!res.ok) { paramError = res.error ?? 'Failed'; return; }
     runMsg = res.changed ? `Ran ${cmd.type}` : `${cmd.type}: no change`;
     if (res.changed) onclose();

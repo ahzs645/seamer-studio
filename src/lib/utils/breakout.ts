@@ -17,7 +17,7 @@ import {
 	pieceWorldInternalPolylines,
 	pieceAllowancePolygon,
 	type Vec2
-} from '$lib/utils/patternGeometry';
+} from '@seamer/pattern-model';
 
 export type BreakoutMode = 'all' | 'seams' | 'cut' | 'internal' | 'seamsInternal';
 

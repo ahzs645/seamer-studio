@@ -2,7 +2,7 @@
 // original studio's "Errors" panel does. Pure: takes a Pattern, returns a list of issues.
 
 import type { Pattern } from '@seamer/pattern-model';
-import { indexPoints, indexPaths, pieceOutline } from '$lib/utils/patternGeometry';
+import { indexPoints, indexPaths, pieceOutline } from '@seamer/pattern-model';
 import { resolveVariables } from '@seamer/pattern-model/solver/solve';
 import { evalExpr } from '@seamer/pattern-model/solver/formula';
 

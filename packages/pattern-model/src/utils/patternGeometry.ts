@@ -8,10 +8,43 @@
 // (the mainPaths array is NOT guaranteed to already be in boundary order/orientation).
 
 import type { Pattern, ConstrainablePoint, ConstrainablePath, PathPoint, PiecePath, Piece, Seam } from '../pattern';
+import {
+  applyCornerJoins,
+  cubicAt as geometryCubicAt,
+  cubicLength as geometryCubicLength,
+  offsetPolygon,
+  offsetPolygonVariable,
+  pointInPolygon,
+  polygonCentroid as geometryPolygonCentroid,
+  reflectAcrossLine,
+  resamplePolyline as geometryResamplePolyline,
+  type CornerJoin,
+  type CubicSegment as GeometryCubicSegment,
+  type Vec2
+} from '@atelier/geometry';
 
-export interface Vec2 {
-  x: number;
-  y: number;
+export {
+  applyCornerJoins,
+  offsetPolygon,
+  offsetPolygonVariable,
+  pointInPolygon,
+  reflectAcrossLine,
+  type CornerJoin,
+  type Vec2
+};
+
+/**
+ * Preserve the legacy empty-input result (`NaN`, `NaN`). Atelier returns the more defensive
+ * origin, but changing this public helper would hide invalid empty piece outlines from callers.
+ */
+export function polygonCentroid(poly: Vec2[]): Vec2 {
+  return poly.length === 0 ? { x: Number.NaN, y: Number.NaN } : geometryPolygonCentroid(poly);
+}
+
+/** Preserve the legacy RangeError for nonsensical negative counts; delegate valid work to Atelier. */
+export function resamplePolyline(poly: Vec2[], n: number): Vec2[] {
+  if (poly.length > 0 && n < 0) throw new RangeError('Invalid array length');
+  return geometryResamplePolyline(poly, n);
 }
 
 /** A piece-local point mapped to its placed position on the 2D plan. */
@@ -23,6 +56,42 @@ export interface CubicSegment {
   c2: Vec2;
   b: Vec2;
   curve: boolean;
+}
+
+const geometryCubic = (segment: CubicSegment): GeometryCubicSegment => ({
+  p0: segment.a,
+  c0: segment.c1,
+  c1: segment.c2,
+  p1: segment.b
+});
+
+/**
+ * Adapt Seamer's public segment shape and retain its `curve: false` linear semantics. Atelier's
+ * evaluator deliberately has no curve flag and would otherwise honour arbitrary control points.
+ */
+export function cubicAt(segment: CubicSegment, t: number): Vec2 {
+  return segment.curve
+    ? geometryCubicAt(geometryCubic(segment), t)
+    : {
+        x: segment.a.x + (segment.b.x - segment.a.x) * t,
+        y: segment.a.y + (segment.b.y - segment.a.y) * t
+      };
+}
+
+/** Use Atelier for normal curve lengths while preserving Seamer's public edge-case semantics. */
+export function segmentLength(segment: CubicSegment, samples = 24): number {
+  if (!segment.curve) return Math.hypot(segment.b.x - segment.a.x, segment.b.y - segment.a.y);
+  if (Number.isInteger(samples) && samples >= 1) {
+    return geometryCubicLength(geometryCubic(segment), samples);
+  }
+  let length = 0;
+  let previous = segment.a;
+  for (let i = 1; i <= samples; i += 1) {
+    const point = cubicAt(segment, i / samples);
+    length += Math.hypot(point.x - previous.x, point.y - previous.y);
+    previous = point;
+  }
+  return length;
 }
 
 export function indexPoints(pattern: Pattern): Map<string, ConstrainablePoint> {
@@ -70,31 +139,6 @@ export function pathSegments(
     segs.push({ a, c1, c2, b, curve });
   }
   return segs;
-}
-
-export function cubicAt(s: CubicSegment, t: number): Vec2 {
-  if (!s.curve) return { x: s.a.x + (s.b.x - s.a.x) * t, y: s.a.y + (s.b.y - s.a.y) * t };
-  const mt = 1 - t;
-  const w0 = mt * mt * mt;
-  const w1 = 3 * mt * mt * t;
-  const w2 = 3 * mt * t * t;
-  const w3 = t * t * t;
-  return {
-    x: w0 * s.a.x + w1 * s.c1.x + w2 * s.c2.x + w3 * s.b.x,
-    y: w0 * s.a.y + w1 * s.c1.y + w2 * s.c2.y + w3 * s.b.y
-  };
-}
-
-export function segmentLength(s: CubicSegment, samples = 24): number {
-  if (!s.curve) return Math.hypot(s.b.x - s.a.x, s.b.y - s.a.y);
-  let len = 0;
-  let prev = s.a;
-  for (let i = 1; i <= samples; i++) {
-    const p = cubicAt(s, i / samples);
-    len += Math.hypot(p.x - prev.x, p.y - prev.y);
-    prev = p;
-  }
-  return len;
 }
 
 function dist(a: Vec2, b: Vec2): number {
@@ -177,16 +221,6 @@ export function piecePathPolyline(
  * Build a single closed boundary polyline for a piece by stitching its mainPath edges on shared
  * endpoints. Robust to arbitrary edge order/orientation.
  */
-/** Reflect a point across the infinite line through a and b. */
-export function reflectAcrossLine(p: Vec2, a: Vec2, b: Vec2): Vec2 {
-  const dx = b.x - a.x, dy = b.y - a.y;
-  const len2 = dx * dx + dy * dy;
-  if (len2 < 1e-9) return { x: 2 * a.x - p.x, y: 2 * a.y - p.y };
-  const t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2;
-  const fx = a.x + t * dx, fy = a.y + t * dy; // foot of perpendicular
-  return { x: 2 * fx - p.x, y: 2 * fy - p.y };
-}
-
 /**
  * Turn a half-piece boundary loop into the full symmetric outline by mirroring across the fold line
  * (a→b). Interior points lying on the fold are dropped; the remaining free boundary is reflected and
@@ -512,28 +546,6 @@ export function seamLabel(
   return `${seamRefLabel(pattern, from, owners)} -> ${seamRefLabel(pattern, to, owners)}${mirrored}${reversed}`;
 }
 
-/** Resample a polyline to exactly `n` points evenly spaced by arc length. */
-export function resamplePolyline(poly: Vec2[], n: number): Vec2[] {
-  return resample(poly, n);
-}
-function resample(poly: Vec2[], n: number): Vec2[] {
-  if (poly.length === 0) return [];
-  if (poly.length === 1 || n <= 1) return new Array(n).fill(0).map(() => ({ ...poly[0] }));
-  const cum: number[] = [0];
-  for (let i = 1; i < poly.length; i++) cum.push(cum[i - 1] + dist(poly[i - 1], poly[i]));
-  const total = cum[cum.length - 1] || 1;
-  const out: Vec2[] = [];
-  let j = 0;
-  for (let k = 0; k < n; k++) {
-    const target = (total * k) / (n - 1);
-    while (j < poly.length - 2 && cum[j + 1] < target) j++;
-    const segLen = cum[j + 1] - cum[j] || 1;
-    const f = Math.max(0, Math.min(1, (target - cum[j]) / segLen));
-    out.push({ x: poly[j].x + (poly[j + 1].x - poly[j].x) * f, y: poly[j].y + (poly[j + 1].y - poly[j].y) * f });
-  }
-  return out;
-}
-
 export interface SeamGeometry {
   id: string;
   /** index of the seam in pattern.seams (drives its colour) */
@@ -615,8 +627,8 @@ export function seamGeometry(
   const n = Math.max(2, Math.min(8, Math.round(Math.max(
     polylineLength(fromEdge), polylineLength(toEdge)
   ) / 60)));
-  const a = resample(fromEdge, n);
-  const b = resample(toEdge, n);
+  const a = resamplePolyline(fromEdge, n);
+  const b = resamplePolyline(toEdge, n);
   const rungs = a.map((p, i) => ({ a: p, b: b[i] }));
   const index = pattern.seams.indexOf(seam);
   return { id: seam.id, index, pieceIds: [...pieceIds], fromEdge, toEdge, rungs };
@@ -643,46 +655,6 @@ export function allSeamGeometry(
   return out;
 }
 
-export function polygonCentroid(poly: Vec2[]): Vec2 {
-  let x = 0;
-  let y = 0;
-  for (const p of poly) { x += p.x; y += p.y; }
-  return { x: x / poly.length, y: y / poly.length };
-}
-
-/**
- * Offset a closed polygon by `dist` mm using miter joins (for seam allowance). Positive `dist`
- * grows the polygon outward, negative shrinks it inward — independent of vertex winding. Sharp
- * corners are clamped by a miter limit so spikes don't blow up. Returns a new vertex per input vertex.
- */
-export function offsetPolygon(poly: Vec2[], dist: number, miterLimit = 4): Vec2[] {
-  const n = poly.length;
-  if (n < 3 || dist === 0) return poly.map((p) => ({ ...p }));
-  let area = 0;
-  for (let i = 0; i < n; i++) { const a = poly[i], b = poly[(i + 1) % n]; area += a.x * b.y - b.x * a.y; }
-  const ccw = area > 0; // outward normal of a directed edge is to its right for a CCW loop
-  const unit = (x: number, y: number): Vec2 => { const l = Math.hypot(x, y) || 1; return { x: x / l, y: y / l }; };
-  const out: Vec2[] = [];
-  for (let i = 0; i < n; i++) {
-    const prev = poly[(i - 1 + n) % n], cur = poly[i], next = poly[(i + 1) % n];
-    const e0 = unit(cur.x - prev.x, cur.y - prev.y);
-    const e1 = unit(next.x - cur.x, next.y - cur.y);
-    const n0 = ccw ? { x: e0.y, y: -e0.x } : { x: -e0.y, y: e0.x };
-    const n1 = ccw ? { x: e1.y, y: -e1.x } : { x: -e1.y, y: e1.x };
-    const denom = 1 + (n0.x * n1.x + n0.y * n1.y);
-    let off: Vec2;
-    if (Math.abs(denom) < 1e-4) off = { x: n0.x * dist, y: n0.y * dist }; // near-180° edge
-    else {
-      off = { x: (dist * (n0.x + n1.x)) / denom, y: (dist * (n0.y + n1.y)) / denom };
-      const cap = Math.abs(dist) * miterLimit;
-      const ol = Math.hypot(off.x, off.y);
-      if (ol > cap && ol > 0) { off.x = (off.x * cap) / ol; off.y = (off.y * cap) / ol; }
-    }
-    out.push({ x: cur.x + off.x, y: cur.y + off.y });
-  }
-  return out;
-}
-
 // --- Seam-allowance corner joins -------------------------------------------------------------
 // The seam-allowance cut line is the boundary outline offset by the allowance. Where two edges
 // meet, the corner can be finished in the original's full vocabulary (Seamly/Valentina lineage):
@@ -694,158 +666,6 @@ export function offsetPolygon(poly: Vec2[], dist: number, miterLimit = 4): Vec2[
 //   secondEdgeSymmetry  — cut along the SECOND original edge mirrored across the first offset edge
 //   firstEdgeRightAngle — cut perpendicular to the first edge through the true corner
 //   secondEdgeRightAngle— cut perpendicular to the second edge through the true corner
-export interface CornerJoin {
-  type:
-    | 'intersection'
-    | 'radius'
-    | 'byLength'
-    | 'noJoin'
-    | 'firstEdgeSymmetry'
-    | 'secondEdgeSymmetry'
-    | 'firstEdgeRightAngle'
-    | 'secondEdgeRightAngle';
-  radius?: number; // mm (radius)
-  maxLength?: number; // mm cap from the true corner (intersection); 0 = uncapped
-  length?: number; // mm chamfer back-off (byLength)
-}
-
-function unit(from: Vec2, to: Vec2): Vec2 {
-  const dx = to.x - from.x, dy = to.y - from.y;
-  const l = Math.hypot(dx, dy) || 1;
-  return { x: dx / l, y: dy / l };
-}
-
-/**
- * Rewrite the corners of an offset allowance polygon `allow` (one vertex per `outline` vertex) per a
- * lookup that maps each true (un-offset) corner to its join spec. `baseDist` is the allowance width,
- * used to cap intersection miters. Vertices with no join (or a degenerate one) pass through unchanged.
- */
-export function applyCornerJoins(
-  allow: Vec2[],
-  outline: Vec2[],
-  joinFor: (corner: Vec2) => CornerJoin | null,
-  baseDist: number
-): Vec2[] {
-  const n = allow.length;
-  if (n < 3 || outline.length !== n) return allow;
-  const out: Vec2[] = [];
-  for (let i = 0; i < n; i++) {
-    const cur = allow[i];
-    const prev = allow[(i - 1 + n) % n];
-    const next = allow[(i + 1) % n];
-    const join = joinFor(outline[i]);
-    if (!join) { out.push(cur); continue; }
-
-    // directions from the corner along each adjacent offset edge (away from the corner)
-    const u1 = unit(cur, prev);
-    const u2 = unit(cur, next);
-    const lenPrev = Math.hypot(prev.x - cur.x, prev.y - cur.y);
-    const lenNext = Math.hypot(next.x - cur.x, next.y - cur.y);
-    const cosA = Math.max(-1, Math.min(1, u1.x * u2.x + u1.y * u2.y));
-    const half = Math.acos(cosA) / 2; // half the interior angle at the corner
-
-    if (join.type === 'radius' && (join.radius ?? 0) > 0.01 && half > 0.01 && half < Math.PI / 2 - 0.01) {
-      const r = join.radius as number;
-      let t = r / Math.tan(half); // tangent length from the corner along each edge
-      t = Math.min(t, lenPrev * 0.98, lenNext * 0.98);
-      if (t <= 0.01) { out.push(cur); continue; }
-      const p1 = { x: cur.x + u1.x * t, y: cur.y + u1.y * t };
-      const p2 = { x: cur.x + u2.x * t, y: cur.y + u2.y * t };
-      const b = unit({ x: 0, y: 0 }, { x: u1.x + u2.x, y: u1.y + u2.y });
-      const rEff = t * Math.tan(half); // actual radius after clamping t
-      const center = { x: cur.x + b.x * (rEff / Math.sin(half)), y: cur.y + b.y * (rEff / Math.sin(half)) };
-      let a1 = Math.atan2(p1.y - center.y, p1.x - center.x);
-      let a2 = Math.atan2(p2.y - center.y, p2.x - center.x);
-      // sweep the short way
-      let d = a2 - a1;
-      while (d > Math.PI) d -= 2 * Math.PI;
-      while (d < -Math.PI) d += 2 * Math.PI;
-      const steps = Math.max(2, Math.ceil(Math.abs(d) / 0.4));
-      for (let s = 0; s <= steps; s++) {
-        const a = a1 + (d * s) / steps;
-        out.push({ x: center.x + Math.cos(a) * rEff, y: center.y + Math.sin(a) * rEff });
-      }
-      continue;
-    }
-
-    if (join.type === 'byLength' && (join.length ?? 0) > 0.01) {
-      const L = Math.min(join.length as number, lenPrev * 0.98, lenNext * 0.98);
-      if (L <= 0.01) { out.push(cur); continue; }
-      out.push({ x: cur.x + u1.x * L, y: cur.y + u1.y * L });
-      out.push({ x: cur.x + u2.x * L, y: cur.y + u2.y * L });
-      continue;
-    }
-
-    if (join.type === 'intersection' && (join.maxLength ?? 0) > 0.01) {
-      // clamp the miter spike: distance from the true corner to the offset vertex
-      const corner = outline[i];
-      const vx = cur.x - corner.x, vy = cur.y - corner.y;
-      const d = Math.hypot(vx, vy);
-      const cap = baseDist + (join.maxLength as number);
-      if (d > cap && d > 0.01) {
-        out.push({ x: corner.x + (vx / d) * cap, y: corner.y + (vy / d) * cap });
-        continue;
-      }
-    }
-
-    // The remaining types cut the corner with a constructed line (Valentina's EkvPoint angle
-    // modes). p2 = true corner; bigLine1 = offset edge before it (prev→cur), bigLine2 = after
-    // (cur→next). A candidate point further than width×2.4 from p2 falls back to the miter.
-    if (join.type === 'noJoin' || join.type === 'firstEdgeSymmetry' || join.type === 'secondEdgeSymmetry' ||
-        join.type === 'firstEdgeRightAngle' || join.type === 'secondEdgeRightAngle') {
-      const p1o = outline[(i - 1 + n) % n];
-      const p2 = outline[i];
-      const p3o = outline[(i + 1) % n];
-      const d1 = unit(prev, cur); // along offset edge 1, toward the corner
-      const d2 = unit(cur, next); // along offset edge 2, away from the corner
-      const maxL = baseDist * 2.4;
-      const valid = (p: Vec2 | null): p is Vec2 => !!p && Math.hypot(p.x - p2.x, p.y - p2.y) <= maxL + baseDist;
-
-      if (join.type === 'noJoin') {
-        // pinch to the true corner: offset-edge-1 end -> corner -> offset-edge-2 start
-        const proj = (a: Vec2, d: Vec2): Vec2 => {
-          const t = (p2.x - a.x) * d.x + (p2.y - a.y) * d.y;
-          return { x: a.x + d.x * t, y: a.y + d.y * t };
-        };
-        out.push(proj(prev, d1), { ...p2 }, proj(cur, d2));
-        continue;
-      }
-
-      let cutP: Vec2 | null = null; // a point on the cut line
-      let cutD: Vec2 | null = null; // its direction
-      if (join.type === 'firstEdgeRightAngle' || join.type === 'secondEdgeRightAngle') {
-        const e = join.type === 'firstEdgeRightAngle' ? unit(p1o, p2) : unit(p2, p3o);
-        cutP = p2;
-        cutD = { x: -e.y, y: e.x };
-      } else {
-        // edge symmetry: mirror the original edge across the OPPOSITE offset edge's line
-        const [ea, eb, axisA, axisB] = join.type === 'firstEdgeSymmetry'
-          ? [p1o, p2, cur, next]
-          : [p2, p3o, prev, cur];
-        const fa = reflectAcrossLine(ea, axisA, axisB);
-        const fb = reflectAcrossLine(eb, axisA, axisB);
-        if (Math.hypot(fb.x - fa.x, fb.y - fa.y) > 1e-6) {
-          cutP = fa;
-          cutD = unit(fa, fb);
-        }
-      }
-      if (cutP && cutD) {
-        const px1 = intersectLines(cutP, cutD, prev, d1); // on offset edge 1
-        const px2 = intersectLines(cutP, cutD, cur, d2); // on offset edge 2
-        if (valid(px1) && valid(px2)) {
-          out.push(px1, px2);
-          continue;
-        }
-      }
-      // degenerate (parallel / too far): keep the miter vertex
-      out.push(cur);
-      continue;
-    }
-    out.push(cur);
-  }
-  return out;
-}
-
 /**
  * Stitch a piece's boundary like pieceOutline, but also return, per outline segment i (from vertex i
  * to vertex i+1), the id of the mainPath that produced it — so per-edge widths can be applied.
@@ -886,49 +706,6 @@ export function pieceOutlineTagged(
   }
   edgeOf.push(edgeOf[edgeOf.length - 1] ?? edges[0].id); // closing segment
   return { pts: loop, edgeOf };
-}
-
-function intersectLines(p0: Vec2, d0: Vec2, p1: Vec2, d1: Vec2): Vec2 | null {
-  const den = d0.x * d1.y - d0.y * d1.x;
-  if (Math.abs(den) < 1e-9) return null;
-  const t = ((p1.x - p0.x) * d1.y - (p1.y - p0.y) * d1.x) / den;
-  return { x: p0.x + d0.x * t, y: p0.y + d0.y * t };
-}
-
-/**
- * Offset a closed polygon with a per-edge distance `distOf(edgeIndex)` (edge i = vertex i→i+1).
- * Each output vertex is the intersection of the two adjacent offset lines (miter), clamped so a
- * sharp corner can't spike past `miterLimit × width`. Generalises offsetPolygon to variable widths.
- */
-export function offsetPolygonVariable(poly: Vec2[], distOf: (edgeIndex: number) => number, miterLimit = 4): Vec2[] {
-  const n = poly.length;
-  if (n < 3) return poly.map((p) => ({ ...p }));
-  let area = 0;
-  for (let i = 0; i < n; i++) { const a = poly[i], b = poly[(i + 1) % n]; area += a.x * b.y - b.x * a.y; }
-  const ccw = area > 0;
-  const unit = (x: number, y: number): Vec2 => { const l = Math.hypot(x, y) || 1; return { x: x / l, y: y / l }; };
-  const nrm = (e: Vec2): Vec2 => (ccw ? { x: e.y, y: -e.x } : { x: -e.y, y: e.x });
-  const lines: { p: Vec2; d: Vec2; nm: Vec2 }[] = [];
-  for (let i = 0; i < n; i++) {
-    const a = poly[i], b = poly[(i + 1) % n];
-    const e = unit(b.x - a.x, b.y - a.y);
-    const nm = nrm(e);
-    const di = distOf(i);
-    lines.push({ p: { x: a.x + nm.x * di, y: a.y + nm.y * di }, d: e, nm });
-  }
-  const out: Vec2[] = [];
-  for (let i = 0; i < n; i++) {
-    const L0 = lines[(i - 1 + n) % n], L1 = lines[i];
-    const x = intersectLines(L0.p, L0.d, L1.p, L1.d);
-    if (!x) { out.push({ x: poly[i].x + L1.nm.x * distOf(i), y: poly[i].y + L1.nm.y * distOf(i) }); continue; }
-    const d = Math.hypot(x.x - poly[i].x, x.y - poly[i].y);
-    const cap = Math.max(Math.abs(distOf((i - 1 + n) % n)), Math.abs(distOf(i))) * miterLimit;
-    if (cap > 0 && d > cap) {
-      const vx = x.x - poly[i].x, vy = x.y - poly[i].y;
-      out.push({ x: poly[i].x + (vx / d) * cap, y: poly[i].y + (vy / d) * cap });
-    } else out.push(x);
-  }
-  return out;
 }
 
 /**
@@ -989,16 +766,4 @@ export function pieceAllowancePolygon(
     return null;
   };
   return applyCornerJoins(allow, outline, joinFor, Math.abs(signedDist));
-}
-
-export function pointInPolygon(p: Vec2, poly: Vec2[]): boolean {
-  let inside = false;
-  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-    const xi = poly[i].x;
-    const yi = poly[i].y;
-    const xj = poly[j].x;
-    const yj = poly[j].y;
-    if (yi > p.y !== yj > p.y && p.x < ((xj - xi) * (p.y - yi)) / (yj - yi) + xi) inside = !inside;
-  }
-  return inside;
 }

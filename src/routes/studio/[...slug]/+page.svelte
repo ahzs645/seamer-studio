@@ -11,7 +11,7 @@
   import MaterialPanel from '$lib/components/MaterialPanel.svelte';
   import SeamPanel from '$lib/components/SeamPanel.svelte';
   import ObjectBrowser from '$lib/components/ObjectBrowser.svelte';
-  import { pattern, patternEditor, selectedPointIds, selectedPathIds, selectedPieceIds, pushUndo, undo, redo, undoLabel, redoLabel, restoreHistory, pendingPaste, panelRequest, installSeamerAutomation } from '$lib/stores/pattern';
+  import { pattern, patternEditor, selectedPointIds, selectedPathIds, selectedPieceIds, pushUndo, undo, redo, undoLabel, redoLabel, restoreHistory, pendingPaste, panelRequest, installSeamerAutomation, getPatternEditor } from '$lib/stores/pattern';
   import EditorStateBridge from '$lib/components/EditorStateBridge.svelte';
   import { loadPattern, savePattern as saveToDB } from '$lib/stores/localDB';
   import { EMPTY_PATTERN, type Pattern, type Piece, type ConstrainablePoint, type ConstrainablePath } from '@seamer/pattern-model';
@@ -51,7 +51,6 @@
   import SettingsModal from '$lib/components/SettingsModal.svelte';
   import StatusBar from '$lib/components/StatusBar.svelte';
   import HistoryMenu from '$lib/components/HistoryMenu.svelte';
-  import { executeCommand, type ExecuteHost } from '$lib/commands';
   import { configureMcpSession } from '$lib/stores/mcpSession';
   import { get } from 'svelte/store';
   import { autoSaveSeconds } from '$lib/stores/pattern';
@@ -189,15 +188,7 @@
   // Command-bus host: the unified command layer commits through the same undo-aware update path the
   // UI uses (handlePatternUpdate), reads the live selection, and is exposed to scripts/agents via
   // window.seamer. No login/network — every command runs in-page.
-  const commandHost: ExecuteHost = {
-    getPattern: () => $state.snapshot(currentPattern) as Pattern,
-    getSelection: () => ({
-      pointIds: [...get(selectedPointIds)],
-      pathIds: [...get(selectedPathIds)],
-      pieceIds: [...get(selectedPieceIds)]
-    }),
-    apply: (next, label) => handlePatternUpdate(next, label)
-  };
+  const getPatternSnapshot = () => $state.snapshot(currentPattern) as Pattern;
 
   onMount(() => {
     const disposeCommandApi = installSeamerAutomation();
@@ -208,9 +199,9 @@
     // full-pattern replacements land in the undo history as 'External edit', command ops run through
     // the same command bus as the palette / window.seamer.
     const disposeMcpSession = configureMcpSession({
-      getPattern: commandHost.getPattern,
+      getPattern: getPatternSnapshot,
       applyPattern: (next) => handlePatternUpdate(next, 'External edit'),
-      executeCommand: (name, payload) => executeCommand(commandHost, name, payload)
+      executeCommand: (name, payload) => { getPatternEditor().execute(name, payload); }
     });
     (async () => {
       // Pattern id lives in the URL path (/studio/<id>), with ?id= kept for older links.
@@ -518,7 +509,7 @@
       const hasSel = $selectedPointIds.size || $selectedPathIds.size || $selectedPieceIds.size;
       if (hasSel && !e.metaKey && !e.ctrlKey && !e.altKey) {
         const step = e.shiftKey ? 10 : 1;
-        const move = (dx: number, dy: number) => { e.preventDefault(); commandHost && (window.seamer?.execute('selection.move', { dx, dy })); };
+        const move = (dx: number, dy: number) => { e.preventDefault(); window.seamer?.execute('selection.move', { dx, dy }); };
         if (e.key === 'ArrowLeft') move(-step, 0);
         else if (e.key === 'ArrowRight') move(step, 0);
         else if (e.key === 'ArrowUp') move(0, -step);
@@ -748,7 +739,7 @@
 {#if showTour}<StudioTour onclose={() => (showTour = false)} />{/if}
 <WhatsNewModal />
 <ReviewPromptDialog {saveCount} />
-{#if showCommandPalette}<CommandPalette host={commandHost} onclose={() => (showCommandPalette = false)} />{/if}
+{#if showCommandPalette}<CommandPalette onclose={() => (showCommandPalette = false)} />{/if}
 {#if showBugReport}<BugReportModal {currentPattern} onclose={() => (showBugReport = false)} />{/if}
 {#if showCuttingRoom}<CuttingRoomModal {currentPattern} onchange={handlePatternUpdate} onclose={() => (showCuttingRoom = false)} />{/if}
 {#if showVersions}<VersionsModal {currentPattern} onrestore={applyImported} onchange={handlePatternUpdate} onclose={() => (showVersions = false)} />{/if}

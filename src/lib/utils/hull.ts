@@ -3,44 +3,21 @@
 // library). Re-implemented here dependency-free and pure, so the rebuild can compute a wrap
 // boundary around nested/placed pieces for cutting without the server-backed cutting room.
 
-export interface Pt { x: number; y: number }
+import { bounds, convexHull, type Vec2 } from '@atelier/geometry';
+
+export type Pt = Vec2;
+export { convexHull };
 
 /** Axis-aligned bounding box as a closed 5-point polygon (last === first). */
 export function boundingBox(points: Pt[]): Pt[] {
 	if (points.length === 0) return [];
-	let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-	for (const p of points) {
-		if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
-		if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
-	}
+	const { minX, minY, maxX, maxY } = bounds(points);
 	return [
 		{ x: minX, y: minY }, { x: maxX, y: minY }, { x: maxX, y: maxY }, { x: minX, y: maxY }, { x: minX, y: minY }
 	];
 }
 
 const cross = (o: Pt, a: Pt, b: Pt) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
-
-/** Convex hull (Andrew's monotone chain), counter-clockwise, NOT closed (no repeated first point). */
-export function convexHull(points: Pt[]): Pt[] {
-	const pts = points.slice().sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x));
-	// dedupe identical points
-	const uniq: Pt[] = [];
-	for (const p of pts) if (!uniq.length || uniq[uniq.length - 1].x !== p.x || uniq[uniq.length - 1].y !== p.y) uniq.push(p);
-	if (uniq.length < 3) return uniq;
-	const lower: Pt[] = [];
-	for (const p of uniq) {
-		while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
-		lower.push(p);
-	}
-	const upper: Pt[] = [];
-	for (let i = uniq.length - 1; i >= 0; i--) {
-		const p = uniq[i];
-		while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
-		upper.push(p);
-	}
-	lower.pop(); upper.pop();
-	return lower.concat(upper);
-}
 
 const dist2 = (a: Pt, b: Pt) => (a.x - b.x) ** 2 + (a.y - b.y) ** 2;
 

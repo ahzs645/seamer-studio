@@ -14,5 +14,12 @@ import type { Pattern } from '../pattern';
 
 /** Pattern-specific aliases keep command declarations terse while using Atelier's real bus types. */
 export type CommandContext = AtelierCommandContext<Pattern>;
-export type CommandDef = AtelierCommandDef<Pattern, Record<string, unknown>>;
+/**
+ * Seamer exposes replay safety in its public command catalog. Atelier deliberately keeps its
+ * generic command contract smaller, so this app-specific metadata remains on the pattern model.
+ */
+export type SeamerCommandDef = AtelierCommandDef<Pattern, Record<string, unknown>> & {
+  replayable?: boolean;
+};
+export type CommandDef = SeamerCommandDef;
 export type { CommandResult };

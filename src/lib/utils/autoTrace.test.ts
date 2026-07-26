@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { simplifyPolyline, simplifyClosed, closeLoops, traceFromHPGL } from './autoTrace';
-import type { Vec2 } from './patternGeometry';
+import type { Vec2 } from '@seamer/pattern-model';
 
 const sq = (x0: number, y0: number, s: number): Vec2[] => [
   { x: x0, y: y0 }, { x: x0 + s, y: y0 }, { x: x0 + s, y: y0 + s }, { x: x0, y: y0 + s }, { x: x0, y: y0 }

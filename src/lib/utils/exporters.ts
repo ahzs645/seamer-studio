@@ -2,12 +2,23 @@
 // Geometry is taken from the placed (world) piece outlines + internal paths.
 
 import type { Pattern } from '@seamer/pattern-model';
-import { toSVG, type Drawing } from '@atelier/io';
+import {
+  polylinesToHPGL,
+  polylinesToPDF,
+  tilePageCount,
+  toDXF,
+  toSVG,
+  type Drawing,
+  type MmPoly,
+  type MmText,
+  type PdfLayoutOpts,
+  type PdfStroke
+} from '@atelier/io';
+export { downloadBlob, downloadText } from '@atelier/io/browser';
 export { toGLTF as sceneToGLTF } from '@atelier/io/three';
 import {
   indexPaths, indexPoints, pieceWorldOutline, pieceWorldInternalPolylines, pieceAllowancePolygon, pieceTransform, pieceShrinkageScale, polygonCentroid, type Vec2
-} from './patternGeometry';
-import { tilePageCount } from './pdf';
+} from '@seamer/pattern-model';
 
 export type Layer = 'pattern' | 'seam-allowance' | 'internal' | 'marker';
 export interface Poly { pts: Vec2[]; closed: boolean; layer: Layer }
@@ -159,19 +170,14 @@ ${groups.join('\n')}
 }
 
 export function patternToDXF(pattern: Pattern): string {
-  const polys = collectPolylines(pattern);
-  const lines: string[] = ['0', 'SECTION', '2', 'ENTITIES'];
-  for (const p of polys) {
-    lines.push('0', 'LWPOLYLINE', '8', p.layer, '90', String(p.pts.length), '70', p.closed ? '1' : '0');
-    for (const v of p.pts) lines.push('10', v.x.toFixed(3), '20', v.y.toFixed(3));
-  }
-  lines.push('0', 'ENDSEC', '0', 'EOF');
-  return lines.join('\n');
+  const drawing = patternToDrawing(pattern);
+  // The previous DXF surface exported geometry only; keep text out so existing CAD output is stable.
+  return toDXF({ ...drawing, texts: [] });
 }
 
 // --- Vector PDF (tiled, true-scale) ------------------------------------------
 
-const PDF_LAYER_STYLE: Record<Layer, import('./pdf').PdfStroke> = {
+const PDF_LAYER_STYLE: Record<Layer, PdfStroke> = {
   'pattern': { color: [0, 0, 0], width: 0.6 },
   'seam-allowance': { color: [0.53, 0.53, 0.53], width: 0.4, dash: [3, 2] },
   'internal': { color: [0.27, 0.27, 0.27], width: 0.4, dash: [2, 2] },
@@ -188,9 +194,13 @@ function hexToRgb(hex?: string): [number, number, number] {
 const pdfBlob = (bytes: Uint8Array): Blob => new Blob([bytes.buffer as ArrayBuffer], { type: 'application/pdf' });
 
 /** Pattern → multi-page vector PDF Blob at true mm scale (tiled across the chosen page size). */
-export async function patternToPDF(pattern: Pattern, opts: import('./pdf').PdfLayoutOpts = {}): Promise<Blob> {
-  const { polylinesToPDF } = await import('./pdf');
-  const polys = collectPolylines(pattern).map((p) => ({ pts: p.pts, closed: p.closed, style: PDF_LAYER_STYLE[p.layer] }));
+export async function patternToPDF(pattern: Pattern, opts: PdfLayoutOpts = {}): Promise<Blob> {
+  const drawing = patternToDrawing(pattern);
+  const polys = drawing.polys.map((poly) => ({
+    pts: poly.pts,
+    closed: poly.closed,
+    style: PDF_LAYER_STYLE[poly.layer as Layer]
+  }));
   const texts = (pattern.texts ?? []).filter((t) => t.value).map((t) => ({
     x: t.x, y: t.y, sizeMm: t.fontSize ?? 15, text: t.value,
     color: hexToRgb(t.color), anchor: (t.align === 'left' ? 'start' : t.align === 'right' ? 'end' : 'middle') as 'start' | 'middle' | 'end',
@@ -202,11 +212,10 @@ export async function patternToPDF(pattern: Pattern, opts: import('./pdf').PdfLa
 /** Nested marker layout → multi-page vector PDF Blob (cut polygons dashed, stitch outlines solid). */
 export async function markerToPDF(
   layout: { placements: { name: string; poly: Vec2[]; outline: Vec2[] }[]; fabricWidthMm: number; usedLengthMm: number },
-  opts: import('./pdf').PdfLayoutOpts = {}
+  opts: PdfLayoutOpts = {}
 ): Promise<Blob> {
-  const { polylinesToPDF } = await import('./pdf');
-  const polys: import('./pdf').MmPoly[] = [];
-  const texts: import('./pdf').MmText[] = [];
+  const polys: MmPoly[] = [];
+  const texts: MmText[] = [];
   // marker space has y down; flip to y-up mm for the PDF (about usedLength)
   const flip = (p: Vec2): Vec2 => ({ x: p.x, y: layout.usedLengthMm - p.y });
   for (const pl of layout.placements) {
@@ -227,10 +236,12 @@ const HPGL_PEN: Record<Layer, number> = { 'pattern': 1, 'seam-allowance': 2, 'in
 /** Pattern → HPGL plotter program (pen 1 stitch line, 2 cut line, 3 internal dashed, 4 markers),
  *  with drill-hole crosses and piece-name labels written into the file (pens 5). */
 export async function patternToHPGL(pattern: Pattern): Promise<string> {
-  const { toHPGL } = await import('./hpgl');
-  const polys = collectPolylines(pattern).map((p) => ({
-    pts: p.pts, closed: p.closed, pen: HPGL_PEN[p.layer],
-    lineType: p.layer === 'internal' ? 2 : undefined
+  const drawing = patternToDrawing(pattern);
+  const polys = drawing.polys.map((poly) => ({
+    pts: poly.pts,
+    closed: poly.closed,
+    pen: HPGL_PEN[poly.layer as Layer],
+    lineType: poly.layer === 'internal' ? 2 : undefined
   }));
   const points = indexPoints(pattern);
   const crosses: { x: number; y: number }[] = [];
@@ -252,12 +263,11 @@ export async function patternToHPGL(pattern: Pattern): Promise<string> {
       });
     }
   }
-  return toHPGL(polys, { crosses, texts });
+  return polylinesToHPGL(polys, { crosses, texts });
 }
 
 /** Nested marker → HPGL (cut polygons on pen 2, stitch outlines on pen 1, labels on pen 5). */
 export async function markerToHPGL(layout: { placements: { name?: string; poly: Vec2[]; outline: Vec2[] }[]; usedLengthMm: number }): Promise<string> {
-  const { toHPGL } = await import('./hpgl');
   const flip = (p: Vec2): Vec2 => ({ x: p.x, y: layout.usedLengthMm - p.y });
   const polys: { pts: Vec2[]; closed: boolean; pen: number }[] = [];
   const texts: { text: string; x: number; y: number; sizeMm: number; rotationDeg?: number }[] = [];
@@ -275,7 +285,7 @@ export async function markerToHPGL(layout: { placements: { name?: string; poly: 
       });
     }
   }
-  return toHPGL(polys, { texts });
+  return polylinesToHPGL(polys, { texts });
 }
 
 // --- .ssp compressed project (the original's toCompressed) --------------------
@@ -293,25 +303,11 @@ export async function sspToPattern(blob: Blob): Promise<Pattern> {
 }
 
 export function patternToCSV(pattern: Pattern): string {
+  // @atelier/io.toCSV intentionally exports neutral Drawing vertices. This legacy CSV is the
+  // named construction-point table and therefore still requires Pattern identity.
   const rows = ['point,x_mm,y_mm'];
   for (const p of pattern.points) rows.push(`${JSON.stringify(p.name)},${p.x.toFixed(3)},${p.y.toFixed(3)}`);
   return rows.join('\n');
-}
-
-export function downloadText(filename: string, text: string, mime: string) {
-  const blob = new Blob([text], { type: mime });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = filename; a.click();
-  URL.revokeObjectURL(url);
-}
-
-/** Trigger a Blob download in the browser. */
-export function downloadBlob(filename: string, blob: Blob) {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = filename; a.click();
-  URL.revokeObjectURL(url);
 }
 
 /**
@@ -319,6 +315,8 @@ export function downloadBlob(filename: string, blob: Blob) {
  * scaled to fit `maxPx` on the long edge. Resolves null if the pattern has no geometry.
  */
 export function patternToPNG(pattern: Pattern, maxPx = 2000, marginPx = 40): Promise<Blob | null> {
+  // The engine rasterizer is stroke-only. Keep the studio's piece fill until Drawing gains fill
+  // styles; dropping it makes nested/overlapping pattern pieces materially harder to read.
   const polys = collectPolylines(pattern);
   if (polys.length === 0) return Promise.resolve(null);
   const b = bounds(polys);

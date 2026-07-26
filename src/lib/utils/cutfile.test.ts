@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { markerToCutFile } from './cutfile';
 import { cutToPattern } from './cutImport';
-import { parseHPGL } from './hpgl';
+import { parseHPGL } from '@atelier/io';
 import type { MarkerLayout, Placement } from './markerLayout';
 import type { CuttingMachine } from '$lib/stores/machines';
 
@@ -101,7 +101,7 @@ describe('markerToCutFile — bed validation and splitting', () => {
 
 describe('toHPGL extras (pens, line types, labels, drill crosses)', () => {
   it('emits SP pens, LT line types, LB labels with DI rotation, and cross strokes', async () => {
-    const { toHPGL } = await import('./hpgl');
+    const { polylinesToHPGL: toHPGL } = await import('@atelier/io');
     const out = toHPGL(
       [
         { pts: [{ x: 0, y: 0 }, { x: 100, y: 0 }], pen: 2 },

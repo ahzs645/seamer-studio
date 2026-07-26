@@ -5,7 +5,7 @@
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import { EMPTY_PATTERN, type Pattern } from '@seamer/pattern-model';
-  import { pieceWorldOutline, type Vec2 } from '$lib/utils/patternGeometry';
+  import { pieceWorldOutline, type Vec2 } from '@seamer/pattern-model';
   import { isSimpleFormat, convertSimplePattern } from '$lib/utils/importSimplePattern';
   import { redraft, hasConstraints, resolveVariables } from '@seamer/pattern-model/solver/solve';
   import { builtinBySlug, BUILTIN_TEMPLATES } from '$lib/data/templates';

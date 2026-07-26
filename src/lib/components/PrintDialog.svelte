@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Pattern } from '@seamer/pattern-model';
   import { patternBoundsMm, printPatternTiled, patternToPDF, downloadBlob, TILE_OVERLAP_MM } from '$lib/utils/exporters';
-  import { PAGE_SIZES_MM, tilePageCount } from '$lib/utils/pdf';
+  import { PAGE_SIZES_MM, tilePageCount } from '@atelier/io';
   import { nestPatternForPaper } from '$lib/utils/markerLayout';
   import { toastSuccess, toastError } from '$lib/stores/toast';
 
@@ -13,6 +13,7 @@
     } = $props();
 
   type PageKey = keyof typeof PAGE_SIZES_MM;
+  const PAGE_KEYS: PageKey[] = ['A4', 'A3', 'A2', 'A1', 'A0', 'Letter'];
   let paperSize = $state<PageKey>('A4');
   let marginMm = $state(10);
   let orientation = $state<'portrait' | 'landscape'>('portrait');
@@ -70,7 +71,7 @@
     <label class="form-control w-full mb-2">
       <div class="label py-1"><span class="label-text">Paper size</span></div>
       <select class="select select-sm select-bordered w-full" bind:value={paperSize}>
-        {#each ['A4', 'A3', 'A2', 'A1', 'A0', 'Letter'] as sz}
+        {#each PAGE_KEYS as sz}
           <option value={sz}>{sz} ({PAGE_SIZES_MM[sz][0]} × {PAGE_SIZES_MM[sz][1]} mm)</option>
         {/each}
       </select>

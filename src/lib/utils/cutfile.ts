@@ -1,29 +1,22 @@
 // Per-machine cut-file generation + piece labels — the local-first "Send to cutting room".
 // Takes a nested marker (utils/markerLayout) and a CuttingMachine and emits the machine's native
-// format: HPGL (shares toHPGL with utils/hpgl.ts), CUT (the same dialect utils/cutImport.ts parses:
+// format: HPGL, CUT (the same dialect utils/cutImport.ts parses:
 // '*'-delimited tokens, N-blocks, M14/M15 pen codes, 0.254 mm units) or plain SVG. The marker is
 // validated against the bed — too-wide markers warn, too-long markers are split into one file per
 // bed length. printPieceLabels opens a print window with one label per placed piece (mirrors the
 // production app's label printing).
 
 import type { Pattern } from '@seamer/pattern-model';
-import type { Vec2 } from './patternGeometry';
+import {
+  machineUsableLengthMm,
+  machineUsableWidthMm,
+  markerToCutFile as drawingToCutFile,
+  type Drawing
+} from '@atelier/io';
 import type { CuttingMachine } from '$lib/stores/machines';
-import { toHPGL } from './hpgl';
 import { markerToSVG, type MarkerLayout, type Placement } from './markerLayout';
 
-/** CUT plotter unit (mm) — must match cutImport's default mmPerUnit. */
-const CUT_MM_PER_UNIT = 0.254;
-
-/** Usable working width of a machine bed (bed width minus both side margins), never below 100 mm. */
-export function machineUsableWidthMm(m: CuttingMachine): number {
-  return Math.max(100, m.bedWidthMm - 2 * m.marginMm);
-}
-
-/** Usable working length of a machine bed (bed length minus both end margins), never below 100 mm. */
-export function machineUsableLengthMm(m: CuttingMachine): number {
-  return Math.max(100, m.bedLengthMm - 2 * m.marginMm);
-}
+export { machineUsableLengthMm, machineUsableWidthMm };
 
 export interface CutFilePart {
   text: string;
@@ -81,44 +74,38 @@ function splitByBedLength(layout: MarkerLayout, usableLengthMm: number, warnings
   });
 }
 
-/** Marker segment → HPGL: cut polygons on pen 2, stitch outlines on pen 1, y flipped to plotter
- *  convention (y up) and everything offset by the machine's bed margin. */
-function segmentToHPGL(seg: MarkerLayout, machine: CuttingMachine): string {
-  const m = machine.marginMm;
-  const tx = (p: Vec2): Vec2 => ({ x: p.x + m, y: seg.usedLengthMm - p.y + m });
-  const polys: { pts: Vec2[]; closed: boolean; pen: number }[] = [];
-  for (const pl of seg.placements) {
-    polys.push({ pts: pl.poly.map(tx), closed: true, pen: 2 });
-    polys.push({ pts: pl.outline.map(tx), closed: true, pen: 1 });
-  }
-  const body = toHPGL(polys);
-  return machine.speed ? body.replace('SP1;', `SP1;\nVS${machine.speed};`) : body;
+/** Flatten one identity-aware marker segment into Atelier's neutral Drawing. */
+function markerDrawing(segment: MarkerLayout, format: CuttingMachine['format']): Drawing {
+  const includeReference = format !== 'cut';
+  return {
+    layers: [
+      { id: 'outline', name: 'Stitch outline', style: { color: '#000000', width: 0.5 } },
+      { id: 'cut', name: 'Cut line', style: { color: '#888888', width: 0.4 } }
+    ],
+    // Preserve the old per-piece cut/stitch ordering; it determines plotter travel.
+    polys: segment.placements.flatMap((placement) => [
+      {
+        pts: placement.poly,
+        closed: true,
+        layer: 'cut'
+      },
+      ...(includeReference
+        ? [{
+            pts: placement.outline,
+            closed: true,
+            layer: 'outline'
+          }]
+        : [])
+    ]),
+    texts: [],
+    boundsMm: {
+      minX: 0,
+      minY: 0,
+      maxX: segment.fabricWidthMm,
+      maxY: segment.usedLengthMm
+    }
+  };
 }
-
-/** Marker segment → CUT command stream (the dialect cutImport.cutToPattern parses): one N-block per
- *  placement, pen-up move to the start (M15), pen-down trace (M14) closing back on the first point. */
-function segmentToCUT(seg: MarkerLayout, machine: CuttingMachine): string {
-  const m = machine.marginMm;
-  const u = (mm: number) => Math.round(mm / CUT_MM_PER_UNIT);
-  const out: string[] = [];
-  seg.placements.forEach((pl, i) => {
-    const pts = pl.poly.map((p) => ({ x: u(p.x + m), y: u(seg.usedLengthMm - p.y + m) }));
-    if (pts.length < 3) return;
-    out.push(`N${i + 1}`);
-    out.push('M15', `X${pts[0].x}Y${pts[0].y}`, 'M14');
-    for (let j = 1; j < pts.length; j++) out.push(`X${pts[j].x}Y${pts[j].y}`);
-    out.push(`X${pts[0].x}Y${pts[0].y}`); // close the contour
-    out.push('M15');
-  });
-  out.push('M0');
-  return out.join('*') + '*';
-}
-
-const FORMAT_META = {
-  hpgl: { extension: 'hpgl', mime: 'application/vnd.hp-hpgl' },
-  cut: { extension: 'cut', mime: 'text/plain' },
-  svg: { extension: 'svg', mime: 'image/svg+xml' }
-} as const;
 
 /**
  * Nested marker → machine-ready cut file(s) in the machine's native format, validated against the
@@ -134,17 +121,24 @@ export function markerToCutFile(layout: MarkerLayout, machine: CuttingMachine): 
   }
 
   const segments = splitByBedLength(layout, usableL, warnings);
-  const meta = FORMAT_META[machine.format];
+  // Identity-aware splitting stays app-side so a piece is never divided between output files.
+  // Each resulting neutral Drawing is emitted by @atelier/io with engine splitting disabled.
+  const engineMachine = {
+    ...machine,
+    bedWidthMm: Math.max(machine.bedWidthMm, layout.fabricWidthMm + machine.marginMm * 2 + 1),
+    bedLengthMm: Number.MAX_SAFE_INTEGER
+  };
   const files: CutFilePart[] = segments.map((seg, i) => {
     const partLabel = segments.length > 1 ? `part ${i + 1} of ${segments.length}` : '';
-    const text =
-      machine.format === 'hpgl' ? segmentToHPGL(seg, machine) :
-      machine.format === 'cut' ? segmentToCUT(seg, machine) :
-      markerToSVG(seg);
+    // The machine SVG is deliberately identity-aware: its fabric/piece fills and printed labels
+    // cannot be represented by Atelier's neutral, stroke-only Drawing.
+    const text = machine.format === 'svg'
+      ? markerToSVG(seg)
+      : drawingToCutFile(markerDrawing(seg, machine.format), engineMachine).files[0]?.text ?? '';
     return { text, partLabel };
   });
-
-  return { files, extension: meta.extension, mime: meta.mime, warnings };
+  const metadata = drawingToCutFile(markerDrawing(segments[0] ?? layout, machine.format), engineMachine);
+  return { files, extension: metadata.extension, mime: metadata.mime, warnings };
 }
 
 // --- Piece labels -----------------------------------------------------------------------------

@@ -9,7 +9,8 @@ import {
   selectionMove, selectionRotate, selectionScale, selectionMirror, selectionMoveToLayer, selectionDelete
 } from './selection';
 import {
-  elementBringToFront, elementSendToBack, elementMoveToLayer, elementRename, elementDelete
+  elementBringToFront, elementSendToBack, elementMoveToLayer, elementRename, elementUpdateLabel,
+  elementDelete
 } from './element';
 import {
   variableReorder, variableSetOptions, variableUpdate,
@@ -26,6 +27,11 @@ import {
 } from './create';
 import * as ops from '../utils/pathPointOps';
 import { breakoutPiece, type BreakoutMode } from '../utils/breakout';
+import {
+  gradingApplyPointShifts,
+  gradingClearProfile,
+  handleUpdate
+} from './compatibility';
 
 const num = (v: unknown, d = 0): number => (typeof v === 'number' && Number.isFinite(v) ? v : d);
 const str = (v: unknown, d = ''): string => (typeof v === 'string' ? v : d);
@@ -34,7 +40,7 @@ const strArr = (v: unknown): string[] => arr(v).filter((x): x is string => typeo
 const seamRefArr = (v: unknown): SeamRefInput[] =>
   arr(v).filter((x): x is SeamRefInput => typeof x === 'string' || (!!x && typeof x === 'object' && typeof (x as { id?: unknown }).id === 'string'));
 
-const defs: CommandDef[] = [
+const rawDefs: CommandDef[] = [
   // --- selection (batch transforms) -----------------------------------------
   {
     type: 'selection.move', category: 'selection', label: 'Move selection',
@@ -46,28 +52,33 @@ const defs: CommandDef[] = [
     type: 'selection.rotate', category: 'selection', label: 'Rotate selection',
     summary: 'Rotate the current selection by degrees about its centroid.', inputs: ['degrees'],
     example: { degrees: 90 },
+    replayable: false,
     run: (p, a, c) => selectionRotate(p, c.selection, num(a.degrees))
   },
   {
     type: 'selection.scale', category: 'selection', label: 'Scale selection',
     summary: 'Scale the current selection by a factor about its centroid.', inputs: ['factor', 'factorY?'],
     example: { factor: 1.1 },
+    replayable: false,
     run: (p, a, c) => selectionScale(p, c.selection, num(a.factor, 1), a.factorY === undefined ? num(a.factor, 1) : num(a.factorY, 1))
   },
   {
     type: 'selection.mirror', category: 'selection', label: 'Mirror selection',
     summary: 'Mirror the current selection on the x or y axis.', inputs: ['axis'],
     example: { axis: 'x' },
+    replayable: false,
     run: (p, a, c) => selectionMirror(p, c.selection, str(a.axis, 'x') === 'y' ? 'y' : 'x')
   },
   {
     type: 'selection.moveToLayer', category: 'selection', label: 'Move selection to layer',
     summary: 'Move selected elements to a layer.', inputs: ['layerId'],
+    replayable: false,
     run: (p, a, c) => selectionMoveToLayer(p, c.selection, str(a.layerId))
   },
   {
     type: 'selection.delete', category: 'selection', label: 'Delete selection',
     summary: 'Delete the selected elements.', inputs: [],
+    replayable: false,
     run: (p, _a, c) => selectionDelete(p, c.selection)
   },
 
@@ -91,6 +102,19 @@ const defs: CommandDef[] = [
     type: 'element.rename', category: 'element', label: 'Rename element',
     summary: 'Rename a resolvable element.', inputs: ['id', 'name'],
     run: (p, a) => elementRename(p, str(a.id), str(a.name))
+  },
+  {
+    type: 'element.updateLabel', category: 'element', label: 'Update element label',
+    summary: 'Set or clear a free-text label on a resolvable element.',
+    inputs: ['elementId', 'label?'],
+    example: { type: 'element.updateLabel', elementId: 'point-a', label: 'left side seam' },
+    replayable: true,
+    run: (p, a) => {
+      if (a.label !== undefined && a.label !== null && typeof a.label !== 'string') {
+        throw new Error('label must be a string or null');
+      }
+      return elementUpdateLabel(p, str(a.elementId), typeof a.label === 'string' ? a.label : null);
+    }
   },
   {
     type: 'element.delete', category: 'element', label: 'Delete element',
@@ -142,6 +166,14 @@ const defs: CommandDef[] = [
       }),
       hasChanged: true
     })
+  },
+  {
+    type: 'handle.update', category: 'handle', label: 'Update handle',
+    summary: 'Update handle mirror constraints.',
+    inputs: ['handleId', 'sameLength?', 'sameAngle?'],
+    example: { type: 'handle.update', handleId: 'handle-a', sameLength: false, sameAngle: false },
+    replayable: true,
+    run: (p, a) => handleUpdate(p, str(a.handleId), a.sameLength, a.sameAngle)
   },
 
   // --- variable --------------------------------------------------------------
@@ -317,6 +349,33 @@ const defs: CommandDef[] = [
     inputs: ['target', 'targetId', 'field', 'formula', 'unit?'],
     example: { target: 'piecePath', targetId: 'PiecePath_x', field: 'seamAllowance', formula: 'hem * 2', unit: 'mm' },
     run: (p, a) => formulaSet(p, str(a.target), str(a.targetId), str(a.field), str(a.formula), a.unit ? str(a.unit) : undefined)
+  },
+  {
+    type: 'grading.applyPointShifts', category: 'grading', label: 'Apply point-shift grading',
+    summary: 'Apply labeled point-shift grading to true piece-boundary points and capture it as a Freeform Parametrics anchor. With driverValue, captures a baseline anchor first, captures the graded target, then restores the baseline so the driver can activate the grade. After solving constraints, verifies that targeted points actually kept the requested deltas and fails with mismatch details if constraints redistributed the shifts. Inspect pieces first; do not target hand-drawn notch branches, pleat markers, or helper construction geometry unless explicitly requested. allowSlidingPoints only permits direct sliding-point targets and does not resolve other constraint conflicts.',
+    inputs: ['pieceId', 'shifts[]{pointId?|pointRef?,dx,dy,unit?}', 'unit?', 'driverVariableId?', 'driverValue?', 'anchorName?', 'captureAnchor?', 'allowConstructionPoints?', 'allowSlidingPoints?'],
+    example: {
+      type: 'grading.applyPointShifts',
+      pieceId: 'piece-front',
+      driverVariableId: 'var_size_step',
+      driverValue: 1,
+      anchorName: '3XL',
+      shifts: [
+        { pointRef: 'left side seam', dx: -0.5, dy: 0.5, unit: 'in' },
+        { pointRef: 'right side seam', dx: 0.5, dy: 0.5, unit: 'in' }
+      ],
+      captureAnchor: true
+    },
+    replayable: true,
+    run: (p, a, c) => gradingApplyPointShifts(p, a, c.uid)
+  },
+  {
+    type: 'grading.clearProfile', category: 'grading', label: 'Clear grading profile',
+    summary: 'Clear Freeform Parametrics grading state after restoring a baseline anchor. Requires an unambiguous baseline unless keepCurrentGeometry is explicitly true.',
+    inputs: ['restoreAnchorId?', 'restoreDriverValue?', 'keepCurrentGeometry?'],
+    example: { type: 'grading.clearProfile', restoreDriverValue: 0 },
+    replayable: true,
+    run: (p, a) => gradingClearProfile(p, a)
   },
   {
     type: 'piecePoint.add', category: 'piece', label: 'Add piece point',
@@ -506,8 +565,22 @@ const defs: CommandDef[] = [
       const mode = ['all', 'seams', 'cut', 'internal', 'seamsInternal'].includes(str(a.mode)) ? (str(a.mode) as BreakoutMode) : 'all';
       return breakoutPiece(p, str(a.pieceId), mode) ?? p;
     }
+  },
+  {
+    type: 'transaction.commit', category: 'transaction', label: 'Commit transaction',
+    summary: 'Internal compatibility command emitted when committing a live mutation transaction.',
+    inputs: ['label'],
+    example: { type: 'transaction.commit', label: 'modify drag' },
+    replayable: false,
+    mutating: false,
+    run: (p) => p
   }
 ];
+
+const defs: CommandDef[] = rawDefs.map((def) => ({
+  ...def,
+  replayable: def.replayable ?? true
+}));
 
 export const COMMANDS: ReadonlyMap<string, CommandDef> = new Map(defs.map((d) => [d.type, d]));
 

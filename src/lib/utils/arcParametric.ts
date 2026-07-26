@@ -3,7 +3,7 @@
 // seams and notches referencing them survive the edit.
 
 import type { Pattern, ConstrainablePath, PathPoint, BezierHandle, ArcParams } from '@seamer/pattern-model';
-import { ellipseAnchors, type Vec2 } from './arcGeometry';
+import { ellipseAnchors, type Vec2 } from '@seamer/pattern-model';
 
 const mkHandle = (v1: Vec2, v2: Vec2): BezierHandle => ({
   v1: { ...v1 }, v2: { ...v2 }, sameLength: false, sameAngle: false,
