@@ -145,27 +145,27 @@ export function installSeamerAutomation(): () => void {
   };
 }
 
+function setPattern(next: Pattern): void {
+  if (next === activeEditor.content || JSON.stringify(next) === JSON.stringify(activeEditor.content)) {
+    pendingHistoryLabel = null;
+    return;
+  }
+  const label = pendingHistoryLabel;
+  pendingHistoryLabel = null;
+  if (label) {
+    const transaction = activeEditor.transaction(label);
+    const result = transaction.execute('studio.replaceWithHistory', { pattern: next });
+    if (result.ok) transaction.commit();
+    else transaction.rollback();
+  } else {
+    activeEditor.execute('studio.replaceSilent', { pattern: next });
+  }
+}
+
 export const pattern: Writable<Pattern> = {
   subscribe: patternValue.subscribe,
-  set(next) {
-    if (next === activeEditor.content || JSON.stringify(next) === JSON.stringify(activeEditor.content)) {
-      pendingHistoryLabel = null;
-      return;
-    }
-    const label = pendingHistoryLabel;
-    pendingHistoryLabel = null;
-    if (label) {
-      const transaction = activeEditor.transaction(label);
-      const result = transaction.execute('studio.replaceWithHistory', { pattern: next });
-      if (result.ok) transaction.commit();
-      else transaction.rollback();
-    } else {
-      activeEditor.execute('studio.replaceSilent', { pattern: next });
-    }
-  },
-  update(fn) {
-    this.set(fn(activeEditor.content));
-  }
+  set: setPattern,
+  update: (fn) => setPattern(fn(activeEditor.content))
 };
 
 export const selectedTool = writable<string>('select');
@@ -182,14 +182,13 @@ function selectionStore(
   kind: 'point' | 'path' | 'piece',
   value: Writable<Set<string>>
 ): Writable<Set<string>> {
+  const setIds = (ids: Set<string>): void => {
+    activeEditor.setSelection(activeEditor.selection.replace(kind, ids));
+  };
   return {
     subscribe: value.subscribe,
-    set(ids) {
-      activeEditor.setSelection(activeEditor.selection.replace(kind, ids));
-    },
-    update(fn) {
-      this.set(fn(new Set(activeEditor.selection.get(kind))));
-    }
+    set: setIds,
+    update: (fn) => setIds(fn(new Set(activeEditor.selection.get(kind))))
   };
 }
 
