@@ -2,14 +2,12 @@
 // pattern Piece (points + edges + a boundary loop); open polylines become loose ConstrainablePaths.
 // Coordinates are treated as millimeters. DXF is Y-up (kept as-is); SVG is Y-down (flipped to Y-up).
 //
-// Curves are preserved as cubic Bézier handles, not flattened to line vertices:
-//   - SVG  C/c (cubic) and Q/q (quadratic, elevated to cubic) carry control points through.
-//   - DXF  LWPOLYLINE bulge values (arc segments) are converted to cubic handles.
-// Each loop vertex therefore carries an optional outgoing/incoming tangent; the builder emits a
-// `curve` ConstrainablePath when any vertex on the edge is curved, else a `line`.
+// DXF LWPOLYLINE bulges are preserved as cubic Bézier handles. SVG parsing is delegated to
+// @atelier/io.fromSVG, which normalizes units/Y direction and flattens curves to neutral polylines.
 
 import { createEmptyPattern } from '@seamer/pattern-model';
 import type { Pattern, Piece, PiecePath, ConstrainablePath, PathPoint, BezierHandle, Formula } from '@seamer/pattern-model';
+import { fromSVG, type Drawing } from '@atelier/io';
 
 interface Vec2 { x: number; y: number; }
 /** A loop vertex with optional cubic tangents (offsets relative to the vertex, in pattern mm). */
@@ -552,116 +550,71 @@ function bulgeVertsToLoop(verts: { x: number; y: number; bulge: number }[], clos
 
 // ---- SVG -----------------------------------------------------------------------------------------
 
-function parsePointsAttr(attr: string): Vtx[] {
-  const nums = attr.trim().split(/[\s,]+/).map(Number).filter((n) => !Number.isNaN(n));
-  const pts: Vtx[] = [];
-  for (let i = 0; i + 1 < nums.length; i += 2) pts.push({ x: nums[i], y: nums[i + 1] });
-  return pts;
+export interface DrawingImportOptions {
+  classify?: DxfClassifyOptions;
+  importText?: boolean;
 }
 
-/**
- * Parse an SVG path `d` into a loop, preserving cubic/quadratic curves as tangent offsets.
- * Supports M/L/H/V/C/S/Q/T/Z (absolute + relative). Arcs (A) are approximated by their endpoint.
- */
-function parsePathD(d: string): Loop | null {
-  const tokens = d.match(/[a-zA-Z]|-?\d*\.?\d+(?:e-?\d+)?/g);
-  if (!tokens) return null;
-  const pts: Vtx[] = [];
-  let closed = false;
-  let cx = 0, cy = 0;
-  let cmd = '';
-  let idx = 0;
-  let prevCubicCtrl: Vec2 | null = null; // for S/s reflection
-  let prevQuadCtrl: Vec2 | null = null;  // for T/t reflection
-  const num = () => parseFloat(tokens[idx++]);
-  const push = (x: number, y: number) => { pts.push({ x, y }); };
-
-  while (idx < tokens.length) {
-    const tk = tokens[idx];
-    if (/[a-zA-Z]/.test(tk)) { cmd = tk; idx++; }
-    const rel = cmd === cmd.toLowerCase();
-    const C = cmd.toUpperCase();
-
-    if (C === 'M' || C === 'L') {
-      const x = num(), y = num();
-      cx = rel ? cx + x : x; cy = rel ? cy + y : y;
-      push(cx, cy);
-      prevCubicCtrl = prevQuadCtrl = null;
-      if (C === 'M') cmd = rel ? 'l' : 'L';
-    } else if (C === 'H') {
-      const x = num(); cx = rel ? cx + x : x; push(cx, cy); prevCubicCtrl = prevQuadCtrl = null;
-    } else if (C === 'V') {
-      const y = num(); cy = rel ? cy + y : y; push(cx, cy); prevCubicCtrl = prevQuadCtrl = null;
-    } else if (C === 'C' || C === 'S') {
-      let c1x: number, c1y: number;
-      if (C === 'C') { c1x = rel ? cx + num() : num(); c1y = rel ? cy + num() : num(); }
-      else { const r = prevCubicCtrl ? { x: 2 * cx - prevCubicCtrl.x, y: 2 * cy - prevCubicCtrl.y } : { x: cx, y: cy }; c1x = r.x; c1y = r.y; }
-      const c2x = rel ? cx + num() : num(), c2y = rel ? cy + num() : num();
-      const ex = rel ? cx + num() : num(), ey = rel ? cy + num() : num();
-      // outgoing tangent on the current last point, incoming tangent on the new point
-      const startV = pts[pts.length - 1];
-      if (startV) startV.out = { x: c1x - cx, y: c1y - cy };
-      pts.push({ x: ex, y: ey, in: { x: c2x - ex, y: c2y - ey } });
-      prevCubicCtrl = { x: c2x, y: c2y };
-      prevQuadCtrl = null;
-      cx = ex; cy = ey;
-    } else if (C === 'Q' || C === 'T') {
-      let qx: number, qy: number;
-      if (C === 'Q') { qx = rel ? cx + num() : num(); qy = rel ? cy + num() : num(); }
-      else { const r = prevQuadCtrl ? { x: 2 * cx - prevQuadCtrl.x, y: 2 * cy - prevQuadCtrl.y } : { x: cx, y: cy }; qx = r.x; qy = r.y; }
-      const ex = rel ? cx + num() : num(), ey = rel ? cy + num() : num();
-      // elevate quadratic (P0,Q,P1) to cubic control points
-      const c1x = cx + (2 / 3) * (qx - cx), c1y = cy + (2 / 3) * (qy - cy);
-      const c2x = ex + (2 / 3) * (qx - ex), c2y = ey + (2 / 3) * (qy - ey);
-      const startV = pts[pts.length - 1];
-      if (startV) startV.out = { x: c1x - cx, y: c1y - cy };
-      pts.push({ x: ex, y: ey, in: { x: c2x - ex, y: c2y - ey } });
-      prevQuadCtrl = { x: qx, y: qy };
-      prevCubicCtrl = null;
-      cx = ex; cy = ey;
-    } else if (C === 'A') {
-      // arc: skip the 5 flag/radii params, take the endpoint only (no tangent)
-      num(); num(); num(); num(); num();
-      const ex = rel ? cx + num() : num(), ey = rel ? cy + num() : num();
-      push(ex, ey); cx = ex; cy = ey; prevCubicCtrl = prevQuadCtrl = null;
-    } else if (C === 'Z') {
-      closed = true; idx++;
-    } else { idx++; }
-  }
-  return pts.length ? { points: pts, closed } : null;
+export interface SvgImportOptions extends DrawingImportOptions {
+  unitsOverride?: 'auto' | 'mm' | 'px';
+  dpi?: number;
 }
 
-/** Parse an SVG document into loops (polygon/polyline/path/line/rect). Y is flipped to Y-up. */
-export function svgToPattern(text: string, name = 'Imported SVG'): Pattern {
-  const doc = new DOMParser().parseFromString(text, 'image/svg+xml');
-  const loops: Loop[] = [];
-  doc.querySelectorAll('polygon').forEach((el) => {
-    const pts = parsePointsAttr(el.getAttribute('points') ?? '');
-    if (pts.length) loops.push({ points: pts, closed: true });
-  });
-  doc.querySelectorAll('polyline').forEach((el) => {
-    const pts = parsePointsAttr(el.getAttribute('points') ?? '');
-    if (pts.length) loops.push({ points: pts, closed: false });
-  });
-  doc.querySelectorAll('line').forEach((el) => {
-    const x1 = parseFloat(el.getAttribute('x1') ?? '0'), y1 = parseFloat(el.getAttribute('y1') ?? '0');
-    const x2 = parseFloat(el.getAttribute('x2') ?? '0'), y2 = parseFloat(el.getAttribute('y2') ?? '0');
-    loops.push({ points: [{ x: x1, y: y1 }, { x: x2, y: y2 }], closed: false });
-  });
-  doc.querySelectorAll('rect').forEach((el) => {
-    const x = parseFloat(el.getAttribute('x') ?? '0'), y = parseFloat(el.getAttribute('y') ?? '0');
-    const w = parseFloat(el.getAttribute('width') ?? '0'), h = parseFloat(el.getAttribute('height') ?? '0');
-    if (w > 0 && h > 0) loops.push({ points: [{ x, y }, { x: x + w, y }, { x: x + w, y: y + h }, { x, y: y + h }], closed: true });
-  });
-  doc.querySelectorAll('path').forEach((el) => {
-    const loop = parsePathD(el.getAttribute('d') ?? '');
-    if (loop) loops.push(loop);
-  });
-  // SVG y grows downward; flip to pattern space (y up). Flip vertex positions AND tangent y-offsets.
-  for (const loop of loops) for (const v of loop.points) {
-    v.y = -v.y;
-    if (v.out) v.out.y = -v.out.y;
-    if (v.in) v.in.y = -v.in.y;
+/** Convert Atelier's neutral Drawing through the same loop-to-Pattern builder used by DXF. */
+export function drawingToPattern(
+  drawing: Drawing,
+  name = 'Imported drawing',
+  options: DrawingImportOptions = {}
+): Pattern {
+  const loops = drawing.polys
+    .map((poly): Loop => {
+      const cls = options.classify
+        ? classifyEntity(poly.layer, null, poly.closed, options.classify)
+        : undefined;
+      return {
+        points: poly.pts.map((point) => ({ x: point.x, y: point.y })),
+        closed: poly.closed,
+        ...(cls ? { cls } : {})
+      };
+    })
+    .filter((loop) => {
+      if (!loop.cls) return true;
+      const classify = options.classify;
+      return loop.cls === 'cut'
+        ? classify?.importCut ?? true
+        : loop.cls === 'seam'
+          ? classify?.importSeam ?? true
+          : classify?.importInternal ?? true;
+    });
+  const pattern = patternFromLoops(loops, name);
+  if (options.importText !== false) {
+    pattern.texts.push(...drawing.texts
+      .filter((text) => text.text.length > 0)
+      .map((text) => ({
+        id: uid('Text'),
+        value: text.text,
+        x: text.at.x,
+        y: text.at.y,
+        fontSize: text.sizeMm,
+        rotation: text.rotationDeg ?? 0,
+        align: 'left' as const
+      })));
   }
-  return patternFromLoops(loops, name);
+  return pattern;
+}
+
+/** Parse SVG through @atelier/io, then convert the neutral Drawing into Pattern geometry. */
+export function svgToPattern(
+  text: string,
+  name = 'Imported SVG',
+  options: SvgImportOptions = {}
+): Pattern {
+  const unit = options.unitsOverride === 'auto'
+    ? undefined
+    : options.unitsOverride;
+  const drawing = fromSVG(text, {
+    ...(unit ? { unit } : {}),
+    ...(options.dpi ? { dpi: options.dpi } : {})
+  });
+  return drawingToPattern(drawing, name, options);
 }

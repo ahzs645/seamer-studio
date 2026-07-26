@@ -1,6 +1,16 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import type { Pattern, Piece, Measurement } from '@seamer/pattern-model';
+  import {
+    layerDashPattern,
+    layerStrokeColor,
+    pieceAddPath,
+    piecePointAdd,
+    piecePointUpdate,
+    type LayerStyle,
+    type Measurement,
+    type Pattern,
+    type Piece
+  } from '@seamer/pattern-model';
   import { buildSilhouette, type Silhouette } from '@seamer/avatar';
   import { isDarkTheme, onThemeChange } from '$lib/utils/theme';
   import DrawingTools from '$lib/components/DrawingTools.svelte';
@@ -37,9 +47,6 @@
   import * as ops from '$lib/utils/pathPointOps';
   import { breakoutPiece, type BreakoutMode } from '$lib/utils/breakout';
   import { traceFromHPGL, traceImageRegion } from '$lib/utils/autoTrace';
-  import { pieceAddPath } from '$lib/commands/piece';
-  import { piecePointAdd, piecePointUpdate } from '$lib/commands/create';
-  import { layerDashPattern, layerStrokeColor, type LayerStyle } from '$lib/commands/structural';
   import { draggablePanel } from '$lib/utils/draggablePanel';
   import { rebakeArc, arcPathsCenteredOn, detachArcsTouchingAnchor } from '$lib/utils/arcParametric';
   import { buildWarp, drawWarpedImage } from '$lib/utils/thinPlateSpline';

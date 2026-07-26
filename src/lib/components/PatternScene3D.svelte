@@ -2,11 +2,16 @@
   import { onMount, onDestroy } from 'svelte';
   import { viewport as viewportAction } from '@atelier/svelte';
   import { docToWorld, type Viewport } from '@atelier/viewport';
-  import type { Pattern } from '@seamer/pattern-model';
+  import {
+    indexPoints,
+    pieceGeometrySignature,
+    placedPoints,
+    type Pattern
+  } from '@seamer/pattern-model';
   import { PatternRenderer, type RendererStatus, type SceneMode } from '$lib/scene/scene3d';
+  import { createSeamerAoPass } from '$lib/scene/n8aoPost';
   import type { SimConfig } from '@seamer/cloth-sim';
   import { isDarkTheme, toggleTheme, applyStoredTheme } from '$lib/utils/theme';
-  import { pieceGeometrySignature, indexPoints, placedPoints } from '$lib/utils/patternGeometry';
   import { show3dStats, simAnchors, selectedTool, seamTool, selectedSeamId, bodyZoomRequest } from '$lib/stores/pattern';
   import { get } from 'svelte/store';
   import { applySeamPick, type SeamPick } from '$lib/utils/seamTool';
@@ -473,7 +478,8 @@
     class="w-full h-full"
     use:viewportAction={{
       projection: '3d',
-      postProcessing: false,
+      postProcessing: true,
+      aoPassFactory: createSeamerAoPass,
       onReady: handleViewportReady
     }}
   ></div>

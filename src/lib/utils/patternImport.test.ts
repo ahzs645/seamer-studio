@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { dxfToPattern } from './patternImport';
+import { fromSVG } from '@atelier/io';
+import { drawingToPattern, dxfToPattern } from './patternImport';
 
 /** Build a DXF code/value pair stream from a flat list. */
 const dxf = (...pairs: (string | number)[]) => pairs.map(String).join('\n');
@@ -168,5 +169,36 @@ describe('dxfToPattern extended entities (ARC/CIRCLE/SPLINE/TEXT/INSERT)', () =>
     expect(Math.min(...xs)).toBeCloseTo(100, 5); // translated
     expect(Math.max(...xs)).toBeCloseTo(120, 5); // 10 × scale 2
     expect(Math.min(...ys)).toBeCloseTo(50, 5);
+  });
+});
+
+describe('SVG Drawing conversion', () => {
+  it('converts @atelier/io SVG output into closed pieces, open paths, and text', () => {
+    const drawing = fromSVG(`
+      <svg xmlns="http://www.w3.org/2000/svg" width="100mm" height="60mm" viewBox="0 0 100 60">
+        <rect x="10" y="10" width="40" height="30" data-layer="cut"/>
+        <line x1="15" y1="20" x2="45" y2="20" data-layer="internal"/>
+        <text x="30" y="25" font-size="5">Front</text>
+      </svg>
+    `);
+    const pattern = drawingToPattern(drawing, 'SVG fixture', {
+      classify: {
+        importCut: true,
+        importSeam: true,
+        importInternal: true
+      }
+    });
+
+    expect(drawing.polys).toHaveLength(2);
+    expect(pattern.name).toBe('SVG fixture');
+    expect(pattern.pieces).toHaveLength(1);
+    expect(pattern.pieces[0].mainPaths).toHaveLength(4);
+    expect(pattern.paths).toHaveLength(5);
+    expect(pattern.texts[0]).toMatchObject({
+      value: 'Front',
+      x: 30,
+      y: -25,
+      fontSize: 5
+    });
   });
 });

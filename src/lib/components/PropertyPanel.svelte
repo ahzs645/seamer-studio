@@ -1,5 +1,21 @@
 <script lang="ts">
-  import type { Pattern, ConstrainablePoint, ConstrainablePath, Piece, PieceArrangement, PiecePath, GradeSize, PointConstraint, SeamCornerJoinType, Notch, NotchType } from '@seamer/pattern-model';
+  import {
+    formulaSet,
+    imageUpdate,
+    variableReorder,
+    variableSetOptions,
+    type Pattern,
+    type ConstrainablePoint,
+    type ConstrainablePath,
+    type Piece,
+    type PieceArrangement,
+    type PiecePath,
+    type GradeSize,
+    type PointConstraint,
+    type SeamCornerJoinType,
+    type Notch,
+    type NotchType
+  } from '@seamer/pattern-model';
   import { selectedPointIds, selectedPathIds, selectedPieceIds, panelRequest, pathPickRequest } from '$lib/stores/pattern';
   import FormulaDialog from '$lib/components/FormulaDialog.svelte';
   import { toastSuccess, toastError } from '$lib/stores/toast';
@@ -8,9 +24,7 @@
     instantiateFromLibrary, syncFromLibrary, type LibraryStatus
   } from '$lib/stores/materialLibrary';
   import { MATERIAL_PRESETS, getPreset } from '$lib/data/materialPresets';
-  import { variableReorder, variableSetOptions, imageUpdate } from '$lib/commands/structural';
   import { rebakeArc, arcCenter } from '$lib/utils/arcParametric';
-  import { formulaSet } from '$lib/commands/create';
   import { isLinkedPath, linkSourceCandidates, linkPath, unlinkPath, syncLinkedPaths } from '$lib/utils/linkedPaths';
 
   interface Props {

@@ -6,6 +6,12 @@ export * from './compatibility';
 export * from './structural';
 export * from './piece';
 export {
+  formulaSet,
+  piecePointAdd,
+  piecePointUpdate,
+  seamReverse
+} from './create';
+export {
   COMMANDS,
   COMMAND_LIST,
   commandsByCategory,

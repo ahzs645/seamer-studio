@@ -1,17 +1,29 @@
 import { describe, it, expect } from 'vitest';
-import { createEmptyPattern, type Pattern } from '@seamer/pattern-model';
-import { executeCommand, type ExecuteHost } from '$lib/commands/execute';
+import { createDoc, Editor } from '@atelier/core';
+import {
+  createEmptyPattern,
+  createPatternRegistry,
+  type Pattern
+} from '@seamer/pattern-model';
 import { rebakeArc, detachArcsTouchingAnchor, arcPathsCenteredOn } from './arcParametric';
 
 const uid = (() => { let n = 0; return (p: string) => `${p}_${++n}`; })();
 
-function host(initial: Pattern): { h: ExecuteHost; get: () => Pattern } {
-  let p = initial;
+function host(initial: Pattern): { h: Editor<Pattern>; get: () => Pattern } {
+  const instance = new Editor(createDoc(initial), {
+    registry: createPatternRegistry()
+  });
   return {
-    h: { getPattern: () => p, getSelection: () => ({ pointIds: [] }), apply: (next) => { p = next; } } as ExecuteHost,
-    get: () => p
+    h: instance,
+    get: () => instance.content
   };
 }
+
+const executeCommand = (
+  editor: Editor<Pattern>,
+  type: string,
+  params: Record<string, unknown>
+) => editor.execute(type, params);
 
 describe('parametric arcs', () => {
   it('rebakeArc changes the radius in place, preserving anchor point ids', () => {

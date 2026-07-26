@@ -1,7 +1,11 @@
 <script lang="ts">
-  import type { Pattern, Seam } from '@seamer/pattern-model';
-  import { indexPiecePathOwners, seamLabel } from '@seamer/pattern-model';
-  import { seamReverse } from '$lib/commands/create';
+  import {
+    indexPiecePathOwners,
+    seamLabel,
+    seamReverse,
+    type Pattern,
+    type Seam
+  } from '@seamer/pattern-model';
   import { selectedSeamId } from '$lib/stores/pattern';
 
   interface Props {

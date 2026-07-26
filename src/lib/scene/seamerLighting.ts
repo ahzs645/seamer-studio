@@ -1,23 +1,13 @@
-// Seamer's production lighting extends the engine contract with analyzed HDRI key lights,
-// retry/backoff, and theme-specific floor/grid styling. It stays app-side until LightingRig can
-// express those behaviors without a visual delta.
+// Seamer keeps its analyzed key-light semantics and themed stage app-side while LightingRig owns
+// direct-light lifecycles, HDRI loading, PMREM conversion, URL caching, and environment disposal.
 
 import * as THREE from 'three';
-import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
-import { ResourceScope } from '@atelier/viewport';
+import {
+  ResourceScope,
+  type DirectionalLightSpec,
+  type LightingRig
+} from '@atelier/viewport';
 import { isDarkTheme, onThemeChange } from '$lib/utils/theme';
-
-interface EnvLight {
-  dir: [number, number, number];
-  color: number | [number, number, number];
-  intensity: number;
-}
-
-interface AnalyzedLight {
-  dir: [number, number, number];
-  color: [number, number, number];
-  intensity: number;
-}
 
 const HDRI: Readonly<Record<string, string>> = {
   studio1: '/3d/hdri/photo_studio_london_hall_1k.hdr',
@@ -25,46 +15,52 @@ const HDRI: Readonly<Record<string, string>> = {
   sunset: '/3d/hdri/cedar_bridge_sunset_1_1k.hdr'
 };
 
-const ENV_RIGS: Readonly<Record<string, EnvLight[]>> = {
+const ENV_RIGS: Readonly<Record<string, readonly DirectionalLightSpec[]>> = {
   studio1: [
-    { dir: [2, 3, 2], color: 0xffffff, intensity: 2 },
-    { dir: [-2.5, 2, -1], color: 0xe8ecf5, intensity: 0.8 },
-    { dir: [0, 2.5, -3], color: 0xffffff, intensity: 1 }
+    { position: [2, 3, 2], color: 0xffffff, intensity: 2, castShadow: true },
+    { position: [-2.5, 2, -1], color: 0xe8ecf5, intensity: 0.8 },
+    { position: [0, 2.5, -3], color: 0xffffff, intensity: 1 }
   ],
   studio2: [
-    { dir: [3, 4, 1], color: 0xfff4e0, intensity: 1.8 },
-    { dir: [-3, 2, 2], color: 0xdfe8ff, intensity: 0.7 },
-    { dir: [0, 3, -3], color: 0xffffff, intensity: 0.9 }
+    { position: [3, 4, 1], color: 0xfff4e0, intensity: 1.8, castShadow: true },
+    { position: [-3, 2, 2], color: 0xdfe8ff, intensity: 0.7 },
+    { position: [0, 3, -3], color: 0xffffff, intensity: 0.9 }
   ],
   sunset: [
-    { dir: [-4, 1.5, 3], color: 0xffb070, intensity: 2.2 },
-    { dir: [3, 2, -2], color: 0x7088b8, intensity: 0.6 },
-    { dir: [0, 2, -4], color: 0xffd0a0, intensity: 0.8 }
+    { position: [-4, 1.5, 3], color: 0xffb070, intensity: 2.2, castShadow: true },
+    { position: [3, 2, -2], color: 0x7088b8, intensity: 0.6 },
+    { position: [0, 2, -4], color: 0xffd0a0, intensity: 0.8 }
   ]
 };
 
+const FLAT_RIG: readonly DirectionalLightSpec[] = [
+  { position: [5, 15, 10], color: 0xffffff, intensity: 2.35, castShadow: true },
+  { position: [-5, 10, -5], color: 0xfff3a6, intensity: 1.05 },
+  { position: [0, 10, -10], color: 0xffffff, intensity: 0.85 }
+];
+
 export class SeamerLighting {
   private readonly resources = new ResourceScope();
-  private readonly lightRig: THREE.Object3D[] = [];
-  private readonly lightRigBase: number[] = [];
-  private readonly envCache = new Map<string, THREE.Texture>();
-  private readonly hdriLightCache = new Map<string, AnalyzedLight[]>();
-  private envRig: THREE.DirectionalLight[] = [];
-  private pmrem: THREE.PMREMGenerator | null = null;
-  private floor: THREE.Mesh;
-  private grid: THREE.GridHelper;
+  private readonly ambient: THREE.AmbientLight;
+  private readonly floor: THREE.Mesh;
+  private readonly grid: THREE.GridHelper;
   private lightingMode = 'flat';
   private themeExposure = 1;
+  private shadowMapSize = 2048;
+  private activeSpecs: readonly DirectionalLightSpec[] = FLAT_RIG;
+  private readonly analyzedSpecs = new Map<string, readonly DirectionalLightSpec[]>();
   private disposed = false;
   private readonly themeUnsub: () => void;
 
   constructor(
+    private readonly rig: LightingRig,
     private readonly scene: THREE.Scene,
     private readonly renderer: THREE.WebGLRenderer,
-    private readonly invalidate: () => void,
-    private readonly lowEnd: () => boolean
+    private readonly invalidate: () => void
   ) {
-    this.setupLights();
+    this.ambient = new THREE.AmbientLight(0xffffff, 1.25);
+    this.scene.add(this.ambient);
+
     const floorMaterial = this.resources.track(new THREE.MeshStandardMaterial({
       color: '#c7ccd4',
       roughness: 0.9,
@@ -78,6 +74,7 @@ export class SeamerLighting {
     this.floor.rotation.x = -Math.PI / 2;
     this.floor.receiveShadow = true;
     this.scene.add(this.floor);
+
     // Grid opacity is driven by the theme palette in applySceneTheme.
     this.grid = new THREE.GridHelper(20, 20, 0x151515, 0x151515);
     this.resources.track(this.grid.geometry);
@@ -87,8 +84,10 @@ export class SeamerLighting {
     for (const material of gridMaterials) this.resources.track(material);
     this.grid.position.y = 0.002;
     this.scene.add(this.grid);
+
     this.applySceneTheme(isDarkTheme());
     this.themeUnsub = onThemeChange(() => this.applySceneTheme(isDarkTheme()));
+    this.applyFlatRig();
   }
 
   setMode(requestedMode: string, isMobile: boolean): string {
@@ -96,158 +95,99 @@ export class SeamerLighting {
     this.lightingMode = mode;
     const url = HDRI[mode];
     this.grid.visible = !url;
-    this.invalidate();
     if (!url) {
+      // Starting a zero-intensity room request cancels any HDRI still loading. LightingRig has no
+      // clearEnvironment() call, so the scene escape hatch then restores direct-light-only mode.
       this.scene.environment = null;
-      this.renderer.toneMappingExposure = this.themeExposure;
-      this.lightRig.forEach((light, index) => {
-        if (light instanceof THREE.Light) light.intensity = this.lightRigBase[index];
+      void this.rig.setEnvironment('room', 0).then(() => {
+        if (this.disposed || this.lightingMode !== mode) return;
+        this.scene.environment = null;
+        this.invalidate();
       });
-      this.clearEnvRig();
+      this.renderer.toneMappingExposure = this.themeExposure;
+      this.applyFlatRig();
+      this.invalidate();
       return mode;
     }
+
     this.renderer.toneMappingExposure = 1;
-    for (const light of this.lightRig) {
-      if (light instanceof THREE.Light) light.intensity = 0;
-    }
-    this.applyEnvLightRig(ENV_RIGS[mode] ?? []);
-    const cached = this.envCache.get(url);
-    if (cached) {
-      this.scene.environment = cached;
-      this.applyAnalyzedRig(url, mode);
-      return mode;
-    }
-    this.loadHdri(url, mode, 0);
+    this.ambient.intensity = 0;
+    this.activeSpecs = this.withShadowSize(
+      this.analyzedSpecs.get(url) ?? ENV_RIGS[mode] ?? []
+    );
+    this.rig.setLights(this.activeSpecs);
+    void this.rig.setEnvironment({
+      hdri: url,
+      analyzeLights: (texture, analyzedUrl) => {
+        const image = texture.image as unknown as {
+          data?: Float32Array;
+          width?: number;
+          height?: number;
+        };
+        if (
+          !(image.data instanceof Float32Array)
+          || typeof image.width !== 'number'
+          || typeof image.height !== 'number'
+        ) {
+          return this.activeSpecs;
+        }
+        const analyzed = analyzeHdriLights(
+          { data: image.data, width: image.width, height: image.height },
+          3
+        );
+        this.analyzedSpecs.set(analyzedUrl, analyzed);
+        this.activeSpecs = this.withShadowSize(
+          analyzed
+        );
+        return this.activeSpecs;
+      }
+    }).then(() => {
+      if (this.disposed || this.lightingMode !== mode) return;
+      // LightingRig caches the analyzer result before app shadow sizing can change. Reapply the
+      // app-owned specs so revisiting a cached HDRI keeps the current shadow-map preference.
+      this.activeSpecs = this.withShadowSize(
+        this.analyzedSpecs.get(url) ?? ENV_RIGS[mode] ?? []
+      );
+      this.rig.setLights(this.activeSpecs);
+      this.invalidate();
+    });
+    this.invalidate();
     return mode;
   }
 
   setShadowMapSize(size: number): void {
-    const key = this.lightRig[0];
-    if (key instanceof THREE.DirectionalLight && key.shadow.mapSize.width !== size) {
-      key.shadow.mapSize.set(size, size);
-      key.shadow.map?.dispose();
-      key.shadow.map = null as unknown as THREE.WebGLRenderTarget;
-    }
+    const next = Math.max(1, Math.round(size));
+    if (next === this.shadowMapSize) return;
+    this.shadowMapSize = next;
+    this.activeSpecs = this.withShadowSize(this.activeSpecs);
+    this.rig.setLights(this.activeSpecs);
   }
 
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
     this.themeUnsub();
-    this.scene.environment = null;
-    this.clearEnvRig();
-    for (const light of this.lightRig) {
-      this.scene.remove(light);
-      if (light instanceof THREE.Light) light.dispose();
-    }
-    for (const texture of this.envCache.values()) texture.dispose();
-    this.envCache.clear();
-    this.pmrem?.dispose();
+    this.scene.remove(this.ambient);
+    this.ambient.dispose();
     this.scene.remove(this.floor);
     this.scene.remove(this.grid);
     this.resources.release();
   }
 
-  private setupLights(): void {
-    const key = new THREE.DirectionalLight(0xffffff, 2.35);
-    key.position.set(5, 15, 10);
-    key.castShadow = true;
-    key.shadow.mapSize.set(2048, 2048);
-    const camera = key.shadow.camera;
-    camera.near = 0.1;
-    camera.far = 50;
-    camera.left = -10;
-    camera.right = 10;
-    camera.top = 10;
-    camera.bottom = -10;
-    key.shadow.bias = 0.0005;
-    key.shadow.normalBias = 0.03;
-    const fill = new THREE.DirectionalLight(0xfff3a6, 1.05);
-    fill.position.set(-5, 10, -5);
-    const rim = new THREE.DirectionalLight(0xffffff, 0.85);
-    rim.position.set(0, 10, -10);
-    const ambient = new THREE.AmbientLight(0xffffff, 1.25);
-    this.lightRig.push(key, fill, rim, ambient);
-    this.lightRigBase.push(...this.lightRig.map((light) =>
-      light instanceof THREE.Light ? light.intensity : 0
-    ));
-    for (const light of this.lightRig) this.scene.add(light);
+  private applyFlatRig(): void {
+    this.ambient.intensity = 1.25;
+    this.activeSpecs = this.withShadowSize(FLAT_RIG);
+    this.rig.setLights(this.activeSpecs);
   }
 
-  private loadHdri(url: string, mode: string, attempt: number): void {
-    if (!this.pmrem) {
-      this.pmrem = new THREE.PMREMGenerator(this.renderer);
-      this.pmrem.compileEquirectangularShader();
-    }
-    new RGBELoader().setDataType(THREE.FloatType).load(url, (hdr) => {
-      if (this.disposed || !this.pmrem) {
-        hdr.dispose();
-        return;
-      }
-      // Analyze BEFORE PMREM consumes the texel data.
-      const image = hdr.image as unknown as {
-        data: Float32Array;
-        width: number;
-        height: number;
-      };
-      if (image?.data) this.hdriLightCache.set(url, analyzeHdriLights(image, 3));
-      hdr.mapping = THREE.EquirectangularReflectionMapping;
-      const environment = this.pmrem.fromEquirectangular(hdr).texture;
-      hdr.dispose();
-      this.envCache.set(url, environment);
-      if (this.lightingMode === mode) {
-        this.scene.environment = environment;
-        this.applyAnalyzedRig(url, mode);
-        this.invalidate();
-      }
-    }, undefined, () => {
-      if (this.disposed || attempt >= 3) return;
-      setTimeout(() => {
-        if (this.lightingMode === mode) this.loadHdri(url, mode, attempt + 1);
-      }, 1000 * Math.pow(1.5, attempt));
-    });
-  }
-
-  private clearEnvRig(): void {
-    for (const light of this.envRig) {
-      this.scene.remove(light);
-      light.dispose();
-    }
-    this.envRig = [];
-  }
-
-  private applyEnvLightRig(rig: readonly EnvLight[]): void {
-    this.clearEnvRig();
-    rig.forEach((spec, index) => {
-      const light = new THREE.DirectionalLight(
-        Array.isArray(spec.color) ? new THREE.Color(...spec.color) : spec.color,
-        spec.intensity
-      );
-      light.position.set(...spec.dir);
-      if (index === 0) {
-        light.castShadow = true;
-        const size = this.lowEnd() ? 512 : 2048;
-        light.shadow.mapSize.set(size, size);
-        const camera = light.shadow.camera;
-        camera.near = 0.1;
-        camera.far = 50;
-        camera.left = -10;
-        camera.right = 10;
-        camera.top = 10;
-        camera.bottom = -10;
-        light.shadow.bias = 0.0005;
-        light.shadow.normalBias = 0.03;
-      }
-      this.scene.add(light);
-      this.envRig.push(light);
-    });
-    this.invalidate();
-  }
-
-  private applyAnalyzedRig(url: string, mode: string): void {
-    const analyzed = this.hdriLightCache.get(url);
-    if (!analyzed?.length || this.lightingMode !== mode) return;
-    this.applyEnvLightRig(analyzed);
+  private withShadowSize(
+    specs: readonly DirectionalLightSpec[]
+  ): readonly DirectionalLightSpec[] {
+    return specs.map((spec) => ({
+      ...spec,
+      position: [spec.position[0], spec.position[1], spec.position[2]],
+      ...(spec.castShadow ? { shadowMapSize: this.shadowMapSize } : {})
+    }));
   }
 
   private applySceneTheme(dark: boolean): void {
@@ -255,8 +195,7 @@ export class SeamerLighting {
     const floor = dark ? '#27313f' : '#c7ccd4';
     const grid = dark ? '#5a6475' : '#151515';
     const gridOpacity = dark ? 0.28 : 0.1;
-    if (this.scene.background instanceof THREE.Color) this.scene.background.set(background);
-    else this.scene.background = new THREE.Color(background);
+    this.rig.setBackground(background);
     // The source uses linear fog to dissolve the stage gradually.
     if (this.scene.fog instanceof THREE.Fog) {
       this.scene.fog.color.set(background);
@@ -286,7 +225,7 @@ export class SeamerLighting {
 function analyzeHdriLights(
   image: { data: Float32Array; width: number; height: number },
   count: number
-): AnalyzedLight[] {
+): DirectionalLightSpec[] {
   const gridWidth = 32;
   const gridHeight = 16;
   const stride = image.data.length / (image.width * image.height) >= 4 ? 4 : 3;
@@ -318,8 +257,9 @@ function analyzeHdriLights(
       cells.push({ lum: 0.2126 * r + 0.7152 * g + 0.0722 * b, r, g, b });
     }
   }
+
   const picked: number[] = [];
-  const result: AnalyzedLight[] = [];
+  const result: DirectionalLightSpec[] = [];
   let maxLum = 0;
   for (const cell of cells) maxLum = Math.max(maxLum, cell.lum);
   if (maxLum <= 0) return result;
@@ -349,13 +289,14 @@ function analyzeHdriLights(
     const theta = cx * 2 * Math.PI - Math.PI;
     const maximum = Math.max(cell.r, cell.g, cell.b) || 1;
     result.push({
-      dir: [
+      position: [
         Math.sin(phi) * Math.sin(theta) * 5,
         Math.max(0.5, Math.cos(phi) * 5),
         Math.sin(phi) * Math.cos(theta) * 5
       ],
       color: [cell.r / maximum, cell.g / maximum, cell.b / maximum],
-      intensity: rank === 0 ? 2 : 0.5 + cell.lum / maxLum
+      intensity: rank === 0 ? 2 : 0.5 + cell.lum / maxLum,
+      castShadow: rank === 0
     });
   }
   return result;

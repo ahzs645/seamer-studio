@@ -5,8 +5,7 @@
 // texture's offset/repeat map mm → 0..1 so the same geometry UVs sample it correctly.
 
 import * as THREE from 'three';
-import type { TextureSlot } from '@seamer/pattern-model';
-import type { Vec2 } from '$lib/utils/patternGeometry';
+import type { TextureSlot, Vec2 } from '@seamer/pattern-model';
 
 export interface PieceBake {
   /** material texture slot driving the print (null = solid color piece) */

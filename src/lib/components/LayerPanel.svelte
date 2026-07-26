@@ -1,6 +1,11 @@
 <script lang="ts">
-  import type { Pattern, Layer } from '@seamer/pattern-model';
-  import { layerRename, layerSetStyle, type LayerStyle } from '$lib/commands/structural';
+  import {
+    layerRename,
+    layerSetStyle,
+    type Layer,
+    type LayerStyle,
+    type Pattern
+  } from '@seamer/pattern-model';
 
   interface Props {
     currentPattern: Pattern;

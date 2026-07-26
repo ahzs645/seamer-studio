@@ -26,10 +26,16 @@
   import { patternToSVG, patternToSVG2, patternToDXF, patternToCSV, downloadText, patternToPNG, downloadBlob, printPattern, printMarkerTiled, patternToHPGL, patternToSSP, sspToPattern } from '$lib/utils/exporters';
   import { patternThumbnail } from '$lib/utils/thumbnail';
   import { nestPieces, markerToSVG, type CutOffType } from '$lib/utils/markerLayout';
-  import { dxfToPattern, svgToPattern, type DxfImportOptions } from '$lib/utils/patternImport';
+  import {
+    dxfToPattern,
+    svgToPattern,
+    type DxfImportOptions,
+    type SvgImportOptions
+  } from '$lib/utils/patternImport';
   import { parseRul, applyRulToPattern, type RulTable } from '$lib/utils/rulImport';
   import PrintDialog from '$lib/components/PrintDialog.svelte';
   import DxfImportDialog from '$lib/components/DxfImportDialog.svelte';
+  import SvgImportDialog from '$lib/components/SvgImportDialog.svelte';
   import SizesDialog from '$lib/components/SizesDialog.svelte';
   import { cutToPattern } from '$lib/utils/cutImport';
   import { seamlyToPattern } from '$lib/utils/seamlyImport';
@@ -60,6 +66,8 @@
   let showPrintDialog = $state(false);
   /** pending .dxf file text + name while the DXF import options dialog is open */
   let dxfPending = $state<{ text: string; name: string } | null>(null);
+  /** pending .svg file text + name while the SVG import options dialog is open */
+  let svgPending = $state<{ text: string; name: string } | null>(null);
   /** RUL grade-rule dialog: table parsed from a picked .rul file, or null for "pick a file" mode */
   let rulDialog = $state<{ table: RulTable | null } | null>(null);
   let showCuttingRoom = $state(false);
@@ -378,6 +386,7 @@
         const text = await file.text();
         const name = file.name.replace(/\.(dxf|svg|cut|val|sm2d|xml|json|rul|seamer\.json)$/i, '');
         if (ext === 'dxf') { dxfPending = { text, name }; return; } // import options dialog first
+        if (ext === 'svg') { svgPending = { text, name }; return; } // import options dialog first
         if (ext === 'rul') { rulDialog = { table: parseRul(text) }; return; } // pick a size, then apply
         applyImported(parseImport(text, ext, name));
       } catch (err) { toastError((err as Error)?.message || 'Could not import file'); }
@@ -397,6 +406,14 @@
       applyImported(dxfToPattern(dxfPending.text, dxfPending.name, options));
     } catch (err) { toastError((err as Error)?.message || 'Could not import file'); }
     dxfPending = null;
+  }
+
+  function importSvgWithOptions(options: SvgImportOptions) {
+    if (!svgPending) return;
+    try {
+      applyImported(svgToPattern(svgPending.text, svgPending.name, options));
+    } catch (err) { toastError((err as Error)?.message || 'Could not import file'); }
+    svgPending = null;
   }
 
   function applyRul(table: RulTable, size: string) {
@@ -746,6 +763,7 @@
 {#if showSettings}<SettingsModal onclose={() => (showSettings = false)} />{/if}
 {#if showPrintDialog}<PrintDialog pattern={currentPattern} {patternName} onclose={() => (showPrintDialog = false)} />{/if}
 {#if dxfPending}<DxfImportDialog filename={dxfPending.name} onapply={importDxfWithOptions} oncancel={() => (dxfPending = null)} />{/if}
+{#if svgPending}<SvgImportDialog filename={svgPending.name} onapply={importSvgWithOptions} oncancel={() => (svgPending = null)} />{/if}
 {#if rulDialog}<SizesDialog table={rulDialog.table} onapply={applyRul} oncancel={() => (rulDialog = null)} />{/if}
 
 <Toaster />

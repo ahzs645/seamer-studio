@@ -9,7 +9,8 @@ import {
   Selection,
   createDoc,
   installAutomationApi,
-  type CommandDef
+  type CommandDef,
+  type CommandResult
 } from '@atelier/core';
 import { EMPTY_SEAM_TOOL, type SeamToolState } from '$lib/utils/seamTool';
 
@@ -103,9 +104,16 @@ interface InstalledAutomation {
     example: Record<string, unknown> | null;
     replayable: boolean;
   }>;
+  execute: (type: string, params?: unknown) => CommandResult;
   getContent: () => Pattern;
   getPattern?: () => Pattern;
   getSelection: () => unknown;
+}
+
+declare global {
+  interface Window {
+    seamer?: InstalledAutomation;
+  }
 }
 
 function patchAutomationSurface(): void {

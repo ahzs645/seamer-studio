@@ -4,10 +4,6 @@
 
 import * as THREE from 'three';
 import type { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { TransformControls } from 'three/addons/controls/TransformControls.js';
-import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
-import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
-import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { OBJExporter } from 'three/addons/exporters/OBJExporter.js';
 import type { Pattern, Material } from '@seamer/pattern-model';
 import { AvatarController } from '@seamer/avatar';
@@ -24,11 +20,14 @@ import {
 } from '@atelier/viewport';
 import { createGarmentMaterial, createAvatarMaterial, hasSeparateBack, disposeGarmentMaterial } from './materials';
 import { createPieceTexture, pieceNeedsBake } from './pieceTexture';
-import { indexPoints, pieceInternalPolylines, seamColor } from '$lib/utils/patternGeometry';
+import { indexPoints, pieceInternalPolylines } from '@seamer/pattern-model';
 import { samePick, type SeamPick, type SeamToolState } from '$lib/utils/seamTool';
-import { measurementSegment } from '@seamer/avatar';
-import { SeamerPostFX, type SeamerPostSettings } from './n8aoPost';
 import { SeamerLighting } from './seamerLighting';
+import {
+  SeamerOverlays,
+  type ArrangementMarker,
+  type MeasurementOverlayDef
+} from './seamerOverlays';
 
 export type RendererStatus = 'idle' | 'loading' | 'ready' | 'simulating' | 'error';
 
@@ -68,30 +67,19 @@ export class PatternRenderer {
   private readonly renderer: THREE.WebGLRenderer;
   private readonly controls: OrbitControls;
   private readonly lighting: SeamerLighting;
+  private readonly overlays: SeamerOverlays;
   private clothGroup = new THREE.Group();
   private lightingMode = 'flat';
-  private readonly post: SeamerPostFX;
   private bokehFStop = 0; // 0 = depth of field off; focus auto-tracks the orbit target each frame
 
   // camera persistence: fired (debounced) after the user orbits/zooms so the app can save the view
   onCameraChanged: (pos: [number, number, number], target: [number, number, number], fov: number) => void = () => {};
   private cameraSaveTimer: ReturnType<typeof setTimeout> | undefined;
 
-  // Named arrangement-point markers from base_model.json: rendered on the body when enabled;
-  // in arrange mode, clicking one snaps the selected piece's arrangement to that point.
-  private apGroup = new THREE.Group();
-  private apGeo: THREE.SphereGeometry | null = null;
-  private apMarkers: { name: string; cylinderName: string; uDegrees: number; v: number; mesh: THREE.Mesh }[] = [];
-  private showArrangementPointsFlag = false;
-  private apHover: THREE.Mesh | null = null;
+  // Named arrangement-point markers from base_model.json are rendered by SeamerOverlays.
+  private arrangementHover: ArrangementMarker | null = null;
   onArrangementPointPicked: (pick: { pieceId: string; name: string; cylinderName: string; uDegrees: number; v: number }) => void = () => {};
   onArrangementPointHover: (name: string | null) => void = () => {};
-
-  // 3D measurements: the 2D Measure tool's distance measurements shown on the draped garment
-  // (endpoints mapped to the nearest cloth particles; lines/labels track the live sim).
-  private measureGroup = new THREE.Group();
-  private measureDefs: { id: string; name: string; a: { x: number; y: number }; b: { x: number; y: number }; unit: string }[] = [];
-  private measureEntries: { aIdx: number; bIdx: number; name: string; unit: string; line: THREE.Line; label: THREE.Sprite; lastLen: number; lastTextAt: number }[] = [];
 
   private avatar: AvatarController | null = null;
   private cylinders: Map<string, CylinderFrame> = new Map();
@@ -99,7 +87,12 @@ export class PatternRenderer {
   private prepared: PreparedCloth | null = null;
   private clothMeshes: ClothMeshEntry[] = [];
   private clothBackMeshes: THREE.Mesh[] = []; // optional back-face meshes (separate back texture)
-  private pieceLabels: { pieceId: string; obj: THREE.Object3D; aspect: number }[] = [];
+  private pieceLabels: {
+    pieceId: string;
+    overlayId: string;
+    obj: THREE.Object3D;
+    aspect: number;
+  }[] = [];
   private showLabels = true;
   private labelMode: 'billboard' | 'flat' = 'flat';
 
@@ -159,10 +152,11 @@ export class PatternRenderer {
 
   // pre-simulation arrangement editor
   private mode: SceneMode = 'view';
-  private transform: TransformControls | null = null;
   private arrangeGroup = new THREE.Group();
   private arrangeEntries: ArrangeEntry[] = [];
   private selectedArrange = -1;
+  private releaseGizmoLease: (() => void) | null = null;
+  private readonly gizmoDisposers: Array<() => void> = [];
 
   onStatus: (status: RendererStatus, message?: string) => void = () => {};
   // `kind` distinguishes the two piece-edit tools while mode === 'arrange': 'arrange' (flat layout)
@@ -175,6 +169,7 @@ export class PatternRenderer {
   /** Fired when a piece is picked in the 3D view (click) so the 2D editor can sync. */
   onSelectPiece: (pieceId: string | null) => void = () => {};
   private highlightId: string | null = null;
+  private releaseSimulationLease: (() => void) | null = null;
 
   /**
    * Highlight a piece from an external (2D) selection. Tints the matching draped cloth
@@ -197,7 +192,7 @@ export class PatternRenderer {
         bm.emissiveIntensity = e.pieceId === id ? 0.12 : 1;
       }
     }
-    this.rebuildSelectionOutline();
+    this.overlays.setHighlightedPiece(id);
     if (this.mode === 'arrange') {
       const idx = this.arrangeEntries.findIndex((e) => e.pieceId === id);
       // applying an EXTERNAL selection: don't echo onSelectPiece back out, or the
@@ -209,78 +204,6 @@ export class PatternRenderer {
         if (m.emissive) m.emissive.setHex(e.pieceId === id ? HI : 0x000000);
       }
     }
-  }
-
-  // ---- Selected-piece outline: fat lines along the piece's boundary edges (the original's
-  // createOutlineMesh / setOutlineResolution — keeps the fabric colour, draws a crisp edge). ----
-  private outlineMesh: LineSegments2 | null = null;
-  private outlineMat: LineMaterial | null = null;
-  private outlinePairs: number[] = []; // flat [a0,b0,...] global particle indices
-
-  private clearSelectionOutline(): void {
-    if (!this.outlineMesh) return;
-    this.clothGroup.remove(this.outlineMesh);
-    this.outlineMesh.geometry.dispose();
-    this.outlineMat?.dispose();
-    this.outlineMesh = null;
-    this.outlineMat = null;
-    this.outlinePairs = [];
-  }
-
-  private rebuildSelectionOutline(): void {
-    this.clearSelectionOutline();
-    const id = this.highlightId;
-    if (!id || !this.prepared) return;
-    const sp = this.prepared.simData.pieces.find((p) => p.pieceId === id);
-    if (!sp) return;
-    // boundary edges = triangle edges used exactly once
-    const counts = new Map<string, [number, number]>();
-    const seen = new Map<string, number>();
-    for (let t = 0; t < sp.triangles.length; t += 3) {
-      const v = [sp.triangles[t], sp.triangles[t + 1], sp.triangles[t + 2]];
-      for (let e = 0; e < 3; e++) {
-        const a = v[e], b = v[(e + 1) % 3];
-        const k = `${Math.min(a, b)}_${Math.max(a, b)}`;
-        seen.set(k, (seen.get(k) ?? 0) + 1);
-        counts.set(k, [a, b]);
-      }
-    }
-    this.outlinePairs = [];
-    for (const [k, n] of seen) {
-      if (n !== 1) continue;
-      const [a, b] = counts.get(k)!;
-      this.outlinePairs.push(a, b);
-    }
-    if (this.outlinePairs.length === 0) return;
-    const geo = new LineSegmentsGeometry();
-    geo.setPositions(new Float32Array(this.outlinePairs.length * 3));
-    this.outlineMat = new LineMaterial({ color: 0x1d4ed8, linewidth: 4, transparent: true, opacity: 0.95 });
-    this.updateOutlineResolution();
-    this.outlineMesh = new LineSegments2(geo, this.outlineMat);
-    this.outlineMesh.frustumCulled = false;
-    this.outlineMesh.renderOrder = 10;
-    this.clothGroup.add(this.outlineMesh);
-    this.updateSelectionOutlinePositions();
-  }
-
-  private updateOutlineResolution(): void {
-    if (!this.outlineMat) return;
-    const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
-    this.outlineMat.resolution.copy(size);
-  }
-
-  private updateSelectionOutlinePositions(): void {
-    if (!this.outlineMesh || this.outlinePairs.length === 0) return;
-    const pos = this.lastClothPositions ?? this.prepared?.simData.positions;
-    if (!pos) return;
-    const arr = new Float32Array(this.outlinePairs.length * 3);
-    for (let k = 0; k < this.outlinePairs.length; k++) {
-      const g = this.outlinePairs[k];
-      arr[k * 3] = pos[g * 4];
-      arr[k * 3 + 1] = pos[g * 4 + 1];
-      arr[k * 3 + 2] = pos[g * 4 + 2];
-    }
-    (this.outlineMesh.geometry as LineSegmentsGeometry).setPositions(arr);
   }
 
   constructor(viewport: Viewport) {
@@ -295,9 +218,6 @@ export class PatternRenderer {
     }
     this.camera = camera;
     this.controls = viewport.camera.controls;
-    const w = Math.max(1, this.container.clientWidth);
-    const h = Math.max(1, this.container.clientHeight);
-
     // Preserve seamer's depth range while CameraRig owns projection and resize.
     this.camera.near = 0.01;
     this.camera.far = 100;
@@ -312,28 +232,33 @@ export class PatternRenderer {
     this.controls.addEventListener('start', this.handleControlsStart);
 
     this.scene.add(this.clothGroup);
-    this.scene.add(this.apGroup);
-    this.scene.add(this.measureGroup);
-    // LightingRig cannot currently represent seamer's analyzed HDRI directional rigs or a "none"
-    // preset. Dispose its default studio rig before installing the lossless app-owned lighting path;
-    // Viewport.dispose() is idempotent and safely cascades through it again.
-    this.viewport.lighting.dispose();
+    this.overlays = new SeamerOverlays(
+      this.viewport,
+      this.clothGroup,
+      (text) => this.makeLabel(text)
+    );
     this.lighting = new SeamerLighting(
+      this.viewport.lighting,
       this.scene,
       this.renderer,
-      () => this.invalidate(),
-      () => this.lowEnd || this.forceLowEnd
+      () => this.invalidate()
+    );
+    this.viewport.gizmos.setSpace('local');
+    this.gizmoDisposers.push(
+      this.viewport.gizmos.onDragStart(() => {
+        this.releaseGizmoLease?.();
+        this.releaseGizmoLease = this.viewport.acquireRenderLease('arrange-gizmo');
+      }),
+      this.viewport.gizmos.onDrag(() => this.invalidate()),
+      this.viewport.gizmos.onDragEnd(() => {
+        this.releaseGizmoLease?.();
+        this.releaseGizmoLease = null;
+        this.invalidate();
+      })
     );
     this.setupGrab();
-    // AO decision (a): the engine composer is deliberately disabled. N8AO is persisted document
-    // semantics, so seamer keeps its real N8AO/Bokeh/SMAA chain until Viewport accepts an AO pass
-    // factory or a custom render-composer hook.
-    this.viewport.post.setEnabled(false);
-    this.post = new SeamerPostFX(this.renderer, this.scene, this.camera, w, h);
 
     this.applyRenderQuality();
-    // orbit/zoom/pan must repaint under render-on-demand
-    this.controls.addEventListener('change', this.handleControlsChange);
 
     this.invalidate();
     const ResizeObserverConstructor =
@@ -352,21 +277,15 @@ export class PatternRenderer {
   private lowEnd = false;
   private forceLowEnd = false;
   private smaaScale = 2;
-  private appFrame = 0;
 
-  /**
-   * Request the app-owned composite frame. Viewport owns OrbitControls damping and schedules its
-   * direct fallback frame; this second on-demand frame is required because option (a) preserves the
-   * N8AO composer until the engine exposes a custom pass/composer hook.
-   */
+  /** Request an engine-owned on-demand composite frame. */
   invalidate(): void {
-    if (this.disposed || this.appFrame !== 0) return;
-    this.appFrame = window.requestAnimationFrame(this.renderFrame);
+    if (this.disposed) return;
+    this.refreshPostSettings();
+    this.viewport.invalidate();
   }
 
-  private readonly handleControlsChange = (): void => this.invalidate();
   private readonly handleControlsEnd = (): void => this.queueCameraSave();
-  private readonly handleTransformChange = (): void => this.invalidate();
   private readonly handleControlsStart = (): void => {
     // CameraRig has no public cancelFly(); re-applying its current state cancels an active fly
     // without changing the view when the user takes control.
@@ -405,7 +324,13 @@ export class PatternRenderer {
     const w = Math.max(1, this.container.clientWidth);
     const h = Math.max(1, this.container.clientHeight);
     this.renderer.setSize(w, h);
-    this.post.setQuality(ratio, lowEnd ? 0 : hdr ? 16 : 4, w, h);
+    this.viewport.post.setQuality({
+      // PostFX.forceLowEnd also disables AO. Seamer's persisted N8AO toggle must remain the only AO
+      // enable switch, so low-end policy is expressed explicitly through ratio/MSAA/shadows here.
+      forceLowEnd: false,
+      smaaScale: ratio,
+      msaaSamples: lowEnd ? 0 : hdr ? 16 : 4
+    });
     this.invalidate();
   }
 
@@ -420,15 +345,54 @@ export class PatternRenderer {
   }
 
   /** Apply the pattern's post-processing settings: AO enable/intensity/radius/falloff + bokeh f-stop. */
-  applyPostSettings(s: SeamerPostSettings): void {
-    this.invalidate();
-    this.bokehFStop = this.post.apply(s);
+  applyPostSettings(s: {
+    aoEnabled?: boolean;
+    aoIntensity?: number;
+    aoRadius?: number;
+    aoFalloff?: number;
+    bokehFStop?: number;
+  }): void {
+    this.bokehFStop =
+      typeof s.bokehFStop === 'number' && s.bokehFStop > 0
+        ? s.bokehFStop
+        : 0;
+    this.viewport.post.apply({
+      ao: {
+        enabled: s.aoEnabled !== false,
+        intensity: s.aoIntensity,
+        radius: s.aoRadius,
+        falloff: s.aoFalloff
+      },
+      dof: {
+        enabled: this.shouldUseDof(),
+        fStop: this.bokehFStop || undefined
+      },
+      smaa: true
+    });
   }
 
   /** Toggle AO/SMAA post-processing (falls back to direct render when off). */
   setPostProcessing(on: boolean) {
-    this.post.setEnabled(on);
+    this.viewport.post.setEnabled(on);
     this.invalidate();
+  }
+
+  private refreshPostSettings(): void {
+    this.viewport.post.apply({
+      dof: {
+        enabled: this.shouldUseDof(),
+        fStop: this.bokehFStop || undefined
+      },
+      smaa: true
+    });
+  }
+
+  private shouldUseDof(): boolean {
+    return this.bokehFStop > 0
+      && this.mode === 'view'
+      && !this.grabbing
+      && !this.highlightId
+      && !this.seamToolState;
   }
 
   /** Switch lighting mode: 'flat' | 'studio1' | 'studio2' | 'sunset'. */
@@ -450,10 +414,11 @@ export class PatternRenderer {
       if (ev.button !== 0) return;
       // Arrange mode: click a piece to select it (the gizmo handles its own drags). Don't grab/pull.
       if (this.mode === 'arrange') {
-        if (this.transform && (this.transform.dragging || this.transform.axis)) return; // gizmo handle -> let it drag
+        const handle = this.viewport.gizmos.handleState;
+        if (handle.dragging || handle.axis) return; // gizmo handle -> let it drag
         setNdc(ev);
         // arrangement-point snap: with a piece selected, clicking a marker binds the piece to it
-        const marker = this.pickArrangementMarker(ndc);
+        const marker = this.overlays.pickArrangementMarker(ev);
         if (marker && this.selectedArrange >= 0) {
           const pieceId = this.arrangeEntries[this.selectedArrange].pieceId.replace(/#M$/, '');
           this.onArrangementPointPicked({ pieceId, name: marker.name, cylinderName: marker.cylinderName, uDegrees: marker.uDegrees, v: marker.v });
@@ -479,7 +444,7 @@ export class PatternRenderer {
       for (const e of this.clothMeshes) e.geometry.computeBoundingSphere();
       // Seam tool active: clicks pick piece edges on the garment instead of selecting/grabbing.
       if (this.seamToolState) {
-        const pick = this.pickSeamEdge(ndc);
+        const pick = this.pickSeamEdge(ev);
         if (pick) this.onSeamEdgePick(pick);
         return; // miss -> orbit, but never enter manipulate/grab while the seam tool is up
       }
@@ -540,21 +505,21 @@ export class PatternRenderer {
         if (now - this.lastSeamHoverAt > 50) {
           this.lastSeamHoverAt = now;
           setNdc(ev);
-          const pick = this.pickSeamEdge(ndc);
+          const pick = this.pickSeamEdge(ev);
           const changed = !!pick !== !!this.seamToolHover ||
             (pick && this.seamToolHover && (!samePick(pick, this.seamToolHover) || pick.reversed !== this.seamToolHover.reversed));
-          if (changed) { this.seamToolHover = pick; this.rebuildSeamToolOverlay(); }
+          if (changed) {
+            this.seamToolHover = pick;
+            this.overlays.setSeamToolHover(pick);
+          }
         }
       }
       // arrangement-marker hover highlight (cheap raycast against the small marker set)
-      if (!this.grabbing && this.apGroup.visible && this.apMarkers.length) {
-        setNdc(ev);
-        const marker = this.pickArrangementMarker(ndc);
-        const mesh = marker?.mesh ?? null;
-        if (mesh !== this.apHover) {
-          if (this.apHover) (this.apHover.material as THREE.MeshBasicMaterial).color.setHex(0x0ea5e9);
-          this.apHover = mesh;
-          if (this.apHover) (this.apHover.material as THREE.MeshBasicMaterial).color.setHex(0xf97316);
+      if (!this.grabbing) {
+        const marker = this.overlays.pickArrangementMarker(ev);
+        if (marker !== this.arrangementHover) {
+          this.arrangementHover = marker;
+          this.overlays.setArrangementHover(marker);
           this.onArrangementPointHover(marker?.name ?? null);
           // ghost preview of the selected piece at the hovered marker's placement
           this.updateArrangementGhost(marker ?? null);
@@ -618,83 +583,54 @@ export class PatternRenderer {
 
   private onResize = () => {
     if (this.disposed) return;
-    const w = Math.max(1, this.container.clientWidth);
-    const h = Math.max(1, this.container.clientHeight);
     this.viewport.resize();
-    this.post.resize(w, h);
-    this.updateOutlineResolution();
-    this.updateSeamLineResolution();
-    this.invalidate();
+    this.applyRenderQuality();
   };
 
-  private renderFrame = () => {
-    this.appFrame = 0;
-    if (this.disposed) return;
-    // Photographic depth of field (the original): aperture derives from the 35mm-equivalent focal
-    // length and the f-stop; focus autofocuses on whatever is at screen centre (clamped around the
-    // orbit-target distance); the effect pauses while editing/selecting/grabbing so manipulation
-    // stays crisp.
-    this.post.render({
-      bokehFStop: this.bokehFStop,
-      focusDistance: this.computeFocusDistance(),
-      fov: this.camera.fov,
-      allowBokeh:
-        this.mode === 'view'
-        && !this.grabbing
-        && !this.highlightId
-        && !this.seamToolState
-    });
-  };
-
-  // Autofocus: raycast the screen centre against the garment, clamped to 0.5×–1.5× the orbit-target
-  // distance (the original's getFocusDistanceFromCenter). Throttled — bounding volumes refresh at
-  // most every 250 ms so per-frame raycasts stay cheap while the sim runs.
+  // Debug autofocus point retained as an editor aid. PostFX itself focuses on CameraRig's orbit
+  // target; this marker raycasts the screen centre against the live garment.
   private focusNdc = new THREE.Vector2(0, 0);
-  private lastFocusAt = 0;
-  private lastFocusDist = 0;
   private debugFocusPoint = false;
+  private hasDebugFocusPoint = false;
 
   setDebugFocusPoint(show: boolean): void {
     this.debugFocusPoint = show;
-    if (!show) this.viewport.overlays.remove('seamer-debug-focus');
+    if (!show) {
+      this.viewport.overlays.remove('seamer-debug-focus');
+      this.hasDebugFocusPoint = false;
+    }
+    else this.updateDebugFocusPoint();
     this.invalidate();
   }
 
-  private computeFocusDistance(): number {
+  private updateDebugFocusPoint(): void {
+    if (!this.debugFocusPoint) return;
     const tdist = this.camera.position.distanceTo(this.controls.target);
-    const now = performance.now();
-    if (now - this.lastFocusAt < 250 && this.lastFocusDist > 0) return this.lastFocusDist;
-    this.lastFocusAt = now;
-    let dist = tdist;
+    let point = this.controls.target.clone();
     if (this.clothMeshes.length) {
       for (const e of this.clothMeshes) e.geometry.computeBoundingSphere();
       this.raycaster.setFromCamera(this.focusNdc, this.camera);
       const hits = this.raycaster.intersectObjects(this.clothMeshes.map((e) => e.mesh), false);
       if (hits[0]) {
-        dist = Math.max(0.5 * tdist, Math.min(1.5 * tdist, hits[0].distance));
-        if (this.debugFocusPoint) {
-          this.viewport.overlays.addPoints(
-            'seamer-debug-focus',
-            new Float32Array(hits[0].point.toArray()),
-            { color: '#f43f5e', size: 8 }
-          );
-          this.invalidate();
-        }
-      } else if (this.debugFocusPoint) {
-        const point = this.camera.position.clone().addScaledVector(
+        point = hits[0].point;
+      } else {
+        point = this.camera.position.clone().addScaledVector(
           this.raycaster.ray.direction,
-          dist
+          tdist
         );
-        this.viewport.overlays.addPoints(
-          'seamer-debug-focus',
-          new Float32Array(point.toArray()),
-          { color: '#f43f5e', size: 8 }
-        );
-        this.invalidate();
       }
     }
-    this.lastFocusDist = dist;
-    return dist;
+    const positions = new Float32Array(point.toArray());
+    if (this.hasDebugFocusPoint) {
+      this.viewport.overlays.updatePoints('seamer-debug-focus', positions);
+    } else {
+      this.viewport.overlays.addPoints(
+        'seamer-debug-focus',
+        positions,
+        { color: '#f43f5e', size: 8 }
+      );
+      this.hasDebugFocusPoint = true;
+    }
   }
 
   /** Debounced camera write-back (orbit end, tween end, FOV change). */
@@ -711,7 +647,9 @@ export class PatternRenderer {
   async setPattern(pattern: Pattern, changedPieces?: Set<string>): Promise<void> {
     this.pattern = pattern;
     this.showTriangles = pattern.settings3d.showTriangles;
-    this.debugFocusPoint = pattern.settings3d.debugFocusPoint;
+    this.setDebugFocusPoint(pattern.settings3d.debugFocusPoint);
+    // Measurement segments are tied to the previous avatar vertex positions.
+    this.clearBodyMeasurement();
     // Source parity (transferToScene's `wasSimulatorRunning`): capture whether a user-run sim was live
     // BEFORE we stop+rebuild, so we can restart it afterwards. The source re-settles an edited piece
     // ONLY if the sim was already running; a cold edit stays manual (press Simulate) — which we match.
@@ -804,9 +742,12 @@ export class PatternRenderer {
     // later body edit these are the OLD frames the cylinder re-fit projects from. (Keep them across a
     // dirty rebuild — don't overwrite with the new-body frames.)
     if (!this.bodyDirty || !this.baseCylinders) this.baseCylinders = this.cylinders;
-    this.rebuildArrangementMarkers();
+    this.overlays.setAvatarContext(this.avatar, this.cylinders);
     this.prepared = prepareCloth({ pattern, avatarVertices: verts, avatarIndices: indices, cylinders: this.cylinders }, { changedPieces });
-    if (!this.prepared) return;
+    if (!this.prepared) {
+      this.overlays.setPrepared(null, null);
+      return;
+    }
 
     const flat = pattern.settings3d.lightingMode === 'flat';
     const matById = new Map<string, Material>();
@@ -926,12 +867,14 @@ export class PatternRenderer {
       // Camera-facing sprite badge for 'billboard' mode (hidden unless that mode is active).
       const { obj, aspect } = this.makeLabel(`${name} face side`);
       obj.visible = this.showLabels && !hidden && this.labelMode === 'billboard';
-      this.clothGroup.add(obj);
-      this.pieceLabels.push({ pieceId: piece.pieceId, obj, aspect });
+      const overlayId = `seamer-piece-label-${piece.pieceId}`;
+      this.overlays.addPieceLabel(overlayId, obj);
+      this.pieceLabels.push({ pieceId: piece.pieceId, overlayId, obj, aspect });
     }
     this.applyClothPositions(this.prepared.simData.positions);
+    this.overlays.setPrepared(this.prepared, this.prepared.simData.positions);
+    this.overlays.setHighlightedPiece(this.highlightId);
     if (this.showTriangles) this.setShowTriangles(true); // rebuild the wireframe overlays on the new meshes
-    this.rebuildMeasurements();
   }
 
   /** Add a per-piece `uvLabel` attribute (0..1 across the piece's pattern bbox); returns the bbox. */
@@ -967,7 +910,7 @@ export class PatternRenderer {
   private applyClothPositions(global: Float32Array) {
     this.lastClothPositions = global;
     this.invalidate();
-    this.updateSeamToolOverlayPositions();
+    this.updateDebugFocusPoint();
     for (const entry of this.clothMeshes) {
       const attr = entry.geometry.getAttribute('position') as THREE.BufferAttribute;
       const arr = attr.array as Float32Array;
@@ -1014,19 +957,14 @@ export class PatternRenderer {
       if (!label || entry.count === 0) continue;
       label.obj.position.set(cx / entry.count, cy / entry.count, cz / entry.count);
     }
-    this.updateSeamLines(global);
-    this.updateSelectionOutlinePositions();
-    this.updateMeasureGroup(global);
+    this.overlays.updatePositions(global);
   }
 
   private clearClothMeshes() {
     this.clearSnapshot(); // a ghost from the old drape would be stale once pieces rebuild
-    this.clearSeamLines();
-    this.clearSelectionOutline(); // particle indices die with the meshes
-    this.clearSeamToolOverlay();
+    this.overlays.clearPrepared(); // particle indices die with the meshes
     for (const m of this.triangleOverlays) { this.clothGroup.remove(m); (m.material as THREE.Material).dispose(); }
     this.triangleOverlays = [];
-    this.clearMeasurements(); // particle indices die with the meshes; rebuilt after the new build
     for (const e of this.clothMeshes) {
       this.viewport.picking.unregister(e.mesh);
       this.clothGroup.remove(e.mesh);
@@ -1042,11 +980,7 @@ export class PatternRenderer {
     for (const b of this.clothBackMeshes) { this.clothGroup.remove(b); disposeGarmentMaterial(b.material as THREE.Material); }
     this.clothBackMeshes = [];
     for (const l of this.pieceLabels) {
-      this.clothGroup.remove(l.obj);
-      const m = (l.obj as THREE.Sprite | THREE.Mesh).material as THREE.SpriteMaterial | THREE.MeshBasicMaterial;
-      (m.map as THREE.Texture | null)?.dispose();
-      m.dispose();
-      if (l.obj instanceof THREE.Mesh) l.obj.geometry.dispose();
+      this.overlays.removePieceLabel(l.overlayId);
     }
     this.pieceLabels = [];
   }
@@ -1292,11 +1226,16 @@ export class PatternRenderer {
       void this.runSimLoop();
     } catch (e) {
       this.simulating = false;
+      this.releaseSimulationLease?.();
+      this.releaseSimulationLease = null;
       this.onStatus('error', e instanceof Error ? e.message : String(e));
     }
   }
 
   private runSimLoop(): void {
+    if (!this.releaseSimulationLease) {
+      this.releaseSimulationLease = this.viewport.acquireRenderLease('cloth-solver');
+    }
     this.simRunner?.start();
   }
 
@@ -1304,6 +1243,8 @@ export class PatternRenderer {
     const wasUser = this.userSimulating;
     this.simulating = false;
     this.simRunner?.stop();
+    this.releaseSimulationLease?.();
+    this.releaseSimulationLease = null;
     this.userSimulating = false;
     if (wasUser) {
       // Weld settled seams (counterpart particles within 2 mm snap to their midpoint — the
@@ -1424,6 +1365,7 @@ export class PatternRenderer {
 
   /** true while the piece-edit groups were seeded from the live drape (Move mode) vs the flat layout. */
   private arrangeFromDrape = false;
+  private arrangeTransformMode: 'translate' | 'rotate' = 'translate';
 
   /** Enter arrange mode: show pieces flat-on-body, each individually selectable + movable. */
   enterArrangeMode(): void {
@@ -1498,17 +1440,8 @@ export class PatternRenderer {
       this.arrangeEntries.push({ pieceId: piece.pieceId, start: piece.start, count: piece.count, group, mesh, baseLocal });
     }
 
-    if (!this.transform) {
-      this.transform = new TransformControls(this.camera, this.renderer.domElement);
-      this.transform.setMode('translate');
-      this.transform.setSpace('local');
-      // disable orbit while dragging the gizmo
-      this.transform.addEventListener('dragging-changed', (e) => { this.controls.enabled = !(e as unknown as { value: boolean }).value; });
-      // TransformControls emits on every pointer-driven object update; this explicitly holds the
-      // on-demand composite path open for the duration of a gizmo drag.
-      this.transform.addEventListener('change', this.handleTransformChange);
-      this.scene.add(this.transform.getHelper());
-    }
+    this.viewport.gizmos.setMode(this.arrangeTransformMode);
+    this.viewport.gizmos.setSpace('local');
     this.selectArrange(-1);
   }
 
@@ -1524,12 +1457,12 @@ export class PatternRenderer {
       const m = e.mesh.material as THREE.MeshPhysicalMaterial;
       m.emissive.setHex(0x1d4ed8); // blue selection tint
       m.emissiveIntensity = 0.4;
-      this.transform?.attach(e.group);
+      this.viewport.gizmos.attach(e.group, this.arrangeTransformMode);
       this.highlightId = e.pieceId;
       this.emitModeChange(e.pieceId);
       if (emit) this.onSelectPiece(e.pieceId);
     } else {
-      this.transform?.detach();
+      this.viewport.gizmos.detach();
       this.emitModeChange(null);
     }
     this.invalidate();
@@ -1543,7 +1476,8 @@ export class PatternRenderer {
 
   /** Gizmo mode while arranging. */
   setArrangeTransformMode(m: 'translate' | 'rotate'): void {
-    this.transform?.setMode(m);
+    this.arrangeTransformMode = m;
+    this.viewport.gizmos.setMode(m);
     this.invalidate();
   }
 
@@ -1567,7 +1501,7 @@ export class PatternRenderer {
     if (this.mode !== 'arrange') return;
     this.clearArrangementGhost();
     this.selectArrange(-1);
-    this.transform?.detach();
+    this.viewport.gizmos.detach();
     for (const e of this.arrangeEntries) {
       this.viewport.picking.unregister(e.mesh);
       this.arrangeGroup.remove(e.group);
@@ -1808,119 +1742,37 @@ export class PatternRenderer {
     this.invalidate();
   }
 
-  // ---- 3D seam lines: per-seam golden-angle colored fat lines connecting sewn particle pairs.
-  // Shown when "Show seams" is on OR a seam is selected (the original's shouldDisplaySeams). ----
-  private seamLineEntries: { seamId: string; mesh: LineSegments2; mat: LineMaterial; pairs: number[] }[] = [];
-  private showSeams3d = false;
-  private selectedSeam3d: string | null = null;
-
-  private buildSeamLines(): void {
-    if (!this.prepared || this.seamLineEntries.length) return;
-    for (const { seamId, index, pairs } of this.prepared.simData.seamPairsBySeam) {
-      if (pairs.length === 0) continue;
-      const geo = new LineSegmentsGeometry();
-      geo.setPositions(new Float32Array(pairs.length * 3));
-      const mat = new LineMaterial({ color: new THREE.Color(seamColor(index)).getHex(), linewidth: 2.5, transparent: true, opacity: 0.95 });
-      const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
-      mat.resolution.copy(size);
-      const mesh = new LineSegments2(geo, mat);
-      mesh.frustumCulled = false;
-      mesh.renderOrder = 3;
-      mesh.visible = false;
-      this.clothGroup.add(mesh);
-      this.seamLineEntries.push({ seamId, mesh, mat, pairs });
-    }
-    this.applySeamLineVisibility();
-  }
-
-  private applySeamLineVisibility(): void {
-    const anyVisible = this.showSeams3d || !!this.selectedSeam3d;
-    if (anyVisible && this.seamLineEntries.length === 0) this.buildSeamLines();
-    for (const e of this.seamLineEntries) {
-      const isSel = e.seamId === this.selectedSeam3d;
-      e.mesh.visible = this.showSeams3d || isSel;
-      e.mat.linewidth = isSel ? 4.5 : 2.5;
-      e.mat.opacity = !this.selectedSeam3d || isSel ? 0.95 : 0.5;
-    }
-    if (anyVisible) this.updateSeamLines(this.lastClothPositions ?? this.prepared?.simData.positions ?? new Float32Array());
-    this.invalidate();
-  }
-
-  private updateSeamLines(global: Float32Array): void {
-    if (global.length === 0) return;
-    for (const e of this.seamLineEntries) {
-      if (!e.mesh.visible) continue;
-      const arr = new Float32Array(e.pairs.length * 3);
-      for (let k = 0; k < e.pairs.length; k++) {
-        const g = e.pairs[k];
-        arr[k * 3] = global[g * 4]; arr[k * 3 + 1] = global[g * 4 + 1]; arr[k * 3 + 2] = global[g * 4 + 2];
-      }
-      (e.mesh.geometry as LineSegmentsGeometry).setPositions(arr);
-    }
-  }
-
-  private updateSeamLineResolution(): void {
-    if (this.seamLineEntries.length === 0) return;
-    const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
-    for (const e of this.seamLineEntries) e.mat.resolution.copy(size);
-  }
-
-  private clearSeamLines(): void {
-    for (const e of this.seamLineEntries) {
-      this.clothGroup.remove(e.mesh);
-      e.mesh.geometry.dispose();
-      e.mat.dispose();
-    }
-    this.seamLineEntries = [];
-  }
-
   /** Toggle the 3D seam overlay (lines between sewn edges). */
   setShowSeams(on: boolean): void {
-    this.showSeams3d = on;
-    this.applySeamLineVisibility();
+    this.overlays.setShowSeams(on);
   }
 
   /** A selected seam displays (emphasized) even when "Show seams" is off. */
   setSelectedSeam(seamId: string | null): void {
-    this.selectedSeam3d = seamId;
-    this.applySeamLineVisibility();
+    this.overlays.setSelectedSeam(seamId);
   }
 
-  // ---- 3D seam tool: pick piece edges on the draped garment (the original's handleSeamPointerDown /
-  // updateSeamToolVisualization — cylinder tubes along selected runs + a cone direction arrow). ----
+  // 3D seam-tool semantics and raw edge-run picking stay here; SeamerOverlays owns rendering.
   private seamToolState: SeamToolState | null = null;
   private seamToolHover: SeamPick | null = null;
-  private seamToolGroup = new THREE.Group();
-  private seamToolEntries: { mesh: THREE.InstancedMesh; cone: THREE.Mesh; run: number[]; reversed: boolean }[] = [];
   private lastSeamHoverAt = 0;
   /** A 3D edge click while a seam tool is active; the component routes it through the shared tool. */
   onSeamEdgePick: (pick: SeamPick) => void = () => {};
 
-  private seamToolKind: 'single' | 'multi' = 'single';
-
   /** Push the shared seam-tool selection into the 3D overlay (null = tool inactive). */
   setSeamToolState(state: SeamToolState | null, kind: 'single' | 'multi' = 'single'): void {
     this.seamToolState = state ? { from: [...state.from], to: [...state.to], phase: state.phase } : null;
-    this.seamToolKind = kind;
     if (!state) this.seamToolHover = null;
-    this.rebuildSeamToolOverlay();
-  }
-
-  /** Find the edge run for a pick (`${pieceId}::${ppId}` or `...#M` in simData.edgeRuns). */
-  private seamRunFor(pick: { id: string; mirrored: boolean }): number[] | null {
-    if (!this.prepared) return null;
-    const suffix = `::${pick.id}${pick.mirrored ? '#M' : ''}`;
-    for (const [key, run] of this.prepared.simData.edgeRuns) {
-      if (key.endsWith(suffix) && run.length >= 2) return run;
-    }
-    return null;
+    this.overlays.setSeamToolState(this.seamToolState, kind);
   }
 
   /** Raycast the garment and resolve the nearest piece-edge run + click position along it. */
-  private pickSeamEdge(ndc: THREE.Vector2): SeamPick | null {
+  private pickSeamEdge(event: PointerEvent): SeamPick | null {
     if (!this.prepared || this.clothMeshes.length === 0) return null;
-    this.raycaster.setFromCamera(ndc, this.camera);
-    const hits = this.raycaster.intersectObjects(this.clothMeshes.map((e) => e.mesh), false);
+    const hits = this.viewport.picking.raycast(event, {
+      objects: this.clothMeshes.map((entry) => entry.mesh),
+      recursive: false
+    });
     const hit = hits[0];
     if (!hit) return null;
     const entry = this.clothMeshes.find((e) => e.mesh === hit.object);
@@ -1955,153 +1807,13 @@ export class PatternRenderer {
     return { id: edgeKey, mirrored, reversed: bestIdx / Math.max(1, bestRun.length - 1) > 0.5 };
   }
 
-  private clearSeamToolOverlay(): void {
-    for (const e of this.seamToolEntries) {
-      this.seamToolGroup.remove(e.mesh);
-      this.seamToolGroup.remove(e.cone);
-      e.mesh.geometry.dispose();
-      (e.mesh.material as THREE.Material).dispose();
-      e.cone.geometry.dispose();
-    }
-    this.seamToolEntries = [];
-  }
-
-  private rebuildSeamToolOverlay(): void {
-    this.invalidate();
-    this.clearSeamToolOverlay();
-    const state = this.seamToolState;
-    if (!state) { this.seamToolGroup.visible = false; return; }
-    if (!this.seamToolGroup.parent) this.scene.add(this.seamToolGroup);
-    this.seamToolGroup.visible = true;
-    const addRun = (pick: SeamPick, color: number, opacity = 0.95) => {
-      const run = this.seamRunFor(pick);
-      if (!run) return;
-      const radius = 0.0025; // the original's seamToolRadius
-      const cylGeo = new THREE.CylinderGeometry(radius, radius, 1, 5, 1);
-      cylGeo.translate(0, 0.5, 0); // unit Y cylinder, base at origin -> scaled per segment
-      const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity, depthTest: false });
-      const mesh = new THREE.InstancedMesh(cylGeo, mat, run.length - 1);
-      mesh.frustumCulled = false;
-      mesh.renderOrder = 11;
-      const cone = new THREE.Mesh(new THREE.ConeGeometry(0.007, 0.018, 10), mat);
-      cone.frustumCulled = false;
-      cone.renderOrder = 12;
-      this.seamToolGroup.add(mesh);
-      this.seamToolGroup.add(cone);
-      this.seamToolEntries.push({ mesh, cone, run, reversed: pick.reversed });
-    };
-    for (const pick of state.from) addRun(pick, 0xd946ef);
-    for (const pick of state.to) addRun(pick, 0x2563eb);
-    const hov = this.seamToolHover;
-    if (hov &&
-        !state.from.some((r) => samePick(r, hov)) &&
-        !state.to.some((r) => samePick(r, hov))) {
-      // hover previews the side the click would land on: blue for "to" candidates, magenta for "from"
-      const toPhase = this.seamToolKind === 'multi' ? state.phase === 'to' : state.from.length > 0;
-      addRun(hov, toPhase ? 0x60a5fa : 0xe879f9, 0.6);
-    }
-    this.updateSeamToolOverlayPositions();
-  }
-
-  /** Re-place the overlay tubes/cones on the CURRENT particle positions (runs each cloth update). */
-  private updateSeamToolOverlayPositions(): void {
-    if (this.seamToolEntries.length === 0 || !this.prepared) return;
-    const pos = this.lastClothPositions ?? this.prepared.simData.positions;
-    const v0 = new THREE.Vector3();
-    const v1 = new THREE.Vector3();
-    const dir = new THREE.Vector3();
-    const up = new THREE.Vector3(0, 1, 0);
-    const q = new THREE.Quaternion();
-    const m = new THREE.Matrix4();
-    const s = new THREE.Vector3();
-    for (const e of this.seamToolEntries) {
-      const run = e.reversed ? [...e.run].reverse() : e.run;
-      let total = 0;
-      for (let i = 0; i + 1 < run.length; i++) {
-        const a = run[i], b = run[i + 1];
-        v0.set(pos[a * 4], pos[a * 4 + 1], pos[a * 4 + 2]);
-        v1.set(pos[b * 4], pos[b * 4 + 1], pos[b * 4 + 2]);
-        dir.subVectors(v1, v0);
-        const len = dir.length() || 1e-6;
-        total += len;
-        q.setFromUnitVectors(up, dir.normalize());
-        m.compose(v0, q, s.set(1, len, 1));
-        e.mesh.setMatrixAt(i, m);
-      }
-      e.mesh.instanceMatrix.needsUpdate = true;
-      // direction cone at the arc-length midpoint, pointing along the (possibly reversed) run
-      let upto = 0;
-      const half = total / 2;
-      for (let i = 0; i + 1 < run.length; i++) {
-        const a = run[i], b = run[i + 1];
-        v0.set(pos[a * 4], pos[a * 4 + 1], pos[a * 4 + 2]);
-        v1.set(pos[b * 4], pos[b * 4 + 1], pos[b * 4 + 2]);
-        dir.subVectors(v1, v0);
-        const len = dir.length() || 1e-6;
-        if (upto + len >= half || i === run.length - 2) {
-          const f = Math.max(0, Math.min(1, (half - upto) / len));
-          e.cone.position.copy(v0).addScaledVector(dir, f);
-          e.cone.quaternion.setFromUnitVectors(up, dir.normalize());
-          break;
-        }
-        upto += len;
-      }
-    }
-  }
-
-  // ---- On-mesh body measurement segments (the original's GeneratedMeasurementSegment): girths as
-  // mesh slices, straight/floor/vertical segments — drawn as a fat line with a value label. ----
-  private bodyMeasureLine: LineSegments2 | null = null;
-  private bodyMeasureLabel: THREE.Sprite | null = null;
-  private bodyMeasureName: string | null = null;
-
   clearBodyMeasurement(): void {
-    if (this.bodyMeasureLine) {
-      this.scene.remove(this.bodyMeasureLine);
-      this.bodyMeasureLine.geometry.dispose();
-      (this.bodyMeasureLine.material as THREE.Material).dispose();
-      this.bodyMeasureLine = null;
-    }
-    if (this.bodyMeasureLabel) {
-      this.scene.remove(this.bodyMeasureLabel);
-      (this.bodyMeasureLabel.material.map as THREE.Texture | null)?.dispose();
-      this.bodyMeasureLabel.material.dispose();
-      this.bodyMeasureLabel = null;
-    }
-    this.bodyMeasureName = null;
-    this.invalidate();
+    this.overlays.clearBodyMeasurement();
   }
 
   /** Show (or toggle off) a measurement's on-mesh segment. Returns whether it is now visible. */
   showBodyMeasurement(name: string): boolean {
-    if (this.bodyMeasureName === name) { this.clearBodyMeasurement(); return false; }
-    this.clearBodyMeasurement();
-    if (!this.avatar) return false;
-    const def = this.avatar.measurementSegmentDefs.find((d) => d.name === name);
-    if (!def) return false;
-    const seg = measurementSegment(def, this.avatar.vertexPositions, this.avatar.indices);
-    if (!seg || seg.points.length < 2) return false;
-    const pts = seg.closed ? [...seg.points, seg.points[0]] : seg.points;
-    const flat: number[] = [];
-    for (let i = 1; i < pts.length; i++) flat.push(...pts[i - 1], ...pts[i]);
-    const geo = new LineSegmentsGeometry();
-    geo.setPositions(new Float32Array(flat));
-    const mat = new LineMaterial({ color: 0xe11d8f, linewidth: 3, transparent: true, opacity: 0.95, depthTest: false });
-    mat.resolution.copy(this.renderer.getDrawingBufferSize(new THREE.Vector2()));
-    this.bodyMeasureLine = new LineSegments2(geo, mat);
-    this.bodyMeasureLine.frustumCulled = false;
-    this.bodyMeasureLine.renderOrder = 12;
-    this.scene.add(this.bodyMeasureLine);
-    // value badge floating at the segment's highest point
-    const { obj } = this.makeLabel(`${name}: ${(seg.lengthM * 100).toFixed(1)} cm`);
-    const top = pts.reduce((best, p) => (p[1] > best[1] ? p : best), pts[0]);
-    obj.position.set(top[0], top[1] + 0.05, top[2]);
-    obj.visible = true;
-    this.scene.add(obj);
-    this.bodyMeasureLabel = obj as THREE.Sprite;
-    this.bodyMeasureName = name;
-    this.invalidate();
-    return true;
+    return this.overlays.showBodyMeasurement(name);
   }
 
   /** Animated fly-to framing a body measurement (the original's avatar zoomToMeasurement, 700 ms):
@@ -2109,11 +1821,11 @@ export class PatternRenderer {
   zoomToBodyMeasurement(name: string): boolean {
     const cam = this.avatar?.measurementCamera(name);
     if (!cam) return false;
-    void this.viewport.camera.flyTo(
+    void this.flyCamera(
       new THREE.Vector3(cam.position[0], cam.position[1], cam.position[2]),
       new THREE.Vector3(cam.target[0], cam.target[1], cam.target[2]),
       700
-    ).then(() => this.queueCameraSave());
+    );
     return true;
   }
 
@@ -2135,7 +1847,21 @@ export class PatternRenderer {
       else off.set(0, dist, 0.001); // top (tiny z avoids a degenerate up vector)
       toPos = toTgt.clone().add(off);
     }
-    void this.viewport.camera.flyTo(toPos, toTgt, 450).then(() => this.queueCameraSave());
+    void this.flyCamera(toPos, toTgt, 450);
+  }
+
+  private async flyCamera(
+    position: THREE.Vector3,
+    target: THREE.Vector3,
+    duration: number
+  ): Promise<void> {
+    const release = this.viewport.acquireRenderLease('camera-flight');
+    try {
+      await this.viewport.camera.flyTo(position, target, duration);
+      this.queueCameraSave();
+    } finally {
+      release();
+    }
   }
 
   /** Camera field of view (degrees). */
@@ -2151,17 +1877,8 @@ export class PatternRenderer {
   /** Capture the current 3D view as a PNG data URL. Renders a fresh frame first, then reads the
    *  canvas in the same tick (so it works without preserveDrawingBuffer). */
   captureImage(): string {
-    this.post.render({
-      bokehFStop: this.bokehFStop,
-      focusDistance: this.computeFocusDistance(),
-      fov: this.camera.fov,
-      allowBokeh:
-        this.mode === 'view'
-        && !this.grabbing
-        && !this.highlightId
-        && !this.seamToolState
-    });
-    return this.renderer.domElement.toDataURL('image/png');
+    this.refreshPostSettings();
+    return this.viewport.captureImage();
   }
 
   /** Export the avatar + draped garment as an OBJ download. */
@@ -2186,167 +1903,39 @@ export class PatternRenderer {
     return group;
   }
 
-  // ---- Arrangement-point markers ---------------------------------------------------------------
-
   /** Toggle the named arrangement-point markers (the source's arrangement point overlay). */
   setShowArrangementPoints(on: boolean): void {
-    this.showArrangementPointsFlag = on;
-    this.rebuildArrangementMarkers();
-    this.invalidate();
+    this.overlays.setShowArrangementPoints(on);
   }
-
-  private clearArrangementMarkers(): void {
-    for (const m of this.apMarkers) {
-      this.apGroup.remove(m.mesh);
-      (m.mesh.material as THREE.Material).dispose();
-    }
-    this.apMarkers = [];
-    this.apHover = null;
-  }
-
-  private rebuildArrangementMarkers(): void {
-    this.clearArrangementMarkers();
-    this.apGroup.visible = this.showArrangementPointsFlag;
-    if (!this.showArrangementPointsFlag || !this.avatar || this.cylinders.size === 0) return;
-    if (!this.apGeo) this.apGeo = new THREE.SphereGeometry(0.008, 10, 8);
-    for (const def of this.avatar.arrangementPointDefs) {
-      if (def.enabled === false) continue;
-      const frame = this.cylinders.get(def.cylinderName);
-      if (!frame) continue;
-      const mat = new THREE.MeshBasicMaterial({ color: 0x0ea5e9, depthTest: false, transparent: true, opacity: 0.85 });
-      const mesh = new THREE.Mesh(this.apGeo, mat);
-      mesh.renderOrder = 10;
-      frame.uvToWorld(def.uDegrees, def.v, 0.012, mesh.position);
-      this.apGroup.add(mesh);
-      this.apMarkers.push({ name: def.name, cylinderName: def.cylinderName, uDegrees: def.uDegrees, v: def.v, mesh });
-    }
-  }
-
-  /** Raycast the arrangement markers; returns the hit marker or null. */
-  private pickArrangementMarker(ndc: THREE.Vector2): (typeof this.apMarkers)[number] | null {
-    if (!this.apGroup.visible || this.apMarkers.length === 0) return null;
-    this.raycaster.setFromCamera(ndc, this.camera);
-    const hits = this.raycaster.intersectObjects(this.apMarkers.map((m) => m.mesh), false);
-    return hits[0] ? this.apMarkers.find((m) => m.mesh === hits[0].object) ?? null : null;
-  }
-
-  // ---- 3D measurements ---------------------------------------------------------------------------
 
   /** Show the given distance measurements on the draped garment (endpoints in plan mm). */
-  setMeasurements(defs: { id: string; name: string; a: { x: number; y: number }; b: { x: number; y: number }; unit: string }[]): void {
-    this.measureDefs = defs;
-    this.rebuildMeasurements();
-    this.invalidate();
-  }
-
-  private clearMeasurements(): void {
-    for (const e of this.measureEntries) {
-      this.measureGroup.remove(e.line);
-      this.measureGroup.remove(e.label);
-      e.line.geometry.dispose();
-      (e.line.material as THREE.Material).dispose();
-      ((e.label.material as THREE.SpriteMaterial).map as THREE.Texture | null)?.dispose();
-      (e.label.material as THREE.Material).dispose();
-    }
-    this.measureEntries = [];
-  }
-
-  private rebuildMeasurements(): void {
-    this.clearMeasurements();
-    if (!this.prepared || this.measureDefs.length === 0) return;
-    const sd = this.prepared.simData;
-    const count = sd.positions2d.length / 4;
-    // nearest particle by plan-space (2D) distance; measurement endpoints are mm, positions2d metres
-    const nearest = (pt: { x: number; y: number }): number => {
-      const world = docToWorld(pt);
-      const px = world.x, py = world.y;
-      let best = -1, bd = 0.025 * 0.025; // 25 mm snap tolerance
-      for (let i = 0; i < count; i++) {
-        const dx = sd.positions2d[i * 4] - px, dy = sd.positions2d[i * 4 + 1] - py;
-        const d = dx * dx + dy * dy;
-        if (d < bd) { bd = d; best = i; }
-      }
-      return best;
-    };
-    for (const def of this.measureDefs) {
-      const aIdx = nearest(def.a), bIdx = nearest(def.b);
-      if (aIdx < 0 || bIdx < 0) continue;
-      const geo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
-      const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xf97316, depthTest: false, transparent: true, opacity: 0.95 }));
-      line.renderOrder = 11;
-      line.frustumCulled = false;
-      const { tex, aspect } = this.makeLabelTexture(`${def.name}: …`);
-      const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false, depthTest: false }));
-      label.renderOrder = 12;
-      const H = 0.032;
-      label.scale.set(H * aspect, H, 1);
-      this.measureGroup.add(line);
-      this.measureGroup.add(label);
-      this.measureEntries.push({ aIdx, bIdx, name: def.name, unit: def.unit, line, label, lastLen: -1, lastTextAt: 0 });
-    }
-    this.updateMeasureGroup(this.sim?.positions ?? sd.positions);
-  }
-
-  /** Track the live cloth: reposition measurement lines/labels and refresh texts (throttled). */
-  private updateMeasureGroup(global: Float32Array): void {
-    if (this.measureEntries.length === 0) return;
-    const now = performance.now();
-    for (const e of this.measureEntries) {
-      const ax = global[e.aIdx * 4], ay = global[e.aIdx * 4 + 1], az = global[e.aIdx * 4 + 2];
-      const bx = global[e.bIdx * 4], by = global[e.bIdx * 4 + 1], bz = global[e.bIdx * 4 + 2];
-      const attr = e.line.geometry.getAttribute('position') as THREE.BufferAttribute;
-      attr.setXYZ(0, ax, ay, az);
-      attr.setXYZ(1, bx, by, bz);
-      attr.needsUpdate = true;
-      e.label.position.set((ax + bx) / 2, (ay + by) / 2 + 0.02, (az + bz) / 2);
-      const lenMm = worldToDoc(new THREE.Vector3(
-        Math.hypot(bx - ax, by - ay, bz - az),
-        0,
-        0
-      )).x;
-      // re-bake the label text only on meaningful change, at most ~4×/s
-      if (Math.abs(lenMm - e.lastLen) > 0.5 && now - e.lastTextAt > 250) {
-        e.lastLen = lenMm;
-        e.lastTextAt = now;
-        const disp = e.unit === 'inch' ? `${(lenMm / 25.4).toFixed(2)} in` : e.unit === 'cm' ? `${(lenMm / 10).toFixed(1)} cm` : `${lenMm.toFixed(0)} mm`;
-        const { tex, aspect } = this.makeLabelTexture(`${e.name}: ${disp}`);
-        const mat = e.label.material as THREE.SpriteMaterial;
-        (mat.map as THREE.Texture | null)?.dispose();
-        mat.map = tex;
-        mat.needsUpdate = true;
-        const H = 0.032;
-        e.label.scale.set(H * aspect, H, 1);
-      }
-    }
+  setMeasurements(defs: MeasurementOverlayDef[]): void {
+    this.overlays.setMeasurements(defs);
   }
 
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
     this.simulating = false;
-    if (this.appFrame !== 0) window.cancelAnimationFrame(this.appFrame);
-    this.appFrame = 0;
+    this.releaseSimulationLease?.();
+    this.releaseSimulationLease = null;
+    this.releaseGizmoLease?.();
+    this.releaseGizmoLease = null;
     clearTimeout(this.cameraSaveTimer);
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
     window.removeEventListener('resize', this.onResize);
-    this.controls.removeEventListener('change', this.handleControlsChange);
     this.controls.removeEventListener('end', this.handleControlsEnd);
     this.controls.removeEventListener('start', this.handleControlsStart);
-    this.clearArrangementMarkers();
-    this.apGeo?.dispose();
-    this.clearMeasurements();
     if (this.mode === 'arrange') this.exitArrangeMode();
-    this.transform?.removeEventListener('change', this.handleTransformChange);
-    this.transform?.detach();
-    this.transform?.dispose();
+    for (const dispose of this.gizmoDisposers) dispose();
     this.disposeSimFrame?.();
     this.simRunner?.dispose();
     this.sim?.dispose();
     this.clearClothMeshes();
+    this.overlays.dispose();
     this.avatar?.dispose();
     this.lighting.dispose();
-    this.post.dispose();
     this.viewport.dispose();
   }
 }
