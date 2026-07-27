@@ -9,23 +9,23 @@ importers:
   .:
     dependencies:
       '@atelier/core':
-        specifier: file:../atelier/packages/core
-        version: file:../atelier/packages/core
+        specifier: link:../atelier/packages/core
+        version: link:../atelier/packages/core
       '@atelier/geometry':
-        specifier: file:../atelier/packages/geometry
-        version: file:../atelier/packages/geometry
+        specifier: link:../atelier/packages/geometry
+        version: link:../atelier/packages/geometry
       '@atelier/io':
-        specifier: file:../atelier/packages/io
-        version: file:../atelier/packages/io(three@0.181.2)
+        specifier: link:../atelier/packages/io
+        version: link:../atelier/packages/io
       '@atelier/sim':
-        specifier: file:../atelier/packages/sim
-        version: file:../atelier/packages/sim
+        specifier: link:../atelier/packages/sim
+        version: link:../atelier/packages/sim
       '@atelier/svelte':
-        specifier: file:../atelier/packages/svelte
-        version: file:../atelier/packages/svelte(svelte@5.56.8(@typescript-eslint/types@8.65.0))(three@0.181.2)
+        specifier: link:../atelier/packages/svelte
+        version: link:../atelier/packages/svelte
       '@atelier/viewport':
-        specifier: file:../atelier/packages/viewport
-        version: file:../atelier/packages/viewport(three@0.181.2)
+        specifier: link:../atelier/packages/viewport
+        version: link:../atelier/packages/viewport
       '@seamer/avatar':
         specifier: workspace:*
         version: link:packages/avatar
@@ -171,23 +171,8 @@ packages:
   '@atelier/geometry@file:../atelier/packages/geometry':
     resolution: {directory: ../atelier/packages/geometry, type: directory}
 
-  '@atelier/io@file:../atelier/packages/io':
-    resolution: {directory: ../atelier/packages/io, type: directory}
-    peerDependencies:
-      three: '>=0.170.0'
-
   '@atelier/sim@file:../atelier/packages/sim':
     resolution: {directory: ../atelier/packages/sim, type: directory}
-
-  '@atelier/svelte@file:../atelier/packages/svelte':
-    resolution: {directory: ../atelier/packages/svelte, type: directory}
-    peerDependencies:
-      svelte: '>=5 <6'
-
-  '@atelier/viewport@file:../atelier/packages/viewport':
-    resolution: {directory: ../atelier/packages/viewport, type: directory}
-    peerDependencies:
-      three: '>=0.170.0'
 
   '@better-auth/core@1.6.25':
     resolution: {integrity: sha512-lMTlhtwyK4NpY9kPF+2rQCRKYpg136d3gM2xl8esxT1PjJx5Nh5YwZvxcYCIjDuO759sx6TCloJTuwcZGG6ZBw==}
@@ -1738,30 +1723,10 @@ snapshots:
     dependencies:
       delaunator: 5.1.0
 
-  '@atelier/io@file:../atelier/packages/io(three@0.181.2)':
-    dependencies:
-      '@atelier/core': file:../atelier/packages/core
-      '@atelier/geometry': file:../atelier/packages/geometry
-      three: 0.181.2
-
   '@atelier/sim@file:../atelier/packages/sim':
     dependencies:
       '@atelier/core': file:../atelier/packages/core
       '@atelier/geometry': file:../atelier/packages/geometry
-
-  '@atelier/svelte@file:../atelier/packages/svelte(svelte@5.56.8(@typescript-eslint/types@8.65.0))(three@0.181.2)':
-    dependencies:
-      '@atelier/core': file:../atelier/packages/core
-      '@atelier/viewport': file:../atelier/packages/viewport(three@0.181.2)
-      svelte: 5.56.8(@typescript-eslint/types@8.65.0)
-    transitivePeerDependencies:
-      - three
-
-  '@atelier/viewport@file:../atelier/packages/viewport(three@0.181.2)':
-    dependencies:
-      '@atelier/core': file:../atelier/packages/core
-      '@atelier/geometry': file:../atelier/packages/geometry
-      three: 0.181.2
 
   '@better-auth/core@1.6.25(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.1)(better-call@1.3.7(zod@4.4.3))(jose@6.2.4)(kysely@0.29.4)(nanostores@1.4.1)':
     dependencies:

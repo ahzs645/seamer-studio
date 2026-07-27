@@ -15,12 +15,12 @@
     "dev:link": "pnpm -r --parallel typecheck --watch"
   },
   "dependencies": {
-    "@atelier/core": "file:../atelier/packages/core",
-    "@atelier/geometry": "file:../atelier/packages/geometry",
-    "@atelier/io": "file:../atelier/packages/io",
-    "@atelier/sim": "file:../atelier/packages/sim",
-    "@atelier/svelte": "file:../atelier/packages/svelte",
-    "@atelier/viewport": "file:../atelier/packages/viewport",
+    "@atelier/core": "link:../atelier/packages/core",
+    "@atelier/geometry": "link:../atelier/packages/geometry",
+    "@atelier/io": "link:../atelier/packages/io",
+    "@atelier/sim": "link:../atelier/packages/sim",
+    "@atelier/svelte": "link:../atelier/packages/svelte",
+    "@atelier/viewport": "link:../atelier/packages/viewport",
     "@seamer/avatar": "workspace:*",
     "@seamer/cloth-sim": "workspace:*",
     "@seamer/pattern-model": "workspace:*",
