@@ -29,7 +29,7 @@ import {
   type MeasurementOverlayDef
 } from './seamerOverlays';
 
-export type RendererStatus = 'idle' | 'loading' | 'ready' | 'simulating' | 'error';
+export type RendererStatus = 'idle' | 'loading' | 'ready' | 'simulating' | 'invalid' | 'error';
 
 interface ClothMeshEntry {
   pieceId: string;
@@ -132,6 +132,8 @@ export class PatternRenderer {
   }
 
   private pattern: Pattern | null = null;
+  private readonly buildsByPattern = new WeakMap<Pattern, Promise<boolean>>();
+  private buildQueue: Promise<boolean> = Promise.resolve(true);
   private disposed = false;
   private resizeObserver: ResizeObserver | null = null;
 
@@ -644,7 +646,35 @@ export class PatternRenderer {
   }
 
   /** Build or update the avatar + cloth for a pattern. */
-  async setPattern(pattern: Pattern, changedPieces?: Set<string>): Promise<void> {
+  setPattern(pattern: Pattern, changedPieces?: Set<string>): Promise<boolean> {
+    if (this.disposed) return Promise.resolve(false);
+    const inFlight = this.buildsByPattern.get(pattern);
+    if (inFlight) return inFlight;
+    if (pattern === this.pattern && !changedPieces?.size) return Promise.resolve(true);
+
+    // The initial template fetch can overlap the empty-scene build, and multiple reactive
+    // invalidations can request the same immutable Pattern object. Share identical work and
+    // serialize distinct builds so avatar/cloth teardown never races itself.
+    const build = this.buildQueue
+      .then(() => this.disposed ? false : this.applyPattern(pattern, changedPieces))
+      .catch((error: unknown) => {
+        this.onStatus('error', error instanceof Error ? error.message : String(error));
+        return false;
+      });
+    this.buildQueue = build;
+    this.buildsByPattern.set(pattern, build);
+    void build.then(() => {
+      if (this.buildsByPattern.get(pattern) === build) this.buildsByPattern.delete(pattern);
+    });
+    return build;
+  }
+
+  private async applyPattern(pattern: Pattern, changedPieces?: Set<string>): Promise<boolean> {
+    const previousPattern = this.pattern;
+    const previousPatternId = this.patternId;
+    const previousBaseBodyKey = this.baseBodyKey;
+    const previousLastBodyKey = this.lastBodyKey;
+    const previousBodyDirty = this.bodyDirty;
     this.pattern = pattern;
     this.showTriangles = pattern.settings3d.showTriangles;
     this.setDebugFocusPoint(pattern.settings3d.debugFocusPoint);
@@ -695,8 +725,32 @@ export class PatternRenderer {
       if (wasRunning && !this.disposed) {
         setTimeout(() => { if (!this.disposed && !this.simulating) void this.simulate(); }, 100);
       }
+      return true;
     } catch (e) {
-      this.onStatus('error', e instanceof Error ? e.message : String(e));
+      const message = e instanceof Error ? e.message : String(e);
+      if (
+        /Delaunator|polygon constraints|triangulat|incomplete mesh/i.test(message)
+        && this.clothMeshes.length > 0
+      ) {
+        // A pointer drag can briefly self-intersect or invert a pattern piece. The geometry
+        // kernel is right to reject an incomplete constrained mesh; keep the last complete
+        // triangulation visible until the user returns to a valid shape.
+        this.pattern = previousPattern;
+        this.patternId = previousPatternId;
+        this.baseBodyKey = previousBaseBodyKey;
+        this.lastBodyKey = previousLastBodyKey;
+        this.bodyDirty = previousBodyDirty;
+        this.onStatus('invalid', 'Invalid shape — showing the last valid 3D mesh.');
+        this.invalidate();
+      } else {
+        this.pattern = previousPattern;
+        this.patternId = previousPatternId;
+        this.baseBodyKey = previousBaseBodyKey;
+        this.lastBodyKey = previousLastBodyKey;
+        this.bodyDirty = previousBodyDirty;
+        this.onStatus('error', message);
+      }
+      return false;
     }
   }
 
@@ -728,6 +782,27 @@ export class PatternRenderer {
   /** Triangulate + arrange the garment and (re)build the static cloth meshes.
    *  `changedPieces` (pieces whose 2D shape was just edited) re-triangulate from live geometry. */
   private rebuildCloth(pattern: Pattern, changedPieces?: Set<string>) {
+    if (!this.avatar) return;
+    const verts = this.avatar.vertexPositions;
+    const indices = this.avatar.indices;
+    const nextCylinders = buildCylinders(
+      this.avatar.cylinderDefs,
+      (name) => this.avatar!.bonePosition(name, new THREE.Vector3()),
+      (i) => new THREE.Vector3(verts[i * 3], verts[i * 3 + 1], verts[i * 3 + 2])
+    );
+    // Triangulate before tearing down the current cloth. During a point drag the candidate
+    // polygon may be temporarily invalid; prepareCloth deliberately throws rather than returning
+    // an incomplete mesh, and setPattern then leaves this last valid scene intact.
+    const nextPrepared = prepareCloth(
+      {
+        pattern,
+        avatarVertices: verts,
+        avatarIndices: indices,
+        cylinders: nextCylinders
+      },
+      { changedPieces }
+    );
+
     if (this.mode === 'arrange') this.exitArrangeMode(); // stale arrange meshes reference old pieces
     this.clearClothMeshes();
     this.disposeSimFrame?.();
@@ -736,20 +811,13 @@ export class PatternRenderer {
     this.simRunner = null;
     this.sim?.dispose();
     this.sim = null;
-    if (!this.avatar) return;
-    const verts = this.avatar.vertexPositions;
-    const indices = this.avatar.indices;
-    this.cylinders = buildCylinders(
-      this.avatar.cylinderDefs,
-      (name) => this.avatar!.bonePosition(name, new THREE.Vector3()),
-      (i) => new THREE.Vector3(verts[i * 3], verts[i * 3 + 1], verts[i * 3 + 2])
-    );
+    this.cylinders = nextCylinders;
     // Capture the cylinder frames the cached drape is authored on (a fresh, non-dirty load). On a
     // later body edit these are the OLD frames the cylinder re-fit projects from. (Keep them across a
     // dirty rebuild — don't overwrite with the new-body frames.)
     if (!this.bodyDirty || !this.baseCylinders) this.baseCylinders = this.cylinders;
     this.overlays.setAvatarContext(this.avatar, this.cylinders);
-    this.prepared = prepareCloth({ pattern, avatarVertices: verts, avatarIndices: indices, cylinders: this.cylinders }, { changedPieces });
+    this.prepared = nextPrepared;
     if (!this.prepared) {
       this.overlays.setPrepared(null, null);
       return;

@@ -191,7 +191,8 @@
     lastKey = patternKey(currentPattern, builtSigs);
     lastDrapeKey = drapeKey(currentPattern);
     lightingMode = currentPattern.settings3d.lightingMode || 'flat';
-    renderer.setPattern(currentPattern).then(() => {
+    renderer.setPattern(currentPattern).then((built) => {
+      if (!built) return;
       poses = renderer?.poseNames() ?? [];
       renderer?.setHighlightedPiece(selectedPieceId);
       applyLabelDisplay();
@@ -224,8 +225,9 @@
       const sigs = pieceSigs(snapshot);
       const changed = new Set<string>();
       for (const [id, sig] of sigs) if (builtSigs.has(id) && builtSigs.get(id) !== sig) changed.add(id);
-      builtSigs = sigs;
-      renderer?.setPattern(snapshot, changed).then(() => {
+      renderer?.setPattern(snapshot, changed).then((built) => {
+        if (!built) return;
+        builtSigs = sigs;
         poses = renderer?.poseNames() ?? [];
         renderer?.setHighlightedPiece(selectedPieceId);
         applyLabelDisplay();
@@ -515,6 +517,9 @@
   {/if}
   {#if status === 'error'}
     <div class="absolute top-2 left-1/2 -translate-x-1/2 z-10 bg-error text-error-content text-xs rounded px-3 py-1 shadow max-w-md text-center">{statusMessage || 'Renderer error'}</div>
+  {/if}
+  {#if status === 'invalid'}
+    <div class="absolute top-2 left-1/2 -translate-x-1/2 z-10 bg-warning text-warning-content text-xs rounded px-3 py-1 shadow max-w-md text-center">{statusMessage}</div>
   {/if}
   {#if status === 'loading'}
     <div class="absolute inset-0 flex items-center justify-center z-10 pointer-events-none"><span class="loading loading-spinner loading-md opacity-60"></span></div>

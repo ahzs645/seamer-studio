@@ -333,6 +333,7 @@
   let penDragPointId: string | null = null;
   let silhouette: Silhouette | null = null;
   let silhouetteKey = '';
+  let mounted = false;
   // local view center (world point shown at canvas center); never mutate the pattern prop.
   let viewOffset = $state({ x: 0, y: 0 });
 
@@ -563,6 +564,7 @@
   }
 
   onMount(() => {
+    mounted = true;
     ctx = canvasEl.getContext('2d');
     const observer = new ResizeObserver(() => {
       canvasW = canvasEl.clientWidth;
@@ -607,7 +609,17 @@
     isDark = isDarkTheme();
     const unsubTheme = onThemeChange(() => { isDark = isDarkTheme(); render(); });
     render();
-    return () => { observer.disconnect(); unsubZoom(); unsubPan(); unsubTool(); unsubSelSeam(); unsubSeamTool(); unsubTheme(); window.removeEventListener('keydown', onKey); };
+    return () => {
+      mounted = false;
+      observer.disconnect();
+      unsubZoom();
+      unsubPan();
+      unsubTool();
+      unsubSelSeam();
+      unsubSeamTool();
+      unsubTheme();
+      window.removeEventListener('keydown', onKey);
+    };
   });
 
   // Repaint when immutable Editor selection identity changes, including picks driven by the 3D view.
@@ -734,7 +746,10 @@
   }
 
   function render() {
-    if (!ctx) return;
+    // Image/avatar promises may resolve after a keyed canvas has been destroyed. Bail out before
+    // touching component-owned derived selections; Svelte correctly warns when stale effects read
+    // those values after teardown.
+    if (!mounted || !ctx) return;
     const c = ctx;
     c.clearRect(0, 0, canvasW, canvasH);
     c.fillStyle = isDark ? '#15191e' : '#fafafa';
