@@ -3,6 +3,7 @@ import type { Pattern } from '@seamer/pattern-model';
 import pencilSkirt from '../../../../static/templates/pencil-skirt.json';
 import { buildPieceCloth, computeSeamEdgeIntervals } from './boundary';
 import { buildSimData, type ArrangedPiece } from '../build';
+import { prepareCloth } from '../simulator';
 
 describe('mirrored half-piece seam sampling', () => {
   it('keeps reflected seam runs equal in particle count and rest length', () => {
@@ -64,5 +65,34 @@ describe('mirrored half-piece seam sampling', () => {
     } finally {
       warn.mockRestore();
     }
+  });
+
+  it('reuses the default template drape in placed-plan coordinates', () => {
+    const prepared = prepareCloth({
+      pattern: structuredClone(pencilSkirt) as unknown as Pattern,
+      avatarVertices: new Float32Array(),
+      avatarIndices: new Uint32Array(),
+      cylinders: new Map()
+    });
+    expect(prepared).not.toBeNull();
+    if (!prepared) return;
+
+    let maxPairDistance = 0;
+    let pairCount = 0;
+    for (const seam of prepared.simData.seamPairsBySeam) {
+      for (let index = 0; index < seam.pairs.length; index += 2) {
+        const first = seam.pairs[index] * 4;
+        const second = seam.pairs[index + 1] * 4;
+        maxPairDistance = Math.max(maxPairDistance, Math.hypot(
+          prepared.simData.positions[first] - prepared.simData.positions[second],
+          prepared.simData.positions[first + 1] - prepared.simData.positions[second + 1],
+          prepared.simData.positions[first + 2] - prepared.simData.positions[second + 2]
+        ));
+        pairCount++;
+      }
+    }
+
+    expect(pairCount).toBeGreaterThan(0);
+    expect(maxPairDistance).toBeLessThan(0.04);
   });
 });

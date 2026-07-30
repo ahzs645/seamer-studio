@@ -3,6 +3,10 @@
 // WebGPU; the live XPBD drape (ClothSimulation) is created on demand once a GPU device is available.
 
 import type { Pattern } from '@seamer/pattern-model';
+import {
+  indexPoints,
+  pieceTransform
+} from '@seamer/pattern-model/utils/patternGeometry';
 import type { CylinderFrame } from './geometry/cylinders';
 import { buildPieceCloth, buildSavedCloth, reuseSavedDrape, computeSeamEdgeIntervals } from './geometry/boundary';
 import { arrangeParticles } from './geometry/arrangement';
@@ -56,6 +60,7 @@ export function prepareCloth(
 ): PreparedCloth | null {
   const { pattern, cylinders } = init;
   const arranged: ArrangedPiece[] = [];
+  const points = indexPoints(pattern);
   // Seam-matched sub-segmentation: both sides of every seam resample to equal interval counts so
   // the sim links particles 1:1 (the original's boundary slicing at seam-range boundaries).
   const edgeIntervals = computeSeamEdgeIntervals(pattern);
@@ -88,7 +93,15 @@ export function prepareCloth(
     // A piece with a cached drape: reuse it via the source's 3-way seed — exact-reuse where the
     // shape is unchanged, KNN-from-drape for added area (so it follows the drape, not flat-on-body),
     // and a null return (handled below) when too much of the shape is new.
-    const reuse = opts.fromArrangement ? null : reuseSavedDrape(cloth.mesh.points, piece.settings3d.savedPositions, cloth.particleDistanceMm);
+    // Template/save blobs key their settled 3D samples by the piece's placed plan coordinates,
+    // while the rebuilt cloth mesh remains in shared drafting coordinates. Compare like-for-like.
+    const toPlan = pieceTransform(piece, points);
+    const reusePoints = cloth.mesh.points.map(toPlan);
+    const reuse = opts.fromArrangement
+      ? null
+      : reuseSavedDrape(reusePoints, piece.settings3d.savedPositions, cloth.particleDistanceMm)
+        // Compatibility with drapes saved by earlier studio builds, which wrote drafting coordinates.
+        ?? reuseSavedDrape(cloth.mesh.points, piece.settings3d.savedPositions, cloth.particleDistanceMm);
     if (reuse) {
       arranged.push({
         cloth,

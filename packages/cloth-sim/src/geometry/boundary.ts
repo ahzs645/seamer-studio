@@ -428,8 +428,9 @@ const ARRANGED_FALLBACK_OUTSIDE_RATIO = 0.5;
  *      seeds from the fresh cylinder arrangement instead.
  * Returns the seeded positions + the fraction of particles that EXACTLY matched (informational).
  *
- * `meshPoints` (from buildPieceCloth) and the blob's 2D are both the piece's local 2D in mm (the blob's
- * stride-5 x2d/y2d are positions2d×1000), so the nearest-neighbour test is a like-for-like comparison.
+ * `meshPoints` and the blob's stride-5 x2d/y2d coordinates must use the same millimetre-space frame.
+ * Saved template drapes use placed plan coordinates, so prepareCloth transforms its rebuilt drafting
+ * mesh into that frame before calling this function.
  */
 export function reuseSavedDrape(
   meshPoints: Vec2[],

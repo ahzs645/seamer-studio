@@ -7,6 +7,7 @@ import type { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import {
   indexPoints,
   pieceInternalPolylines,
+  pieceTransform,
   samePick,
   type Material,
   type Pattern,
@@ -1448,24 +1449,27 @@ export class PatternRenderer {
     return count ? Math.sqrt(sum / count) : null;
   }
 
-  /** Per-piece settled positions in the savedPositions format (stride-5: x2d,y2d in mm; x3d,y3d,z3d
-   *  in m), keyed by base piece id. 2D comes from positions2d (meters→mm); 3D from the live drape.
-   *  Mirror instances (#M) are skipped — savedPositions belongs to the base piece. */
+  /** Per-piece settled positions in the savedPositions format (stride-5: x2d,y2d in placed-plan mm;
+   *  x3d,y3d,z3d in m), keyed by base piece id. Mirror instances (#M) are skipped because
+   *  savedPositions belongs to the base piece. */
   extractSavedPositions(): Record<string, number[]> {
     const out: Record<string, number[]> = {};
-    if (!this.prepared) return out;
+    if (!this.prepared || !this.pattern) return out;
     const sd = this.prepared.simData;
     const pos = this.sim?.positions ?? sd.positions;
+    const points = indexPoints(this.pattern);
     for (const piece of sd.pieces) {
       if (piece.pieceId.endsWith('#M')) continue;
+      const sourcePiece = this.pattern.pieces.find((candidate) => candidate.id === piece.pieceId);
+      if (!sourcePiece) continue;
+      const toPlan = pieceTransform(sourcePiece, points);
       const arr = new Array(piece.count * 5);
       for (let i = 0; i < piece.count; i++) {
         const g = piece.start + i;
-        const plan = worldToDoc(new THREE.Vector3(
-          sd.positions2d[g * 4],
-          sd.positions2d[g * 4 + 1],
-          0
-        ));
+        const plan = toPlan({
+          x: sd.positions2d[g * 4] * 1000,
+          y: sd.positions2d[g * 4 + 1] * 1000
+        });
         arr[i * 5] = plan.x;
         arr[i * 5 + 1] = plan.y;
         arr[i * 5 + 2] = pos[g * 4];
