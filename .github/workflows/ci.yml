@@ -27,6 +27,8 @@ jobs:
           cache: pnpm
           cache-dependency-path: seamer-studio/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
+        working-directory: atelier
+      - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm lint
