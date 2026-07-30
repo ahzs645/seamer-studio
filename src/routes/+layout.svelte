@@ -2,7 +2,7 @@
   import { base } from '$app/paths';
   import '../app.css';
   import { onMount } from 'svelte';
-  import { setAvatarAssetsBase } from '@seamer/avatar';
+  import { setAvatarAssetsBase } from '@seamer/avatar/assets';
   import AppHeader from '$lib/components/AppHeader.svelte';
 
   let { children } = $props();
