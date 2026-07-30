@@ -20,6 +20,32 @@ export interface PreparedCloth {
   body: BodyMesh;
 }
 
+/**
+ * Use the source-parity cylinder arrangement for a first live drape while leaving the prepared
+ * saved-drape positions available to the static renderer. Saved positions are a display/reuse seed
+ * sampled onto rebuilt topology; they need not satisfy that topology's XPBD rest lengths. The
+ * arrangement is built from the same topology and is therefore the stable live-solver seed.
+ */
+export function fromArrangement(prepared: PreparedCloth): PreparedCloth {
+  const positions = prepared.simData.arrangedPositions.slice();
+  const anchors = new Float32Array(positions.length);
+  for (let index = 0; index < positions.length; index += 4) {
+    anchors[index] = positions[index];
+    anchors[index + 1] = positions[index + 1];
+    anchors[index + 2] = positions[index + 2];
+    // A first drape is free-running, exactly like prepareCloth({ fromArrangement: true }).
+    anchors[index + 3] = 0;
+  }
+  return {
+    body: prepared.body,
+    simData: {
+      ...prepared.simData,
+      positions,
+      anchors
+    }
+  };
+}
+
 /** Pack the avatar mesh into the engine's vec4 layout (positions x,y,z,0; triangles i0,i1,i2,0).
  *  The body broad-phase itself (a triangle spatial hash) is built on the GPU, like the original. */
 export function packBodyMesh(vertexPositions: Float32Array, indices: Uint32Array): BodyMesh {

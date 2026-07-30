@@ -17,7 +17,7 @@ import {
 import { AvatarController } from '@seamer/avatar';
 import { buildCylinders, type CylinderFrame } from '@seamer/cloth-sim';
 import { arrangeParticles } from '@seamer/cloth-sim';
-import { prepareCloth, ClothSimulation, type PreparedCloth } from '@seamer/cloth-sim';
+import { prepareCloth, fromArrangement, ClothSimulation, type PreparedCloth } from '@seamer/cloth-sim';
 import { SIM_CONFIG, type SimConfig } from '@seamer/cloth-sim';
 import { cylinderRefit } from '@seamer/cloth-sim';
 import { toOBJ, toSTL } from '@atelier/io/three';
@@ -38,6 +38,12 @@ import {
 
 export type RendererStatus = 'idle' | 'loading' | 'ready' | 'simulating' | 'invalid' | 'error';
 
+interface DrapeDebugBounds {
+  min: [number, number, number];
+  max: [number, number, number];
+  centroid: [number, number, number];
+}
+
 /** DEV-only automation snapshot derived from the live GPU solver's readback buffer. */
 export interface DrapeDebugState {
   deviceAcquired: boolean;
@@ -47,6 +53,8 @@ export interface DrapeDebugState {
   particleCount: number;
   positionHash: string | null;
   positionsFinite: boolean;
+  particleBounds: DrapeDebugBounds | null;
+  avatarBounds: DrapeDebugBounds | null;
 }
 
 interface ClothMeshEntry {
@@ -1239,6 +1247,24 @@ export class PatternRenderer {
   /** Read-only DEV automation signal. The hash covers every particle's x/y/z float bits. */
   getDrapeDebugState(): DrapeDebugState {
     const positions = this.sim?.positions ?? null;
+    const bounds = (values: Float32Array | null, stride: number): DrapeDebugBounds | null => {
+      if (!values || values.length < 3) return null;
+      const min: [number, number, number] = [Infinity, Infinity, Infinity];
+      const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+      const centroid: [number, number, number] = [0, 0, 0];
+      let count = 0;
+      for (let index = 0; index + 2 < values.length; index += stride) {
+        for (let axis = 0; axis < 3; axis++) {
+          const value = values[index + axis];
+          min[axis] = Math.min(min[axis], value);
+          max[axis] = Math.max(max[axis], value);
+          centroid[axis] += value;
+        }
+        count++;
+      }
+      for (let axis = 0; axis < 3; axis++) centroid[axis] /= count;
+      return { min, max, centroid };
+    };
     let positionHash: string | null = null;
     let positionsFinite = true;
     if (positions) {
@@ -1259,11 +1285,13 @@ export class PatternRenderer {
       frameCount: this.simFrameCount,
       particleCount: positions ? positions.length / 4 : 0,
       positionHash,
-      positionsFinite
+      positionsFinite,
+      particleBounds: bounds(positions, 4),
+      avatarBounds: bounds(this.avatar?.vertexPositions ?? null, 3)
     };
   }
 
-  private async ensureSim(): Promise<ClothSimulation | null> {
+  private async ensureSim(seedFromArrangement = false): Promise<ClothSimulation | null> {
     if (this.sim) return this.sim;
     if (!this.prepared) return null;
     if (!this.device) {
@@ -1280,7 +1308,10 @@ export class PatternRenderer {
       }
     }
     if (!this.device) throw new Error('WebGPU is unavailable');
-    this.sim = new ClothSimulation(this.device, this.prepared);
+    this.sim = new ClothSimulation(
+      this.device,
+      seedFromArrangement ? fromArrangement(this.prepared) : this.prepared
+    );
     this.simFrameCount = 0;
     const simulation = this.sim;
     this.simRunner = new SolverRunner({
@@ -1325,7 +1356,10 @@ export class PatternRenderer {
   async simulate(): Promise<void> {
     if (this.simulating) return;
     try {
-      const sim = await this.ensureSim();
+      // The saved drape is the correct static display, but it is sampled onto rebuilt topology and
+      // can contain large rest-length error. Legacy's first live drape starts from the coherent
+      // cylinder arrangement; retain an existing sim state on subsequent starts and body re-fits.
+      const sim = await this.ensureSim(!this.bodyDirty);
       if (!sim) return;
       if (this.bodyDirty && this.baseCylinders && this.pattern) {
         // Body changed: re-fit the cached drape onto the new body via CYLINDER COORDINATES — decompose

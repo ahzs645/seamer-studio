@@ -1,5 +1,11 @@
 import { expect, test, type ConsoleMessage, type Page } from '@playwright/test';
 
+interface DrapeDebugBounds {
+	min: [number, number, number];
+	max: [number, number, number];
+	centroid: [number, number, number];
+}
+
 interface DrapeDebugState {
 	deviceAcquired: boolean;
 	deviceLostReason: string | null;
@@ -8,6 +14,8 @@ interface DrapeDebugState {
 	particleCount: number;
 	positionHash: string | null;
 	positionsFinite: boolean;
+	particleBounds: DrapeDebugBounds | null;
+	avatarBounds: DrapeDebugBounds | null;
 }
 
 interface DrapeDebugApi {
@@ -105,6 +113,22 @@ test('runs the default cloth drape on WebGPU and updates particle positions', as
 		.not.toBe(baseline.positionHash);
 	expect(finalState.positionsFinite).toBe(true);
 	expect(finalState.deviceLostReason).toBeNull();
+	expect(finalState.particleBounds, 'live particle bounds were not exposed').not.toBeNull();
+	expect(finalState.avatarBounds, 'avatar bounds were not exposed').not.toBeNull();
+	if (!finalState.particleBounds || !finalState.avatarBounds) {
+		throw new Error('live cloth/avatar bounds were not exposed');
+	}
+	// The pencil skirt hem settles above the knees. A garment that missed body collision falls
+	// rapidly toward/below the avatar's feet, so keep both its hem and centre in the body-height band.
+	expect(
+		finalState.particleBounds.min[1] - finalState.avatarBounds.min[1],
+		'skirt hem fell below the avatar knee band'
+	).toBeGreaterThan(0.25);
+	expect(
+		finalState.particleBounds.centroid[1] - finalState.avatarBounds.min[1],
+		'skirt centroid fell through the avatar'
+	).toBeGreaterThan(0.55);
+	expect(finalState.particleBounds.max[1]).toBeLessThan(finalState.avatarBounds.max[1]);
 	await expect(scene).toHaveAttribute('data-status', 'simulating');
 	expect(pageErrors).toEqual([]);
 	expect(deviceLostConsoleErrors).toEqual([]);
