@@ -3,15 +3,23 @@
   import type { Editor } from '@atelier/core';
   import { editorState } from '@atelier/svelte';
   import {
+    EMPTY_SEAM_TOOL,
+    advanceSeamToolPhase,
+    applySeamPick,
+    breakoutPiece,
+    deletePiece as deletePieceCascade,
     layerDashPattern,
     layerStrokeColor,
     pieceAddPath,
     piecePointAdd,
     piecePointUpdate,
+    samePick,
+    type BreakoutMode,
     type LayerStyle,
     type Measurement,
     type Pattern,
-    type Piece
+    type Piece,
+    type SeamPick
   } from '@seamer/pattern-model';
   import { buildSilhouette, type Silhouette } from '@seamer/avatar';
   import { isDarkTheme, onThemeChange } from '$lib/utils/theme';
@@ -19,7 +27,6 @@
   import ContextMenu, { type MenuItem } from '$lib/components/ContextMenu.svelte';
   import { toast } from '$lib/stores/toast';
   import { selectedTool, zoom, panOffset, selectedSeamId, seamTool, pathPickRequest, cursorMm, interactionMode, frozenSnapshotOpacity, pendingPaste, type PendingPaste } from '$lib/stores/pattern';
-  import { EMPTY_SEAM_TOOL, applySeamPick, advanceSeamToolPhase, samePick, type SeamPick } from '$lib/utils/seamTool';
   import {
     indexPoints,
     indexPaths,
@@ -45,12 +52,10 @@
     type Vec2,
     type PlacedPoint
   } from '@seamer/pattern-model';
-  import { deletePiece as deletePieceCascade } from '$lib/utils/patternMutations';
-  import * as ops from '$lib/utils/pathPointOps';
-  import { breakoutPiece, type BreakoutMode } from '$lib/utils/breakout';
+  import * as ops from '@seamer/pattern-model/utils/pathPointOps';
   import { traceFromHPGL, traceImageRegion } from '$lib/utils/autoTrace';
   import { draggablePanel } from '$lib/utils/draggablePanel';
-  import { rebakeArc, arcPathsCenteredOn, detachArcsTouchingAnchor } from '$lib/utils/arcParametric';
+  import { rebakeArc, arcPathsCenteredOn, detachArcsTouchingAnchor } from '@seamer/pattern-model/utils/arcParametric';
   import { buildWarp, drawWarpedImage } from '$lib/utils/thinPlateSpline';
 
   interface Props {
@@ -3118,6 +3123,7 @@
 
 <canvas
   bind:this={canvasEl}
+  data-testid="pattern-canvas-2d"
   width={canvasW}
   height={canvasH}
   class="w-full h-full block"

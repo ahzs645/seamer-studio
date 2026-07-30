@@ -105,40 +105,92 @@ function stitchLoop(edges: LoopEdge[]): LoopEdge[] {
 /**
  * Seam-matched boundary sub-segmentation (the original's buildSeamComposite/getSubSegmentPointCount):
  * compute a forced interval count per PiecePath so BOTH sides of every seam resample to the same
- * total interval count. Each seam's target N is the larger side's natural count; a side's N is
- * distributed over its edges by length (largest remainder, ≥1 each). An edge in several seams takes
- * the max — exact pairing can then no longer be guaranteed for every seam simultaneously; the sim
- * builder warns and falls back to proportional sampling for the ones that still mismatch.
+ * particle count. A disconnected composite side contributes one endpoint particle per connected
+ * run, so its interval target may differ from the other side's. Intervals are distributed over each
+ * side's edges by length (largest remainder, ≥1 each). An edge in several seams takes the max —
+ * exact pairing can then no longer be guaranteed for every seam simultaneously; the sim builder
+ * warns and falls back to proportional sampling for the ones that still mismatch.
  */
 export function computeSeamEdgeIntervals(pattern: Pattern): Map<string, number> {
   const paths = indexPaths(pattern);
   const points = indexPoints(pattern);
   const out = new Map<string, number>();
-  // pd + polyline length per PiecePath id (owner piece determines pd)
-  const info = new Map<string, { len: number; pd: number }>();
+  // pd + polyline per PiecePath id (owner piece determines pd)
+  const info = new Map<string, { len: number; pd: number; poly: Vec2[]; piece: Piece }>();
   for (const piece of pattern.pieces) {
     const pd = piece.settings3d.particleDistance ?? DEFAULT_PARTICLE_DISTANCE;
     for (const pp of [...piece.mainPaths, ...piece.internalPaths]) {
       const poly = piecePathPolyline(pp, paths, points, Math.min(4, pd / 2));
-      if (poly.length >= 2) info.set(pp.id, { len: polylineLength(poly), pd });
+      if (poly.length >= 2) info.set(pp.id, { len: polylineLength(poly), pd, poly, piece });
     }
   }
   for (const seam of pattern.seams) {
-    const side = (refs: { id: string }[]) => {
-      const items = refs.map((r) => info.get(r.id)).filter((x): x is { len: number; pd: number } => !!x);
+    const referencedPolyline = (ref: { id: string; mirrored?: boolean }): Vec2[] => {
+      const item = info.get(ref.id);
+      if (!item) return [];
+      let poly = item.poly;
+      if (ref.mirrored) {
+        const mirrorPath = item.piece.mainPaths.find((path) => path.isMirrorLine);
+        const mirror = mirrorPath
+          ? piecePathPolyline(mirrorPath, paths, points, Math.min(4, item.pd / 2))
+          : [];
+        if (mirror.length >= 2) {
+          const a = mirror[0], b = mirror[mirror.length - 1];
+          const dx = b.x - a.x, dy = b.y - a.y;
+          const len2 = dx * dx + dy * dy || 1;
+          const reflect = (point: Vec2): Vec2 => {
+            const t = ((point.x - a.x) * dx + (point.y - a.y) * dy) / len2;
+            const px = a.x + dx * t, py = a.y + dy * t;
+            return { x: 2 * px - point.x, y: 2 * py - point.y };
+          };
+          poly = poly.map(reflect);
+        }
+      }
+      return poly;
+    };
+    const side = (refs: Array<{ id: string; mirrored?: boolean; reversed?: boolean }>) => {
+      const presentRefs = refs.filter((ref) => info.has(ref.id));
+      const items = presentRefs
+        .map((ref) => info.get(ref.id))
+        .filter((item): item is NonNullable<typeof item> => !!item);
       const natural = items.reduce((s, it) => s + Math.max(1, Math.round(it.len / it.pd)), 0);
-      return { items, refs: refs.filter((r) => info.has(r.id)), natural };
+      // Count connected runs without assuming PiecePath direction; stitchLoop may orient a boundary
+      // edge opposite to its drafting path, while particle-count math only depends on connectivity.
+      const polylines = presentRefs.map(referencedPolyline);
+      const parent = polylines.map((_poly, index) => index);
+      const root = (index: number): number => {
+        while (parent[index] !== index) index = parent[index];
+        return index;
+      };
+      for (let first = 0; first < polylines.length; first++) {
+        const a = polylines[first];
+        if (a.length === 0) continue;
+        const aEnds = [a[0], a[a.length - 1]];
+        for (let second = first + 1; second < polylines.length; second++) {
+          const b = polylines[second];
+          if (b.length === 0) continue;
+          const bEnds = [b[0], b[b.length - 1]];
+          if (aEnds.some((from) => bEnds.some((to) => dist(from, to) <= 1.5))) {
+            parent[root(second)] = root(first);
+          }
+        }
+      }
+      const runs = new Set(parent.map((_entry, index) => root(index))).size;
+      return { items, refs: presentRefs, natural, runs };
     };
     const from = side(seam.fromPaths);
     const to = side(seam.toPaths);
     if (from.items.length === 0 || to.items.length === 0) continue;
-    const N = Math.max(from.natural, to.natural);
-    // distribute N intervals over a side's edges by length share (largest remainder, ≥1 each)
+    // A disconnected composite side has one extra particle per run. Match particle counts, not just
+    // interval totals, so a continuous waistband and a skirt waist split around darts still align.
+    const particleCount = Math.max(from.natural + from.runs, to.natural + to.runs);
+    // Distribute the required intervals over a side's edges by length share (largest remainder, ≥1).
     const distribute = (s: typeof from) => {
+      const intervalCount = Math.max(s.items.length, particleCount - s.runs);
       const totalLen = s.items.reduce((a, it) => a + it.len, 0) || 1;
-      const raw = s.items.map((it) => (N * it.len) / totalLen);
+      const raw = s.items.map((it) => (intervalCount * it.len) / totalLen);
       const base = raw.map((r) => Math.max(1, Math.floor(r)));
-      let rem = N - base.reduce((a, b) => a + b, 0);
+      let rem = intervalCount - base.reduce((a, b) => a + b, 0);
       const order = raw.map((r, i) => ({ i, frac: r - Math.floor(r) })).sort((a, b) => b.frac - a.frac);
       for (let k = 0; rem > 0 && k < order.length; k++, rem--) base[order[k].i]++;
       s.refs.forEach((r, i) => out.set(r.id, Math.max(out.get(r.id) ?? 0, base[i])));
@@ -215,19 +267,28 @@ export function buildPieceCloth(
       const px = A.x + dx * t, py = A.y + dy * t;
       return { x: 2 * px - p.x, y: 2 * py - p.y };
     };
-    const arcIdxToPp: (string | undefined)[] = new Array(outer.length);
-    for (const [ppId, idxs] of edgeOuterRanges) for (const i of idxs) arcIdxToPp[i] = ppId;
+    const baseOuterLength = outer.length;
     const reflected = outer.map(reflect);
-    for (let i = reflected.length - 2; i >= 1; i--) {
+    // The two arc endpoints lie on the mirror line and therefore reuse their original particles.
+    // Interior points get appended in reverse order to close the reflected half.
+    const reflectedIndex = new Map<number, number>([
+      [0, 0],
+      [baseOuterLength - 1, baseOuterLength - 1]
+    ]);
+    for (let i = baseOuterLength - 2; i >= 1; i--) {
       const newIdx = outer.length;
       outer.push(reflected[i]);
-      const ppId = arcIdxToPp[i];
-      if (ppId) {
-        const k = `${ppId}#M`;
-        const arr = edgeOuterRanges.get(k) ?? [];
-        arr.push(newIdx);
-        edgeOuterRanges.set(k, arr);
-      }
+      reflectedIndex.set(i, newIdx);
+    }
+    // Mirror every edge run independently. This preserves shared endpoints on adjacent edges and
+    // gives every reflected seam edge exactly the same particle count and length as its source.
+    for (const [ppId, idxs] of [...edgeOuterRanges]) {
+      const mirrored = idxs
+        .slice()
+        .reverse()
+        .map((index) => reflectedIndex.get(index))
+        .filter((index): index is number => index !== undefined);
+      edgeOuterRanges.set(`${ppId}#M`, mirrored);
     }
   }
 

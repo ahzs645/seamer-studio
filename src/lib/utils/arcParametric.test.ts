@@ -5,7 +5,7 @@ import {
   createPatternRegistry,
   type Pattern
 } from '@seamer/pattern-model';
-import { rebakeArc, detachArcsTouchingAnchor, arcPathsCenteredOn } from './arcParametric';
+import { rebakeArc, detachArcsTouchingAnchor, arcPathsCenteredOn } from '@seamer/pattern-model/utils/arcParametric';
 
 const uid = (() => { let n = 0; return (p: string) => `${p}_${++n}`; })();
 

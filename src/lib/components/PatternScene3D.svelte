@@ -3,18 +3,19 @@
   import { viewport as viewportAction } from '@atelier/svelte';
   import { docToWorld, type Viewport } from '@atelier/viewport';
   import {
+    applySeamPick,
     indexPoints,
     pieceGeometrySignature,
     placedPoints,
-    type Pattern
+    type Pattern,
+    type SeamPick
   } from '@seamer/pattern-model';
-  import { PatternRenderer, type RendererStatus, type SceneMode } from '$lib/scene/scene3d';
+  import { PatternRenderer, type DrapeDebugState, type RendererStatus, type SceneMode } from '$lib/scene/scene3d';
   import { createSeamerAoPass } from '$lib/scene/n8aoPost';
   import type { SimConfig } from '@seamer/cloth-sim';
   import { isDarkTheme, toggleTheme, applyStoredTheme } from '$lib/utils/theme';
   import { show3dStats, simAnchors, selectedTool, seamTool, selectedSeamId, bodyZoomRequest } from '$lib/stores/pattern';
   import { get } from 'svelte/store';
-  import { applySeamPick, type SeamPick } from '$lib/utils/seamTool';
   import { downloadBlob, sceneToGLTF } from '$lib/utils/exporters';
   import { toast, toastError, toastSuccess } from '$lib/stores/toast';
 
@@ -53,6 +54,9 @@
 
   let viewportInstance: Viewport | null = null;
   let renderer: PatternRenderer | null = null;
+  type DrapeDebugApi = { getState: () => DrapeDebugState | null };
+  type DrapeDebugWindow = Window & { __seamerWebgpuDrape?: DrapeDebugApi };
+  let drapeDebugApi: DrapeDebugApi | null = null;
   let status = $state<RendererStatus>('idle');
   let statusMessage = $state('');
   let poses = $state<string[]>([]);
@@ -142,6 +146,11 @@
       return;
     }
     renderer = new PatternRenderer(viewportInstance);
+    if (import.meta.env.DEV) {
+      const target = window as DrapeDebugWindow;
+      drapeDebugApi = { getState: () => renderer?.getDrapeDebugState() ?? null };
+      target.__seamerWebgpuDrape = drapeDebugApi;
+    }
     webgpu = renderer.webgpuAvailable();
     renderer.onStatus = (s, msg) => {
       status = s; statusMessage = msg ?? '';
@@ -206,6 +215,12 @@
 
   onDestroy(() => {
     clearTimeout(rebuildTimer);
+    // onDestroy also runs during SSR, where window is undefined
+    if (import.meta.env.DEV && typeof window !== 'undefined') {
+      const target = window as DrapeDebugWindow;
+      if (target.__seamerWebgpuDrape === drapeDebugApi) delete target.__seamerWebgpuDrape;
+      drapeDebugApi = null;
+    }
     renderer?.dispose();
     renderer = null;
   });
@@ -491,7 +506,7 @@
 
 <svelte:window onkeydown={handleKey} />
 
-<div class="w-full h-full relative">
+<div class="w-full h-full relative" data-testid="pattern-scene-3d" data-status={status}>
   <div
     class="w-full h-full"
     use:viewportAction={{

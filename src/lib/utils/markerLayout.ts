@@ -111,6 +111,12 @@ export interface NestOptions {
   gapMm?: number;
   /** rotations (degrees) each piece may take; e.g. [0], [0,180], [0,90,180,270]. Default [0,180]. */
   allowedRotations?: number[];
+  /** GA generations used by the background search. Default 12. */
+  generations?: number;
+  /** GA population used by the background search. Default 16. */
+  population?: number;
+  /** Optional deterministic GA seed. */
+  seed?: number;
   /** max marker length per fabric sheet (mm); overflow spills into more bins. 0 = unlimited. */
   maxLengthMm?: number;
 }

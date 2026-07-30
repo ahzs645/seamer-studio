@@ -1,8 +1,7 @@
 <script lang="ts">
 	import type { Editor } from '@atelier/core';
 	import { editorState } from '@atelier/svelte';
-	import type { Pattern } from '@seamer/pattern-model';
-	import { validatePattern, type Issue } from '$lib/utils/patternValidation';
+	import { validatePattern, type Issue, type Pattern } from '@seamer/pattern-model';
 
 	interface Props {
 		currentPattern: Pattern;

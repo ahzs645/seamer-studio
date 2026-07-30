@@ -1,5 +1,5 @@
 <script lang="ts">
-  // /test-nfp — developer playground for Atelier's no-fit-polygon nesting worker.
+  // /test-nfp — compare Atelier's two GA placement strategies using identical search settings.
   import { nestItemsInWorker, type NestProgress } from '$lib/utils/nestingClient';
   import { markerToSVG, type MarkerLayout, type NestItem } from '$lib/utils/markerLayout';
   import type { Vec2 } from '@seamer/pattern-model';
@@ -27,19 +27,27 @@
 
   let fabricWidthMm = $state(500);
   let gapMm = $state(6);
+  let generations = $state(8);
   interface RunState { layout: MarkerLayout | null; progress: NestProgress | null; busy: boolean; ms: number }
-  let fixed = $state<RunState>({ layout: null, progress: null, busy: false, ms: 0 });
-  let rotated = $state<RunState>({ layout: null, progress: null, busy: false, ms: 0 });
+  let nfp = $state<RunState>({ layout: null, progress: null, busy: false, ms: 0 });
+  let corners = $state<RunState>({ layout: null, progress: null, busy: false, ms: 0 });
 
   async function run() {
-    for (const [rotations, slot] of [[[0], fixed], [[0, 90, 180, 270], rotated]] as const) {
+    for (const [strategy, slot] of [['nfp', nfp], ['corners', corners]] as const) {
       slot.busy = true;
       slot.layout = null;
       const t0 = performance.now();
       try {
         const job = nestItemsInWorker(
           SHAPES,
-          { fabricWidthMm, gapMm, allowedRotations: [...rotations] },
+          {
+            fabricWidthMm,
+            gapMm,
+            allowedRotations: [0, 90, 180, 270],
+            generations,
+            strategy,
+            seed: 42
+          },
           (p) => (slot.progress = p)
         );
         slot.layout = await job.promise;
@@ -64,8 +72,8 @@
 <div class="px-4 py-8 max-w-6xl mx-auto">
   <h1 class="text-3xl font-bold font-lexend mb-2">NFP nesting test</h1>
   <p class="mb-6 opacity-70">
-    Developer playground for the no-fit-polygon nesting worker. The same shapes are nested with the
-    Atelier's NFP nester packs the same awkward shapes with fixed and quarter-turn rotations.
+    Developer playground for the nesting worker. The same shapes are nested with Atelier's NFP
+    vertex-contact strategy and its bounding-box-corner strategy.
   </p>
 
   <div class="flex flex-wrap items-end gap-3 mb-6">
@@ -73,14 +81,16 @@
       <input type="number" min="200" step="10" class="input input-bordered input-sm w-32" bind:value={fabricWidthMm} /></label>
     <label class="flex flex-col gap-1 text-sm">Gap (mm)
       <input type="number" min="0" step="1" class="input input-bordered input-sm w-24" bind:value={gapMm} /></label>
-    <button class="btn btn-primary btn-sm" onclick={run} disabled={fixed.busy || rotated.busy}>
-      {#if fixed.busy || rotated.busy}<span class="loading loading-spinner loading-xs"></span>{/if}
-      Run both rotation sets
+    <label class="flex flex-col gap-1 text-sm">Generations: {generations}
+      <input type="range" min="0" max="30" step="1" class="range range-xs w-44" bind:value={generations} /></label>
+    <button class="btn btn-primary btn-sm" onclick={run} disabled={nfp.busy || corners.busy}>
+      {#if nfp.busy || corners.busy}<span class="loading loading-spinner loading-xs"></span>{/if}
+      Run both strategies
     </button>
   </div>
 
   <div class="grid md:grid-cols-2 gap-6">
-    {#each [{ title: 'Fixed grain (0°)', s: fixed }, { title: 'Quarter turns', s: rotated }] as col}
+    {#each [{ title: 'NFP (vertex contacts)', s: nfp }, { title: 'Bounding-box corners', s: corners }] as col}
       <div>
         <div class="flex items-baseline justify-between mb-2">
           <h2 class="text-xl font-bold">{col.title}</h2>

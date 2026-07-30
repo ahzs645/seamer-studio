@@ -2,6 +2,11 @@
   import {
     formulaSet,
     imageUpdate,
+    isLinkedPath,
+    linkPath,
+    linkSourceCandidates,
+    syncLinkedPaths,
+    unlinkPath,
     variableReorder,
     variableSetOptions,
     type Pattern,
@@ -26,8 +31,7 @@
     instantiateFromLibrary, syncFromLibrary, type LibraryStatus
   } from '$lib/stores/materialLibrary';
   import { MATERIAL_PRESETS, getPreset } from '$lib/data/materialPresets';
-  import { rebakeArc, arcCenter } from '$lib/utils/arcParametric';
-  import { isLinkedPath, linkSourceCandidates, linkPath, unlinkPath, syncLinkedPaths } from '$lib/utils/linkedPaths';
+  import { rebakeArc, arcCenter } from '@seamer/pattern-model/utils/arcParametric';
 
   interface Props {
     currentPattern: Pattern;
@@ -695,7 +699,7 @@
 
 <div class="w-[340px] border-l bg-base-100 flex flex-col shrink-0 overflow-y-auto" data-tour-id="tour-properties">
   <div class="w-full bg-base-300 p-2 px-4 font-bold text-sm flex items-center sticky z-10 top-0 border-b-2 border-accent">
-    <span>Properties{editingEdge ? ' for Edge' : editingPiece ? ' for Piece' : editingPoint ? ' for Point' : ' for Pattern'}</span>
+    <span data-testid="property-panel-heading">Properties{editingEdge ? ' for Edge' : editingPiece ? ' for Piece' : editingPoint ? ' for Point' : ' for Pattern'}</span>
     {#if onclose}
       <button class="ml-auto pt-1" type="button" title="Close properties" aria-label="Close properties" onclick={onclose}>
         <span class="material-symbols-rounded">close</span>
@@ -780,13 +784,14 @@
           onchange={(e) => edgeMove(edgeToMm(parseFloat(e.currentTarget.value) || 0), edgeAngleDeg)} /></label>
       <label class="flex flex-col gap-0.5">Angle (°)
         <input type="number" step="0.5" class="input input-bordered input-xs"
+          data-testid="edge-angle-input"
           value={edgeAngleDeg.toFixed(2)}
           onchange={(e) => edgeMove(edgeLenMm, parseFloat(e.currentTarget.value) || 0)} /></label>
       <div class="flex gap-1">
         <button class="btn btn-xs flex-1" title="Rotate -1°" onclick={() => edgeMove(edgeLenMm, edgeAngleDeg - 1)}>−1°</button>
         <button class="btn btn-xs flex-1" title="Rotate -0.1°" onclick={() => edgeMove(edgeLenMm, edgeAngleDeg - 0.1)}>−0.1°</button>
         <button class="btn btn-xs flex-1" title="Rotate +0.1°" onclick={() => edgeMove(edgeLenMm, edgeAngleDeg + 0.1)}>+0.1°</button>
-        <button class="btn btn-xs flex-1" title="Rotate +1°" onclick={() => edgeMove(edgeLenMm, edgeAngleDeg + 1)}>+1°</button>
+        <button class="btn btn-xs flex-1" title="Rotate +1°" data-testid="edge-rotate-plus-one" onclick={() => edgeMove(edgeLenMm, edgeAngleDeg + 1)}>+1°</button>
       </div>
       <p class="text-[11px] opacity-50">Edits move <b>{edgePivot === 'from' ? ed.to.name : ed.from.name}</b> around the pivot <b>{edgePivot === 'from' ? ed.from.name : ed.to.name}</b>. Shared points reshape the adjoining edge too.</p>
 
@@ -959,7 +964,7 @@
                   <div class="rounded-md border my-0.5"
                     class:border-accent={pathIds.has(pp.path)} class:border-base-200={!pathIds.has(pp.path)}>
                     <div class="flex items-center px-2 py-1 gap-1">
-                      <button class="font-bold text-sm cursor-pointer hover:text-accent text-left" onclick={() => selectPath(pp)}>{pathName(pp.path)}</button>
+                      <button class="font-bold text-sm cursor-pointer hover:text-accent text-left" data-testid="piece-edge-select" onclick={() => selectPath(pp)}>{pathName(pp.path)}</button>
                       <span class="mx-1 text-xs opacity-70">({pointName(pp.from)} → {pointName(pp.to)})</span>
                       <div class="flex items-center ml-auto gap-1">
                         {#if s.id === 'seam'}

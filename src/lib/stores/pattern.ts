@@ -1,7 +1,13 @@
 import { writable, derived, type Writable } from 'svelte/store';
 import { browser } from '$app/environment';
 import type { Pattern, Piece, ConstrainablePoint, ConstrainablePath } from '@seamer/pattern-model';
-import { COMMAND_LIST, EMPTY_PATTERN, createPatternRegistry } from '@seamer/pattern-model';
+import {
+  COMMAND_LIST,
+  EMPTY_PATTERN,
+  EMPTY_SEAM_TOOL,
+  createPatternRegistry,
+  type SeamToolState
+} from '@seamer/pattern-model';
 import {
   CommandRegistry,
   Editor,
@@ -12,7 +18,6 @@ import {
   type CommandDef,
   type CommandResult
 } from '@atelier/core';
-import { EMPTY_SEAM_TOOL, type SeamToolState } from '$lib/utils/seamTool';
 
 interface ReplaceParams {
   pattern: Pattern;

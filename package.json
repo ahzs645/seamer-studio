@@ -9,6 +9,10 @@
     "build": "vite build",
     "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json && pnpm -r typecheck",
+    "typecheck": "pnpm check",
+    "test": "pnpm test:unit",
+    "test:e2e": "playwright test --project=chromium",
+    "test:e2e:webgpu": "playwright test --project=webgpu",
     "test:unit": "vitest run",
     "test:unit:watch": "vitest",
     "lint": "eslint .",
@@ -33,6 +37,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.2",
+    "@playwright/test": "1.57.0",
     "@sveltejs/adapter-auto": "^3.0.0",
     "@sveltejs/kit": "^2.0.0",
     "@sveltejs/vite-plugin-svelte": "^7.2.0",

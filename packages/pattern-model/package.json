@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@atelier/core": "file:../../../atelier/packages/core",
-    "@atelier/geometry": "file:../../../atelier/packages/geometry"
+    "@atelier/geometry": "file:../../../atelier/packages/geometry",
+    "@atelier/io": "file:../../../atelier/packages/io"
   }
 }

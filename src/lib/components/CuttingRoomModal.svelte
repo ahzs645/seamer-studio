@@ -6,6 +6,11 @@
   import {
     nestPieces, nestPiecesTrueShape, markerToSVG, type MarkerLayout, type CutOffType
   } from '$lib/utils/markerLayout';
+  import {
+    readMarkerSettings,
+    writeMarkerSettings,
+    type MarkerSettings
+  } from '$lib/utils/markerSettings';
   import { nestInWorker, type NestJob, type NestProgress } from '$lib/utils/nestingClient';
   import { printMarkerTiled, downloadText, downloadBlob, markerToPDF, markerToHPGL } from '$lib/utils/exporters';
   import { toast, toastSuccess, toastError } from '$lib/stores/toast';
@@ -16,23 +21,17 @@
   let { currentPattern, onchange, onclose }:
     { currentPattern: Pattern; onchange: (p: Pattern, label?: string) => void; onclose: () => void } = $props();
 
-  interface MarkerSettings {
-    algorithm: 'fast' | 'trueShape' | 'nfp';
-    fabricWidthMm: number;
-    gapMm: number;
-    allowedRotations: number[];
-    cutOff: CutOffType;
-    cutIds: string[];
-    maxLengthMm?: number;
-  }
   // svelte-ignore state_referenced_locally -- intentional one-time read of persisted settings on open
-  const saved = (currentPattern.markerSettings ?? null) as Partial<MarkerSettings> | null;
+  const saved = readMarkerSettings(currentPattern.markerSettings);
 
-  let algorithm = $state<MarkerSettings['algorithm']>(saved?.algorithm ?? 'nfp');
-  let fabricWidthMm = $state(saved?.fabricWidthMm ?? 1400);
-  let gapMm = $state(saved?.gapMm ?? 10);
-  let maxLengthMm = $state(saved?.maxLengthMm ?? 0); // 0 = unlimited (single sheet)
-  let rotationMode = $state(rotationsToMode(saved?.allowedRotations));
+  let algorithm = $state<MarkerSettings['algorithm']>(saved.algorithm);
+  let fabricWidthMm = $state(saved.fabricWidthMm);
+  let gapMm = $state(saved.gapMm);
+  let maxLengthMm = $state(saved.maxLengthMm ?? 0); // 0 = unlimited (single sheet)
+  let rotationMode = $state(rotationsToMode(saved.allowedRotations));
+  let generations = $state(saved.generations);
+  let gravity = $state(saved.gravity);
+  let curveToleranceMm = $state(saved.curveToleranceMm);
   // fabric distortion compensation (the original's TPS warpToMesh), applied to machine cut files
   let fabricBowMm = $state(0);
   let fabricSkewMm = $state(0);
@@ -40,8 +39,8 @@
   let matchEnabled = $state(false);
   let matchCellWmm = $state(50);
   let matchCellHmm = $state(50);
-  let cutOff = $state<CutOffType>(saved?.cutOff ?? 'none');
-  let cutIds = $state<Set<string>>(new Set(saved?.cutIds ?? []));
+  let cutOff = $state<CutOffType>(saved.cutOff);
+  let cutIds = $state<Set<string>>(new Set(saved.cutIds));
 
   let layout = $state<MarkerLayout | null>(null);
   let busy = $state(false);
@@ -64,7 +63,18 @@
   }
 
   function persist() {
-    const settings: MarkerSettings = { algorithm, fabricWidthMm, gapMm, maxLengthMm, allowedRotations: modeToRotations(), cutOff, cutIds: [...cutIds] };
+    const settings = writeMarkerSettings({
+      algorithm,
+      fabricWidthMm,
+      gapMm,
+      maxLengthMm,
+      allowedRotations: modeToRotations(),
+      generations,
+      gravity,
+      curveToleranceMm,
+      cutOff,
+      cutIds: [...cutIds]
+    });
     onchange({ ...currentPattern, markerSettings: settings, hasChanged: true }, 'Cutting room settings');
   }
 
@@ -75,11 +85,21 @@
     await new Promise((r) => setTimeout(r, 10));
     try {
       if (algorithm === 'nfp') {
-        // worker-based Atelier nest: cancellable without blocking the modal
+        // worker-based Atelier GA: real generation progress and hard cancellation via solve host
         job?.cancel();
         job = nestInWorker(
           currentPattern,
-          { fabricWidthMm, gapMm, maxLengthMm, allowedRotations: modeToRotations() },
+          {
+            fabricWidthMm,
+            gapMm,
+            maxLengthMm,
+            allowedRotations: modeToRotations(),
+            generations,
+            population: 16,
+            strategy: 'nfp',
+            gravity,
+            curveToleranceMm
+          },
           (p) => (progress = p)
         );
         layout = await job.promise;
@@ -243,6 +263,20 @@
               <option value="free">Free (8 angles)</option>
             </select>
           </label>
+        {/if}
+        {#if algorithm === 'nfp'}
+          <label class="flex flex-col gap-1">Search effort (generations): {generations}
+            <input type="range" min="0" max="40" step="1" class="range range-xs" bind:value={generations} /></label>
+          <label class="flex flex-col gap-1" title="Which fabric edge pieces snug toward">Gravity
+            <select class="select select-bordered select-sm" bind:value={gravity}>
+              <option value="bottom">Bottom</option>
+              <option value="top">Top</option>
+              <option value="left">Left</option>
+              <option value="right">Right</option>
+            </select>
+          </label>
+          <label class="flex flex-col gap-1" title="Simplification tolerance for curved cut outlines — coarser = faster nesting">Curve tolerance (mm)
+            <input type="number" min="0.2" max="5" step="0.2" class="input input-bordered input-sm" bind:value={curveToleranceMm} /></label>
         {/if}
         <label class="flex items-center gap-2 text-sm" title="Snap pieces onto the print's repeat grid so checks/stripes land identically on every piece">
           <input type="checkbox" class="checkbox checkbox-sm" bind:checked={matchEnabled} /> Pattern matching

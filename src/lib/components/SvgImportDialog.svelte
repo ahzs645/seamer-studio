@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { SvgImportOptions } from '$lib/utils/patternImport';
+  import type { SvgImportOptions } from '@seamer/pattern-model/utils/patternImport';
 
   let { filename = '', onapply, oncancel }:
     {

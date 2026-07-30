@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { DxfImportOptions, DxfLineClass } from '$lib/utils/patternImport';
+  import type { DxfImportOptions, DxfLineClass } from '@seamer/pattern-model/utils/patternImport';
 
   let { filename = '', onapply, oncancel }:
     {

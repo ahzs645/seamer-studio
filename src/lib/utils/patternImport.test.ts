@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { fromSVG } from '@atelier/io';
-import { drawingToPattern, dxfToPattern } from './patternImport';
+import { drawingToPattern, dxfToPattern } from '@seamer/pattern-model/utils/patternImport';
 
 /** Build a DXF code/value pair stream from a flat list. */
 const dxf = (...pairs: (string | number)[]) => pairs.map(String).join('\n');

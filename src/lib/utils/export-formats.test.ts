@@ -10,7 +10,7 @@ import {
   patternToSVG,
   patternToSVG2
 } from './exporters';
-import { dxfToPattern } from './patternImport';
+import { dxfToPattern } from '@seamer/pattern-model/utils/patternImport';
 
 const decode = (bytes: Uint8Array) => { let s = ''; for (const b of bytes) s += String.fromCharCode(b); return s; };
 

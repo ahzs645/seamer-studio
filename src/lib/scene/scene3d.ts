@@ -4,14 +4,22 @@
 
 import * as THREE from 'three';
 import type { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { OBJExporter } from 'three/addons/exporters/OBJExporter.js';
-import type { Pattern, Material } from '@seamer/pattern-model';
+import {
+  indexPoints,
+  pieceInternalPolylines,
+  samePick,
+  type Material,
+  type Pattern,
+  type SeamPick,
+  type SeamToolState
+} from '@seamer/pattern-model';
 import { AvatarController } from '@seamer/avatar';
 import { buildCylinders, type CylinderFrame } from '@seamer/cloth-sim';
 import { arrangeParticles } from '@seamer/cloth-sim';
 import { prepareCloth, ClothSimulation, type PreparedCloth } from '@seamer/cloth-sim';
 import { SIM_CONFIG, type SimConfig } from '@seamer/cloth-sim';
 import { cylinderRefit } from '@seamer/cloth-sim';
+import { toOBJ, toSTL } from '@atelier/io/three';
 import { SolverRunner, requestDevice, isWebGPUAvailable } from '@atelier/sim';
 import {
   docToWorld,
@@ -20,8 +28,6 @@ import {
 } from '@atelier/viewport';
 import { createGarmentMaterial, createAvatarMaterial, hasSeparateBack, disposeGarmentMaterial } from './materials';
 import { createPieceTexture, pieceNeedsBake } from './pieceTexture';
-import { indexPoints, pieceInternalPolylines } from '@seamer/pattern-model';
-import { samePick, type SeamPick, type SeamToolState } from '$lib/utils/seamTool';
 import { SeamerLighting } from './seamerLighting';
 import {
   SeamerOverlays,
@@ -30,6 +36,17 @@ import {
 } from './seamerOverlays';
 
 export type RendererStatus = 'idle' | 'loading' | 'ready' | 'simulating' | 'invalid' | 'error';
+
+/** DEV-only automation snapshot derived from the live GPU solver's readback buffer. */
+export interface DrapeDebugState {
+  deviceAcquired: boolean;
+  deviceLostReason: string | null;
+  running: boolean;
+  frameCount: number;
+  particleCount: number;
+  positionHash: string | null;
+  positionsFinite: boolean;
+}
 
 interface ClothMeshEntry {
   pieceId: string;
@@ -97,9 +114,11 @@ export class PatternRenderer {
   private labelMode: 'billboard' | 'flat' = 'flat';
 
   private device: GPUDevice | null = null;
+  private deviceLostReason: string | null = null;
   private sim: ClothSimulation | null = null;
   private simRunner: SolverRunner<{ positions: Float32Array }> | null = null;
   private disposeSimFrame: (() => void) | null = null;
+  private simFrameCount = 0;
   private simulating = false;
   private userSimulating = false; // true while a sim the USER started (via Start) is running
   // Live "hold" strength. The original solver has NO per-frame anchor; ours softly guides saved
@@ -1216,12 +1235,52 @@ export class PatternRenderer {
     return isWebGPUAvailable();
   }
 
+  /** Read-only DEV automation signal. The hash covers every particle's x/y/z float bits. */
+  getDrapeDebugState(): DrapeDebugState {
+    const positions = this.sim?.positions ?? null;
+    let positionHash: string | null = null;
+    let positionsFinite = true;
+    if (positions) {
+      const bits = new Uint32Array(positions.buffer, positions.byteOffset, positions.length);
+      let hash = 0x811c9dc5;
+      for (let i = 0; i < positions.length; i += 4) {
+        for (let axis = 0; axis < 3; axis++) {
+          positionsFinite &&= Number.isFinite(positions[i + axis]);
+          hash = Math.imul(hash ^ bits[i + axis], 0x01000193);
+        }
+      }
+      positionHash = (hash >>> 0).toString(16).padStart(8, '0');
+    }
+    return {
+      deviceAcquired: this.device !== null,
+      deviceLostReason: this.deviceLostReason,
+      running: this.simulating && (this.simRunner?.running ?? false),
+      frameCount: this.simFrameCount,
+      particleCount: positions ? positions.length / 4 : 0,
+      positionHash,
+      positionsFinite
+    };
+  }
+
   private async ensureSim(): Promise<ClothSimulation | null> {
     if (this.sim) return this.sim;
     if (!this.prepared) return null;
-    if (!this.device) this.device = await requestDevice();
+    if (!this.device) {
+      this.device = await requestDevice();
+      if (this.device) {
+        const acquiredDevice = this.device;
+        this.deviceLostReason = null;
+        void acquiredDevice.lost.then((info) => {
+          if (this.device !== acquiredDevice) return;
+          this.deviceLostReason = info.message
+            ? `${info.reason}: ${info.message}`
+            : info.reason;
+        });
+      }
+    }
     if (!this.device) throw new Error('WebGPU is unavailable');
     this.sim = new ClothSimulation(this.device, this.prepared);
+    this.simFrameCount = 0;
     const simulation = this.sim;
     this.simRunner = new SolverRunner({
       async step(_dt: number): Promise<void> {
@@ -1241,6 +1300,7 @@ export class PatternRenderer {
         this.simRunner?.stop();
         return;
       }
+      this.simFrameCount += 1;
       this.applyClothPositions(positions);
       if (this.adaptFramesLeft > 0 && --this.adaptFramesLeft === 0) {
         this.sim?.reanchorToSettled();
@@ -1957,15 +2017,16 @@ export class PatternRenderer {
 
   /** Export the avatar + draped garment as an OBJ download. */
   exportOBJ(): string {
-    const exporter = new OBJExporter();
-    return exporter.parse(this.buildExportGroup());
+    return toOBJ(this.buildExportGroup());
   }
 
   /** Export the avatar + draped garment as binary STL (e.g. for 3D printing/CAD). */
   async exportSTL(): Promise<DataView> {
-    const { STLExporter } = await import('three/addons/exporters/STLExporter.js');
-    const exporter = new STLExporter();
-    return exporter.parse(this.buildExportGroup(), { binary: true }) as DataView;
+    const result = toSTL(this.buildExportGroup(), { binary: true });
+    if (typeof result === 'string') {
+      throw new Error('Binary STL export returned text');
+    }
+    return new DataView(result);
   }
 
   /** Detached snapshot of the live avatar + draped garment for shared scene exporters. */

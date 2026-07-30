@@ -16,10 +16,19 @@
   import type { Selection } from '@atelier/core';
   import type { EditorState } from '@atelier/svelte';
   import { loadPattern, savePattern as saveToDB } from '$lib/stores/localDB';
-  import { EMPTY_PATTERN, type Pattern, type Piece, type ConstrainablePoint, type ConstrainablePath } from '@seamer/pattern-model';
+  import {
+    EMPTY_PATTERN,
+    deletePath,
+    deletePiece,
+    deletePoint,
+    syncLinkedPaths,
+    type Pattern,
+    type Piece,
+    type ConstrainablePoint,
+    type ConstrainablePath
+  } from '@seamer/pattern-model';
   import type { PendingPaste } from '$lib/stores/pattern';
   import { isSimpleFormat, convertSimplePattern } from '$lib/utils/importSimplePattern';
-  import { deletePoint, deletePath, deletePiece } from '$lib/utils/patternMutations';
   import Toaster from '$lib/components/Toaster.svelte';
   import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
   import GradingOverlay from '$lib/components/GradingOverlay.svelte';
@@ -33,7 +42,7 @@
     svgToPattern,
     type DxfImportOptions,
     type SvgImportOptions
-  } from '$lib/utils/patternImport';
+  } from '@seamer/pattern-model/utils/patternImport';
   import { parseRul, applyRulToPattern, type RulTable } from '$lib/utils/rulImport';
   import PrintDialog from '$lib/components/PrintDialog.svelte';
   import DxfImportDialog from '$lib/components/DxfImportDialog.svelte';
@@ -42,7 +51,6 @@
   import { cutToPattern } from '$lib/utils/cutImport';
   import { seamlyToPattern } from '$lib/utils/seamlyImport';
   import { bodyToSeamlyMe } from '$lib/utils/seamlyExport';
-  import { syncLinkedPaths } from '$lib/utils/linkedPaths';
   import ErrorsPanel from '$lib/components/ErrorsPanel.svelte';
   import KeyboardShortcuts from '$lib/components/KeyboardShortcuts.svelte';
   import WelcomeModal from '$lib/components/WelcomeModal.svelte';
@@ -631,7 +639,7 @@
       <span class="text-sm font-lexend font-semibold hidden lg:inline">Pattern Studio</span>
     </div>
     <div class="flex items-center gap-2">
-      <input type="text" class="input input-bordered input-xs w-40 lg:w-56" placeholder="Pattern name..." bind:value={patternName} />
+      <input type="text" class="input input-bordered input-xs w-40 lg:w-56" placeholder="Pattern name..." bind:value={patternName} data-testid="pattern-name-input" />
       <div class="dropdown dropdown-end">
         <div role="button" class="btn btn-xs btn-ghost">Templates</div>
         <ul class="dropdown-content menu bg-base-200 rounded-box z-50 w-56 p-2 shadow">
@@ -650,13 +658,13 @@
       <button class="btn btn-ghost btn-xs" onclick={handleUndo} disabled={!$undoLabel} title={$undoLabel ? `Undo ${$undoLabel} (Ctrl+Z)` : 'Nothing to undo'}>&#x21A9;</button>
       <button class="btn btn-ghost btn-xs" onclick={handleRedo} disabled={!$redoLabel} title={$redoLabel ? `Redo ${$redoLabel} (Ctrl+Shift+Z)` : 'Nothing to redo'}>&#x21AA;</button>
       <div class="dropdown dropdown-end">
-        <div role="button" tabindex="0" class="btn btn-ghost btn-xs">Import</div>
+        <div role="button" tabindex="0" class="btn btn-ghost btn-xs" data-testid="import-menu-trigger">Import</div>
         <ul class="dropdown-content menu bg-base-200 rounded-box z-50 w-52 p-2 shadow text-sm">
           <li><button onclick={handleImport}>From file… (JSON/DXF/SVG/CUT/Seamly)</button></li>
           <li><button onclick={() => (rulDialog = { table: null })}>RUL grade rules…</button></li>
           <li class="menu-title pt-2">Samples</li>
           {#each importSamples as s}
-            <li><button onclick={() => importSample(s.file)}>{s.label}</button></li>
+            <li><button onclick={() => importSample(s.file)} data-testid={`import-sample-${s.file}`}>{s.label}</button></li>
           {/each}
         </ul>
       </div>
@@ -685,7 +693,7 @@
       <button class="btn btn-xs" class:btn-accent={!saved} class:btn-ghost={saved} onclick={handleSave} data-tour-id="tour-save">{saved ? 'Saved' : 'Save'}</button>
       <button class="btn btn-ghost btn-xs" onclick={() => showLeftPanel = !showLeftPanel} title="Toggle left panel">&#x2630;</button>
       <button class="btn btn-ghost btn-xs" onclick={() => showRightPanel = !showRightPanel} title="Toggle right panel">&#x25B6;</button>
-      <button class="btn btn-xs" class:btn-active={showObjectBrowser} onclick={() => showObjectBrowser = !showObjectBrowser} title="Toggle object browser">
+      <button class="btn btn-xs" class:btn-active={showObjectBrowser} onclick={() => showObjectBrowser = !showObjectBrowser} title="Toggle object browser" data-testid="object-browser-toggle">
         <span class="material-symbols-rounded notranslate align-middle" style="font-size:18px">view_list</span>
       </button>
       {#key $patternEditor}<ErrorsPanel {currentPattern} editor={$patternEditor} />{/key}

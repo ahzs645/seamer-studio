@@ -1,35 +1,37 @@
-// Nesting Web Worker: runs Atelier's true-shape nester off the main thread.
+// Worker endpoint for Atelier's steady-solver protocol. The main thread uses terminate-mode
+// cancellation because nestSearch is intentionally synchronous inside this isolated worker.
 
 import {
-  nestItemsWithAtelier,
-  type MarkerLayout,
-  type NestItem
-} from '../utils/markerLayout';
-import type { NestProgress } from '../utils/nestingClient';
+  serveSteadySolverPlugin,
+  type SolveWorkerScope,
+  type SteadySolverPlugin
+} from '@atelier/sim';
+import {
+  solveNestQuery,
+  type NestProgress,
+  type NestSolveQuery
+} from '../utils/nestingProtocol';
+import type { MarkerLayout } from '../utils/markerLayout';
 
-export interface NestWorkerRequest {
-  items: NestItem[];
-  options: {
-    fabricWidthMm: number;
-    gapMm: number;
-    rotations: number[];
-    maxLengthMm?: number;
-  };
-}
-
-self.onmessage = (e: MessageEvent<NestWorkerRequest>) => {
-  const { items, options } = e.data;
-  try {
-    const layout: MarkerLayout = nestItemsWithAtelier(items, options);
-    const progress: NestProgress = {
-      generation: 1,
-      generations: 1,
-      bestLengthMm: layout.usedLengthMm,
-      efficiency: layout.efficiency ?? 0
-    };
-    self.postMessage({ type: 'progress', ...progress });
-    self.postMessage({ type: 'done', layout });
-  } catch (err) {
-    self.postMessage({ type: 'error', message: err instanceof Error ? err.message : String(err) });
-  }
+const plugin: SteadySolverPlugin<void, NestSolveQuery, MarkerLayout, NestProgress> = {
+  id: 'seamer.ga-nesting',
+  backend: 'cpu',
+  prepare: async () => ({
+    solve: async (query, options = {}) => {
+      if (options.signal?.aborted) {
+        throw options.signal.reason ?? new DOMException('The operation was aborted', 'AbortError');
+      }
+      const layout = solveNestQuery(query, options.onProgress);
+      if (options.signal?.aborted) {
+        throw options.signal.reason ?? new DOMException('The operation was aborted', 'AbortError');
+      }
+      return layout;
+    },
+    dispose: () => undefined
+  })
 };
+
+serveSteadySolverPlugin(
+  self as unknown as SolveWorkerScope,
+  plugin
+);

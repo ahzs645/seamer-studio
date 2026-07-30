@@ -3,16 +3,18 @@
 	import type { Editor } from '@atelier/core';
 	import { editorState } from '@atelier/svelte';
 	import { selectedSeamId } from '$lib/stores/pattern';
-	import type { Pattern, Seam } from '@seamer/pattern-model';
-	import { indexPiecePathOwners, seamLabel as computeSeamLabel } from '@seamer/pattern-model';
 	import {
 		deletePath,
 		deletePoint,
 		deletePiece,
 		deleteSeam,
 		deleteText,
-		reorder as reorderItems
-	} from '$lib/utils/patternMutations';
+		indexPiecePathOwners,
+		reorder as reorderItems,
+		seamLabel as computeSeamLabel,
+		type Pattern,
+		type Seam
+	} from '@seamer/pattern-model';
 
 	interface Props {
 		currentPattern: Pattern;
@@ -139,6 +141,7 @@
 		class:cursor-grabbing={dragging}
 		class:cursor-grab={!dragging}
 		style="left: {pos.x}px; top: {pos.y}px;"
+		data-testid="object-browser"
 	>
 		<!-- Header / drag handle -->
 		<div
@@ -229,7 +232,7 @@
 								<button class="mr-2" title={collapsed.pieces ? 'Expand' : 'Collapse'}>
 									<span class="material-symbols-rounded notranslate">{collapsed.pieces ? 'add' : 'remove'}</span>
 								</button>
-								<span class="text-sm">Pieces ({pieces.length})</span>
+								<span class="text-sm" data-testid="object-browser-pieces-count">Pieces ({pieces.length})</span>
 							</div>
 							{#if !collapsed.pieces}
 								<div class="ml-4">
@@ -242,7 +245,7 @@
 											ondrop={(e) => { e.preventDefault(); rowDrop('pieces', piece.id); }}>
 											<span class="material-symbols-rounded text-base-content/70 notranslate" title="Drag to reorder">drag_indicator</span>
 											<div class="flex flex-col w-full">
-												<div role="button" tabindex="0" class="flex items-center h-8 cursor-pointer select-none" title="Select"
+												<div role="button" tabindex="0" class="flex items-center h-8 cursor-pointer select-none" title="Select" data-testid="object-browser-piece"
 													onclick={() => selectPiece(piece.id)}
 													onkeydown={(e) => e.key === 'Enter' && selectPiece(piece.id)}>
 													<button class="mr-2" title={expanded[piece.id] ? 'Collapse' : 'Expand'}

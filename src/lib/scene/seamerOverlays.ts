@@ -10,8 +10,12 @@ import {
   type CustomOverlayLabel,
   type Viewport
 } from '@atelier/viewport';
-import { seamColor } from '@seamer/pattern-model';
-import { samePick, type SeamPick, type SeamToolState } from '$lib/utils/seamTool';
+import {
+  samePick,
+  seamColor,
+  type SeamPick,
+  type SeamToolState
+} from '@seamer/pattern-model';
 
 export interface ArrangementMarker {
   name: string;

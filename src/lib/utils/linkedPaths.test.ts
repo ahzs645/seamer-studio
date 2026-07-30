@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { createEmptyPattern, type Pattern, type ConstrainablePath } from '@seamer/pattern-model';
-import { canLinkPath, linkPath, unlinkPath, syncLinkedPaths, isLinkedPath } from './linkedPaths';
+import { canLinkPath, linkPath, unlinkPath, syncLinkedPaths, isLinkedPath } from '@seamer/pattern-model/utils/linkedPaths';
 
 const uid = (() => { let n = 0; return (p: string) => `${p}_${++n}`; })();
 
