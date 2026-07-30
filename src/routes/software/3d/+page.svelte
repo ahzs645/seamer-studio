@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
 </script>
 
 <svelte:head>
@@ -40,12 +41,12 @@
     <h2 class="text-2xl font-bold mt-8">The avatar</h2>
     <p>
       The body is reconstructed from real measurements using a statistical body model —
-      see <a href="/bodydbl" class="link link-primary">Body Double</a> for details.
+      see <a href="{base}/bodydbl" class="link link-primary">Body Double</a> for details.
       Fit checks happen on the body the garment is actually for.
     </p>
   </div>
 
   <div class="mt-10 text-center">
-    <a href="/studio" class="btn btn-accent btn-lg">Try It in the Studio</a>
+    <a href="{base}/studio" class="btn btn-accent btn-lg">Try It in the Studio</a>
   </div>
 </div>

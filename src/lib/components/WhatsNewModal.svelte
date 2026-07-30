@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
   // "What's new" splash. On studio load, compares the server's latest version
   // (/api/user/latest-version → customData.latestVersion) against localStorage 'latestVersion';
   // when they differ the release notes are fetched and shown. "Dismiss updates" stores the new
@@ -13,7 +14,7 @@
 
   onMount(async () => {
     try {
-      const res = await fetch('/api/user/latest-version');
+      const res = await fetch(`${base}/api/user/latest-version`);
       if (!res.ok) return;
       const data = await res.json();
       latest = data?.customData?.latestVersion;
@@ -27,7 +28,7 @@
         try { localStorage.setItem(VERSION_KEY, latest); } catch { /* ignore */ }
         return;
       }
-      const rn = await fetch('/api/release-notes');
+      const rn = await fetch(`${base}/api/release-notes`);
       if (!rn.ok) return;
       const all: ReleaseNote[] = await rn.json();
       // show everything newer than the last version the user dismissed (or all of them)

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
 </script>
 
 <svelte:head>
@@ -54,7 +55,7 @@
     <p>
       We may update these terms as the software evolves. Continued use after changes
       constitutes acceptance. Material changes will be noted in the
-      <a href="/changelog" class="link link-primary">changelog</a>.
+      <a href="{base}/changelog" class="link link-primary">changelog</a>.
     </p>
 
     <p class="mt-8 text-sm opacity-60">Last updated: June 2026</p>

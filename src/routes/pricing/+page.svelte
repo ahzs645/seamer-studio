@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
 </script>
 
 <svelte:head>
@@ -26,7 +27,7 @@
           <li>✓ Offline support (installable PWA)</li>
         </ul>
         <div class="card-actions mt-6">
-          <a href="/studio" class="btn btn-accent btn-lg">Open Studio</a>
+          <a href="{base}/studio" class="btn btn-accent btn-lg">Open Studio</a>
         </div>
       </div>
     </div>
@@ -38,10 +39,10 @@
       Seamer stays free because of community support. If it saves you time,
       consider chipping in.
     </p>
-    <a href="/support-seamer" class="btn btn-outline">Support Seamer</a>
+    <a href="{base}/support-seamer" class="btn btn-outline">Support Seamer</a>
   </div>
 
   <p class="text-center mt-8">
-    Not sure yet? <a href="/pricing/demo" class="link link-primary">Try the demo</a> — no setup required.
+    Not sure yet? <a href="{base}/pricing/demo" class="link link-primary">Try the demo</a> — no setup required.
   </p>
 </div>

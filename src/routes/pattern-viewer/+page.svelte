@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
   import type { Pattern } from '@seamer/pattern-model';
   import { pieceWorldOutline, type Vec2 } from '@seamer/pattern-model';
 
@@ -73,7 +74,7 @@
   <h1 class="text-3xl font-bold font-lexend mb-6">Pattern Viewer</h1>
   <p class="text-lg mb-6">
     A read-only viewer for Seamer pattern files. Open a <code>.seamer.json</code> (or any
-    Seamer-format JSON, e.g. a <a href="/flow/templates" class="link link-primary">template</a>)
+    Seamer-format JSON, e.g. a <a href="{base}/flow/templates" class="link link-primary">template</a>)
     to preview its piece outlines — nothing is uploaded; the file is read locally in your browser.
   </p>
 
@@ -119,7 +120,7 @@
         {/each}
       </div>
       <p class="mt-6">
-        Want to edit it? <a href="/studio" class="link link-primary">Open the Studio</a> and import the same file.
+        Want to edit it? <a href="{base}/studio" class="link link-primary">Open the Studio</a> and import the same file.
       </p>
     </div>
   {/if}

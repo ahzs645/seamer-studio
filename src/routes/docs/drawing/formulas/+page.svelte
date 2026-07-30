@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
 </script>
 
 <svelte:head>
@@ -26,7 +27,7 @@
 
     <h3 class="text-xl font-bold mt-4">Variables</h3>
     <pre class="bg-base-200 p-4 rounded-lg text-sm overflow-x-auto"><code>{`{var_89ti3xo9e} / 4 + 10`}</code></pre>
-    <p>Reference any pattern variable by id. See <a href="/docs/drawing/variables" class="link link-primary">Variables</a>.</p>
+    <p>Reference any pattern variable by id. See <a href="{base}/docs/drawing/variables" class="link link-primary">Variables</a>.</p>
 
     <h3 class="text-xl font-bold mt-4">Body measurements</h3>
     <pre class="bg-base-200 p-4 rounded-lg text-sm overflow-x-auto"><code>{`body.waistGirth / 4 + 15`}</code></pre>

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
   const tools: { name: string; hotkey: string; desc: string }[] = [
     { name: 'Modify & select', hotkey: 'V', desc: 'Select, move, and edit points, paths, pieces, and handles. The default tool.' },
     { name: 'Pen', hotkey: 'P', desc: 'Draw lines and cubic Bézier curves point by point. Click for line points, drag for curve handles.' },
@@ -56,9 +57,9 @@
     </p>
     <h2 class="text-2xl font-bold mt-6">See also</h2>
     <ul class="list-disc pl-6 space-y-1">
-      <li><a href="/docs/drawing/constraints" class="link link-primary">Constraints</a></li>
-      <li><a href="/docs/drawing/formulas" class="link link-primary">Formulas</a></li>
-      <li><a href="/docs/elements" class="link link-primary">Elements</a></li>
+      <li><a href="{base}/docs/drawing/constraints" class="link link-primary">Constraints</a></li>
+      <li><a href="{base}/docs/drawing/formulas" class="link link-primary">Formulas</a></li>
+      <li><a href="{base}/docs/elements" class="link link-primary">Elements</a></li>
     </ul>
   </div>
 </div>

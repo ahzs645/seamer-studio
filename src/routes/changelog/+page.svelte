@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
   import { onMount } from 'svelte';
 
   interface ReleaseNote {
@@ -13,7 +14,7 @@
 
   onMount(async () => {
     try {
-      const res = await fetch('/api/release-notes');
+      const res = await fetch(`${base}/api/release-notes`);
       if (!res.ok) throw new Error(`Request failed (${res.status})`);
       const data = await res.json();
       notes = Array.isArray(data) ? data : [];
@@ -48,7 +49,7 @@
     <div class="text-center py-12 bg-base-200 rounded-lg">
       <p class="text-lg opacity-70">Release notes are unavailable right now.</p>
       <p class="text-sm opacity-50 mt-2">{error}</p>
-      <a href="/studio" class="btn btn-accent mt-4">Open Studio</a>
+      <a href="{base}/studio" class="btn btn-accent mt-4">Open Studio</a>
     </div>
   {:else if notes.length === 0}
     <div class="text-center py-12 bg-base-200 rounded-lg">

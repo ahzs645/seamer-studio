@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
 </script>
 
 <svelte:head>
@@ -11,8 +12,8 @@
     <p class="text-lg">
       A guided walkthrough: drafting a parametric pencil skirt from a blank canvas to a
       3D-draped, cut-ready pattern. Follow along in the
-      <a href="/studio" class="link link-primary">studio</a>, or load the finished result
-      from the <a href="/flow/templates" class="link link-primary">template library</a>
+      <a href="{base}/studio" class="link link-primary">studio</a>, or load the finished result
+      from the <a href="{base}/flow/templates" class="link link-primary">template library</a>
       (Pencil Skirt 2D / 3D).
     </p>
 
@@ -20,7 +21,7 @@
     <p>
       Open the body panel and enter your measurements — waist girth, hip girth, waist-to-hip
       depth, and skirt length are enough for a skirt. Seamer completes the rest statistically
-      (see <a href="/bodydbl" class="link link-primary">Body Double</a>).
+      (see <a href="{base}/bodydbl" class="link link-primary">Body Double</a>).
     </p>
 
     <h2 class="text-2xl font-bold mt-8">2. Draft the block with constraints</h2>
@@ -51,14 +52,14 @@
     <p>
       Add a grading profile with per-size variable overrides, check the size run overlay,
       then export: tiled PDF for home printing, or DXF/HPGL for a cutter via the
-      <a href="/cutting" class="link link-primary">Cutting Room</a>.
+      <a href="{base}/cutting" class="link link-primary">Cutting Room</a>.
     </p>
 
     <h2 class="text-2xl font-bold mt-8">Where to go next</h2>
     <ul class="list-disc pl-6 space-y-1">
-      <li><a href="/docs/drawing/tools" class="link link-primary">Drawing tools reference</a></li>
-      <li><a href="/docs/drawing/constraints" class="link link-primary">Constraint types</a></li>
-      <li><a href="/docs/drawing/formulas" class="link link-primary">Formula syntax</a></li>
+      <li><a href="{base}/docs/drawing/tools" class="link link-primary">Drawing tools reference</a></li>
+      <li><a href="{base}/docs/drawing/constraints" class="link link-primary">Constraint types</a></li>
+      <li><a href="{base}/docs/drawing/formulas" class="link link-primary">Formula syntax</a></li>
     </ul>
   </div>
 </div>

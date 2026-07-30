@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
 </script>
 
 <svelte:head>
@@ -34,13 +35,13 @@
     <h2 class="text-2xl font-bold mt-8">Local-first, like everything else</h2>
     <p>
       Nesting runs in your browser — no upload, no per-marker fees. Your production data
-      stays on your machine. See <a href="/connect" class="link link-primary">Connect</a> for
-      hooking up cutting hardware, and <a href="/flow" class="link link-primary">Flow</a> for
+      stays on your machine. See <a href="{base}/connect" class="link link-primary">Connect</a> for
+      hooking up cutting hardware, and <a href="{base}/flow" class="link link-primary">Flow</a> for
       the full pattern-to-cut workflow.
     </p>
   </div>
 
   <div class="mt-10 text-center">
-    <a href="/studio" class="btn btn-accent btn-lg">Open Studio</a>
+    <a href="{base}/studio" class="btn btn-accent btn-lg">Open Studio</a>
   </div>
 </div>

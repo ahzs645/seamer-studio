@@ -5,6 +5,7 @@ export default tseslint.config(
   {
     ignores: [
       '.svelte-kit/**',
+      'build/**',
       'node_modules/**',
       'static/**',
       '**/*.svelte',

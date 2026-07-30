@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
 </script>
 
 <svelte:head>
@@ -35,7 +36,7 @@
     <p>
       Reference a variable from any formula with a brace token: <code>{'{var_89ti3xo9e}'}</code>.
       The formula picker lists variables by name so you never type ids by hand. See
-      <a href="/docs/drawing/formulas" class="link link-primary">Formulas</a>.
+      <a href="{base}/docs/drawing/formulas" class="link link-primary">Formulas</a>.
     </p>
 
     <h2 class="text-2xl font-bold mt-8">Variables and grading</h2>

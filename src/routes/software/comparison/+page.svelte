@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
   const rows: { feature: string; seamer: string; desktop: string; cloud: string }[] = [
     { feature: 'Price', seamer: 'Free', desktop: 'One-time or subscription', cloud: 'Subscription' },
     { feature: 'Installation', seamer: 'None — runs in the browser', desktop: 'Desktop install required', cloud: 'None' },
@@ -58,6 +59,6 @@
   </div>
 
   <div class="mt-10 text-center">
-    <a href="/studio" class="btn btn-accent btn-lg">Try Seamer Free</a>
+    <a href="{base}/studio" class="btn btn-accent btn-lg">Try Seamer Free</a>
   </div>
 </div>

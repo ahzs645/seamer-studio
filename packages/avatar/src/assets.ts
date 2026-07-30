@@ -87,7 +87,7 @@ export interface GenderAssets {
   coefficients: Float32Array;
 }
 
-const MODELS_BASE = '/models';
+let modelsBase = '/models';
 
 // ---- pure parsers -----------------------------------------------------------
 
@@ -126,7 +126,15 @@ const genderCache = new Map<string, Promise<GenderAssets>>();
 const genderModelCache = new Map<string, Promise<GenderModel>>();
 
 /** Load just a gender's statistical model JSON (no coefficient .bin) — for measurement estimates. */
-export function loadGenderModel(gender: string, base = MODELS_BASE): Promise<GenderModel> {
+export function setAvatarAssetsBase(base: string): void {
+  if (base === modelsBase) return;
+  modelsBase = base;
+  avatarAssetsCache = null;
+  genderCache.clear();
+  genderModelCache.clear();
+}
+
+export function loadGenderModel(gender: string, base = modelsBase): Promise<GenderModel> {
   const g = gender === 'male' ? 'male' : 'female';
   const cached = genderModelCache.get(g);
   if (cached) return cached;
@@ -147,7 +155,7 @@ async function fetchJson(url: string): Promise<unknown> {
   return res.json();
 }
 
-export function loadAvatarAssets(base = MODELS_BASE): Promise<AvatarAssets> {
+export function loadAvatarAssets(base = modelsBase): Promise<AvatarAssets> {
   if (avatarAssetsCache) return avatarAssetsCache;
   avatarAssetsCache = (async () => {
     const [baseJson, indicesBuf, skinIdxBuf, skinWBuf] = await Promise.all([
@@ -176,7 +184,7 @@ export function loadAvatarAssets(base = MODELS_BASE): Promise<AvatarAssets> {
  * Load a gender's statistical model + per-vertex coefficient basis. Falls back to female when the
  * requested gender's coefficient asset is not bundled (only female_coefficients.bin ships today).
  */
-export function loadGenderAssets(gender: string, base = MODELS_BASE): Promise<GenderAssets> {
+export function loadGenderAssets(gender: string, base = modelsBase): Promise<GenderAssets> {
   const g = gender === 'male' ? 'male' : 'female';
   const cached = genderCache.get(g);
   if (cached) return cached;

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
   // Template editor (/flow/templates/edit/[[slug]]) — open a built-in or custom template (or upload
   // a .seamer.json), edit its metadata + parametric variables with a live re-drafted preview, then
   // save it to "My templates" (localStorage), download it, or open it in the studio.
@@ -59,7 +60,7 @@
       }
       const builtin = builtinBySlug(s);
       if (builtin) {
-        const res = await fetch(`/templates/${builtin.file}`);
+        const res = await fetch(`${base}/templates/${builtin.file}`);
         if (!res.ok) throw new Error(`Could not load template "${builtin.file}"`);
         setPattern(await res.json(), 'Built-in template', builtin.name, builtin.description);
         return;
@@ -150,7 +151,7 @@
     const p = applyMeta($state.snapshot(pattern) as Pattern);
     const s = saveCustomTemplate({ slug: slugify(name), name, description, pattern: p });
     toastSuccess(`Saved to My templates as "${s.name}"`);
-    if (slug !== s.slug) goto(`/flow/templates/edit/${s.slug}`, { replaceState: true });
+    if (slug !== s.slug) goto(`${base}/flow/templates/edit/${s.slug}`, { replaceState: true });
   }
 
   function download() {
@@ -166,7 +167,7 @@
       p.id = crypto.randomUUID();
       p.versionId = crypto.randomUUID();
       await savePattern(p);
-      await goto(`/studio/${p.id}`);
+      await goto(`${base}/studio/${p.id}`);
     } catch {
       toastError('Could not open the template in the studio');
     }
@@ -180,7 +181,7 @@
 <div class="px-4 py-8 max-w-6xl mx-auto">
   <div class="flex items-baseline justify-between flex-wrap gap-2 mb-6">
     <h1 class="text-3xl font-bold font-lexend">Template editor</h1>
-    <a href="/flow/templates" class="link link-primary text-sm">← All templates</a>
+    <a href="{base}/flow/templates" class="link link-primary text-sm">← All templates</a>
   </div>
 
   {#if error}
@@ -198,7 +199,7 @@
       <input type="file" accept=".json,application/json" class="file-input file-input-bordered w-full max-w-md mb-8" onchange={onUpload} />
       <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
         {#each BUILTIN_TEMPLATES as t (t.slug)}
-          <a href="/flow/templates/edit/{t.slug}" class="btn btn-sm btn-ghost justify-start truncate">{t.name}</a>
+          <a href="{base}/flow/templates/edit/{t.slug}" class="btn btn-sm btn-ghost justify-start truncate">{t.name}</a>
         {/each}
       </div>
     {/if}

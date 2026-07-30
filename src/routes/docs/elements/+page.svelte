@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
 </script>
 
 <svelte:head>
@@ -16,11 +17,11 @@
     <h2 class="text-2xl font-bold mt-8">The element hierarchy</h2>
     <ul class="list-disc pl-6 space-y-2">
       <li>
-        <strong><a href="/docs/elements/points" class="link link-primary">Points</a></strong> —
+        <strong><a href="{base}/docs/elements/points" class="link link-primary">Points</a></strong> —
         named positions in drafting space, optionally driven by parametric constraints.
       </li>
       <li>
-        <strong><a href="/docs/elements/paths" class="link link-primary">Paths</a></strong> —
+        <strong><a href="{base}/docs/elements/paths" class="link link-primary">Paths</a></strong> —
         lines, Bézier curves, and referenced (mirrored/copied) paths through ordered points.
       </li>
       <li>

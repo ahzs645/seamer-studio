@@ -1,11 +1,13 @@
-const CACHE_NAME = 'seamer-studio-v2';
-const STUDIO_CACHE = 'seamer-studio-assets-v2';
+const CACHE_NAME = 'seamer-studio-v3';
+const STUDIO_CACHE = 'seamer-studio-assets-v3';
+const BASE_PATH = new URL(self.registration.scope).pathname.replace(/\/$/, '');
+const FALLBACK_PATH = `${BASE_PATH}/404.html`;
 
 const PRECACHE_ASSETS = [
-  '/studio',
-  '/favicon.ico',
-  '/android-chrome-192x192.png',
-  '/android-chrome-512x512.png'
+  BASE_PATH ? FALLBACK_PATH : '/studio',
+  `${BASE_PATH}/favicon.ico`,
+  `${BASE_PATH}/android-chrome-192x192.png`,
+  `${BASE_PATH}/android-chrome-512x512.png`
 ];
 
 self.addEventListener('install', (event) => {
@@ -33,7 +35,7 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(request.url);
 
   if (url.origin === location.origin && 
-      (request.mode === 'navigate' || url.pathname.startsWith('/studio'))) {
+      (request.mode === 'navigate' || url.pathname.startsWith(`${BASE_PATH}/studio`))) {
     event.respondWith(
       fetch(request)
         .then(response => {
@@ -43,7 +45,10 @@ self.addEventListener('fetch', (event) => {
           }
           return response;
         })
-        .catch(() => caches.match(request))
+        .catch(async () => (
+          await caches.match(request)
+          ?? (BASE_PATH ? caches.match(FALLBACK_PATH) : undefined)
+        ))
     );
     return;
   }
@@ -56,7 +61,7 @@ self.addEventListener('fetch', (event) => {
       return fetch(request).then(response => {
         if (response.ok && request.method === 'GET' && 
             (url.pathname.match(/\.(js|css|png|jpg|jpeg|svg|woff2?|ttf)$/) ||
-             url.pathname.startsWith('/static/'))) {
+             url.pathname.startsWith(`${BASE_PATH}/static/`))) {
           const clone = response.clone();
           caches.open(STUDIO_CACHE).then(cache => cache.put(request, clone));
         }

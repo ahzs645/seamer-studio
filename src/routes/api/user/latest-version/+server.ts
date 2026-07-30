@@ -1,4 +1,4 @@
-export const prerender = false;
+export const prerender = true;
 import { json } from '@sveltejs/kit';
 import { latestVersion } from '$lib/server/releaseNotes';
 

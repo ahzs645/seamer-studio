@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
   import { onMount } from 'svelte';
   import { page } from '$app/stores';
   import { replaceState } from '$app/navigation';
@@ -237,7 +238,7 @@
         let loaded = await loadPattern(id);
         if (!loaded) {
           try {
-            const res = await fetch(`/api/patterns/${id}`);
+            const res = await fetch(`${base}/api/patterns/${id}`);
             if (res.ok) loaded = await res.json();
           } catch { /* offline — fall through to blank editor */ }
         }
@@ -316,7 +317,7 @@
     currentPattern = { ...currentPattern, name: patternName, thumbnailUrl: thumb ?? currentPattern.thumbnailUrl ?? null };
     await saveToDB(currentPattern); saved = true; saveCount += 1;
     // keep the pattern id in the URL so a reload reopens this pattern
-    if ($page.params.slug?.split('/')[0] !== currentPattern.id) replaceState(`/studio/${currentPattern.id}`, {});
+    if ($page.params.slug?.split('/')[0] !== currentPattern.id) replaceState(`${base}/studio/${currentPattern.id}`, {});
     toastSuccess('Pattern saved');
   }
 
@@ -454,7 +455,7 @@
 
   async function importSample(file: string) {
     try {
-      const res = await fetch(`/samples/${file}`);
+      const res = await fetch(`${base}/samples/${file}`);
       if (!res.ok) throw new Error('not found');
       const ext = file.split('.').pop()?.toLowerCase();
       applyImported(parseImport(await res.text(), ext, file.replace(/\.(dxf|svg)$/i, '')));
@@ -494,7 +495,7 @@
     const tpl = templatePatterns[key];
     if (!tpl) return;
     try {
-      const res = await fetch(`/templates/${tpl.file}`);
+      const res = await fetch(`${base}/templates/${tpl.file}`);
       if (!res.ok) throw new Error('Not found');
       const raw = await res.json();
       let data: Pattern = isSimpleFormat(raw) ? convertSimplePattern(raw) : (raw as Pattern);
@@ -635,7 +636,7 @@
 <div class="flex flex-col h-screen overflow-hidden">
   <div class="flex items-center justify-between px-3 py-1.5 bg-base-200 border-b shrink-0">
     <div class="flex items-center gap-2">
-      <a href="/" class="btn btn-ghost btn-xs">&larr;</a>
+      <a href="{base}/" class="btn btn-ghost btn-xs">&larr;</a>
       <span class="text-sm font-lexend font-semibold hidden lg:inline">Pattern Studio</span>
     </div>
     <div class="flex items-center gap-2">

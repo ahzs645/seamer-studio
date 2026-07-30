@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
 </script>
 
 <svelte:head>
@@ -43,11 +44,11 @@
 
     <p>
       For the marker layout and nesting workflow, see the
-      <a href="/cutting" class="link link-primary">Cutting Room</a>.
+      <a href="{base}/cutting" class="link link-primary">Cutting Room</a>.
     </p>
   </div>
 
   <div class="mt-10 text-center">
-    <a href="/studio" class="btn btn-accent btn-lg">Open Studio</a>
+    <a href="{base}/studio" class="btn btn-accent btn-lg">Open Studio</a>
   </div>
 </div>

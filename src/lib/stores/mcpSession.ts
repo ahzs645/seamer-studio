@@ -7,6 +7,7 @@
 // session id is the capability. The studio page wires the host in onMount via configureMcpSession().
 
 import { writable, get } from 'svelte/store';
+import { base } from '$app/paths';
 import type { Pattern } from '@seamer/pattern-model';
 import type { McpOp } from '$lib/server/mcpSessionStore';
 import { toastSuccess, toastError } from '$lib/stores/toast';
@@ -50,7 +51,7 @@ function stopPolling() {
 export async function enableMcpSession(): Promise<void> {
   if (!host || get(mcpSessionId)) return;
   try {
-    const res = await fetch('/api/mcp-session', { method: 'POST' });
+    const res = await fetch(`${base}/api/mcp-session`, { method: 'POST' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const { id } = await res.json();
     mcpSessionId.set(id);
@@ -68,7 +69,7 @@ export async function disableMcpSession(): Promise<void> {
   stopPolling();
   mcpSessionId.set(null);
   if (!id) return;
-  try { await fetch(`/api/mcp-session/${id}`, { method: 'DELETE' }); } catch { /* session expires server-side */ }
+  try { await fetch(`${base}/api/mcp-session/${id}`, { method: 'DELETE' }); } catch { /* session expires server-side */ }
   toastSuccess('MCP pattern session disabled');
 }
 
@@ -84,7 +85,7 @@ async function sync(): Promise<void> {
   if (!id || !host || syncing) return;
   syncing = true;
   try {
-    const res = await fetch(`/api/mcp-session/${id}/sync`, {
+    const res = await fetch(`${base}/api/mcp-session/${id}/sync`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ pattern: host.getPattern() })

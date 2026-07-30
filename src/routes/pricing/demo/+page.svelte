@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
 </script>
 
 <svelte:head>
@@ -20,11 +21,11 @@
       <li>Switch to 3D view to drape the garment on the avatar.</li>
     </ol>
     <div class="mt-8 text-center not-prose">
-      <a href="/studio" class="btn btn-accent btn-lg">Open Studio</a>
+      <a href="{base}/studio" class="btn btn-accent btn-lg">Open Studio</a>
     </div>
     <p class="mt-6 text-sm opacity-70">
       Anything you make is saved locally on your device — your demo work is yours to keep.
-      See <a href="/flow/templates" class="link link-primary">built-in templates</a> for what's included.
+      See <a href="{base}/flow/templates" class="link link-primary">built-in templates</a> for what's included.
     </p>
   </div>
 </div>

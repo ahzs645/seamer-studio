@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
 </script>
 
 <svelte:head>
@@ -28,14 +29,14 @@
       Variables with formulas, body-measurement tokens (<code>body.waistGirth</code>), and
       path-length references make the pattern a living document — change one number and the
       draft, the grade, and the 3D drape all update. See the
-      <a href="/docs/drawing/formulas" class="link link-primary">formula docs</a>.
+      <a href="{base}/docs/drawing/formulas" class="link link-primary">formula docs</a>.
     </p>
 
     <h2 class="text-2xl font-bold mt-8">Integrated 3D</h2>
     <p>
       Switch between 2D, 3D, or split view. Pieces drape on a measurement-driven avatar with
       GPU cloth simulation — details on the
-      <a href="/software/3d" class="link link-primary">3D simulation page</a>.
+      <a href="{base}/software/3d" class="link link-primary">3D simulation page</a>.
     </p>
 
     <h2 class="text-2xl font-bold mt-8">Local-first by design</h2>
@@ -47,7 +48,7 @@
   </div>
 
   <div class="mt-10 text-center">
-    <a href="/studio" class="btn btn-accent btn-lg">Open Studio</a>
-    <a href="/docs" class="btn btn-outline btn-lg ml-2">Read the Docs</a>
+    <a href="{base}/studio" class="btn btn-accent btn-lg">Open Studio</a>
+    <a href="{base}/docs" class="btn btn-outline btn-lg ml-2">Read the Docs</a>
   </div>
 </div>

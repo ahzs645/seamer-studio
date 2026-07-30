@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
 </script>
 
 <svelte:head>
@@ -13,14 +14,14 @@
         Fit your patterns to a real body, not a standard size chart. Seamer reconstructs an
         accurate 3D avatar from the measurements you actually have — and fills in the rest.
       </p>
-      <a href="/studio" class="btn btn-accent btn-lg">Build Your Body Double</a>
+      <a href="{base}/studio" class="btn btn-accent btn-lg">Build Your Body Double</a>
     </div>
   </div>
 </div>
 
 <div class="px-4 py-8 max-w-4xl mx-auto">
   <img
-    src="/images/bodydbl.jpg"
+    src="{base}/images/bodydbl.jpg"
     alt="Seamer body double avatar built from body measurements"
     class="rounded-lg shadow-md w-full mb-8"
   />
@@ -60,7 +61,7 @@
   </div>
 
   <div class="mt-10 text-center">
-    <a href="/studio" class="btn btn-accent btn-lg">Open Studio</a>
-    <a href="/software/3d" class="btn btn-outline btn-lg ml-2">About 3D Simulation</a>
+    <a href="{base}/studio" class="btn btn-accent btn-lg">Open Studio</a>
+    <a href="{base}/software/3d" class="btn btn-outline btn-lg ml-2">About 3D Simulation</a>
   </div>
 </div>

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
 </script>
 
 <svelte:head>
@@ -57,9 +58,9 @@
 
     <h2 class="text-2xl font-bold mt-8">See also</h2>
     <ul class="list-disc pl-6 space-y-1">
-      <li><a href="/docs/drawing/formulas" class="link link-primary">Formula syntax</a></li>
-      <li><a href="/docs/drawing/variables" class="link link-primary">Variables</a></li>
-      <li><a href="/docs/elements/points" class="link link-primary">Points</a></li>
+      <li><a href="{base}/docs/drawing/formulas" class="link link-primary">Formula syntax</a></li>
+      <li><a href="{base}/docs/drawing/variables" class="link link-primary">Variables</a></li>
+      <li><a href="{base}/docs/elements/points" class="link link-primary">Points</a></li>
     </ul>
   </div>
 </div>

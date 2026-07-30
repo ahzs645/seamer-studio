@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base as pathsBase } from '$app/paths';
   import { onMount, untrack } from 'svelte';
   import type { Editor } from '@atelier/core';
   import { editorState } from '@atelier/svelte';
@@ -365,8 +366,8 @@
       img.src = url; // user-supplied image
     } else {
       // bundled media URLs are served from a local copy by basename
-      const base = url.split('/').pop()?.split('?')[0] ?? '';
-      img.src = `/textures/${base}`;
+      const file = url.split('/').pop()?.split('?')[0] ?? '';
+      img.src = `${pathsBase}/textures/${file}`;
     }
     texImages.set(url, img);
     return null;

@@ -1,14 +1,15 @@
 <script lang="ts">
+  import { base } from '$app/paths';
   import { page } from '$app/stores';
 
   const navLinks = [
-    { href: '/', label: 'Home' },
-    { href: '/software', label: 'Software' },
-    { href: '/docs', label: 'Docs' },
-    { href: '/pricing', label: 'Pricing' },
-    { href: '/faq', label: 'FAQ' },
-    { href: '/support-seamer', label: 'Support Us' },
-    { href: '/about', label: 'About' }
+    { href: `${base}/`, label: 'Home' },
+    { href: `${base}/software`, label: 'Software' },
+    { href: `${base}/docs`, label: 'Docs' },
+    { href: `${base}/pricing`, label: 'Pricing' },
+    { href: `${base}/faq`, label: 'FAQ' },
+    { href: `${base}/support-seamer`, label: 'Support Us' },
+    { href: `${base}/about`, label: 'About' }
   ];
 
   let mobileMenuOpen = $state(false);
@@ -38,7 +39,7 @@
     </div>
 
     <div class="flex-1 lg:flex-initial text-center lg:text-left flex items-center">
-      <a href="/" class="btn btn-ghost text-xl logo">
+      <a href="{base}/" class="btn btn-ghost text-xl logo">
         <span class="font-lexend font-semibold text-lg">Seamer</span>
       </a>
     </div>
@@ -54,7 +55,7 @@
     </div>
 
     <div class="flex-initial flex items-center gap-2 pr-2">
-      <a href="/studio" class="btn btn-accent btn-sm">Open Studio</a>
+      <a href="{base}/studio" class="btn btn-accent btn-sm">Open Studio</a>
     </div>
   </div>
 </div>

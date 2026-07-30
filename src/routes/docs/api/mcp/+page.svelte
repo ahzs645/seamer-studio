@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
   const createExample = `# 1. In the studio, enable "MCP session" (Connect menu) — or create a session yourself:
 curl -X POST http://localhost:5173/api/mcp-session
 # -> { "id": "f3c1…" }   (HTTP 201)`;
@@ -107,8 +108,8 @@ curl -X DELETE http://localhost:5173/api/mcp-session/<id>
     </ul>
 
     <p class="mt-6">
-      See also: <a href="/connect" class="link link-primary">Connect</a> for the studio-side setup,
-      and <a href="/docs/api" class="link link-primary">the API overview</a>.
+      See also: <a href="{base}/connect" class="link link-primary">Connect</a> for the studio-side setup,
+      and <a href="{base}/docs/api" class="link link-primary">the API overview</a>.
     </p>
   </div>
 </div>

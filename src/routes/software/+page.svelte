@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
 </script>
 
 <div class="px-4 py-8 max-w-4xl mx-auto">
@@ -10,7 +11,7 @@
     </p>
     <h2 class="text-2xl font-bold mt-8">Getting Started</h2>
     <ol class="list-decimal pl-6 space-y-2">
-      <li>Click <a href="/studio" class="link link-primary">Open Studio</a> to launch the pattern editor.</li>
+      <li>Click <a href="{base}/studio" class="link link-primary">Open Studio</a> to launch the pattern editor.</li>
       <li>Use the Point tool to place pattern vertices on the canvas.</li>
       <li>Use the Path tool to connect points into pattern edges.</li>
       <li>Create Pieces from your points and paths to define fabric panels.</li>
@@ -22,11 +23,11 @@
 
     <h2 class="text-2xl font-bold mt-8">Learn More</h2>
     <ul class="list-disc pl-6 space-y-2">
-      <li><a href="/software/studio" class="link link-primary">Pattern Studio</a> — the drafting environment in depth</li>
-      <li><a href="/software/3d" class="link link-primary">3D Simulation</a> — draping patterns on a measurement-driven avatar</li>
-      <li><a href="/software/cutting" class="link link-primary">Cutting Features</a> — seam allowances, notches, markers, and export</li>
-      <li><a href="/software/naas" class="link link-primary">Nesting</a> — local marker nesting, no cloud service required</li>
-      <li><a href="/software/comparison" class="link link-primary">Comparison</a> — how Seamer stacks up against other pattern CAD</li>
+      <li><a href="{base}/software/studio" class="link link-primary">Pattern Studio</a> — the drafting environment in depth</li>
+      <li><a href="{base}/software/3d" class="link link-primary">3D Simulation</a> — draping patterns on a measurement-driven avatar</li>
+      <li><a href="{base}/software/cutting" class="link link-primary">Cutting Features</a> — seam allowances, notches, markers, and export</li>
+      <li><a href="{base}/software/naas" class="link link-primary">Nesting</a> — local marker nesting, no cloud service required</li>
+      <li><a href="{base}/software/comparison" class="link link-primary">Comparison</a> — how Seamer stacks up against other pattern CAD</li>
     </ul>
   </div>
 </div>

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
   // Non-blocking review prompt. After a few successful saves in a session (saveCount prop), checks
   // /api/reviews/prompt-state; if the user never dismissed or reviewed, a small corner card asks
   // "Enjoying Seamer?". The outcome is POSTed back and mirrored in localStorage
@@ -22,7 +23,7 @@
   async function maybeShow() {
     try { if (localStorage.getItem(DONE_KEY)) return; } catch { /* storage unavailable */ }
     try {
-      const res = await fetch('/api/reviews/prompt-state');
+      const res = await fetch(`${base}/api/reviews/prompt-state`);
       if (!res.ok) return;
       const state = await res.json();
       if (state.dismissedAt || state.reviewedAt) {
@@ -37,7 +38,7 @@
     open = false;
     try { localStorage.setItem(DONE_KEY, '1'); } catch { /* ignore */ }
     try {
-      await fetch('/api/reviews/prompt-state', {
+      await fetch(`${base}/api/reviews/prompt-state`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ [outcome]: new Date().toISOString() })
@@ -61,7 +62,7 @@
       If Pattern Studio is useful to you, a review or a star helps a lot.
     </p>
     <div class="flex items-center gap-2">
-      <a class="btn btn-primary btn-xs" href="/support-seamer" target="_blank" rel="noopener" onclick={() => settle('reviewedAt')}>
+      <a class="btn btn-primary btn-xs" href="{base}/support-seamer" target="_blank" rel="noopener" onclick={() => settle('reviewedAt')}>
         Leave a review
       </a>
       <button class="btn btn-ghost btn-xs" onclick={maybeLater}>Maybe later</button>

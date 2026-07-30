@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
   // Mirrors the studio's built-in template library (static/templates/*.json), plus the user's own
   // saved templates from the template editor.
   import { BUILTIN_TEMPLATES } from '$lib/data/templates';
@@ -13,10 +14,10 @@
   <h1 class="text-3xl font-bold font-lexend mb-6">Built-in Pattern Templates</h1>
   <p class="text-lg mb-8 max-w-3xl">
     Every Seamer install ships with these templates — open the
-    <a href="/studio" class="link link-primary">studio</a> and pick one from the new-pattern
+    <a href="{base}/studio" class="link link-primary">studio</a> and pick one from the new-pattern
     dialog, download the raw JSON and inspect it in the
-    <a href="/pattern-viewer" class="link link-primary">pattern viewer</a>, or tweak one in the
-    <a href="/flow/templates/edit" class="link link-primary">template editor</a>.
+    <a href="{base}/pattern-viewer" class="link link-primary">pattern viewer</a>, or tweak one in the
+    <a href="{base}/flow/templates/edit" class="link link-primary">template editor</a>.
   </p>
 
   {#if $customTemplates.length}
@@ -29,7 +30,7 @@
             <p class="text-sm opacity-70">{tpl.description || 'Saved from the template editor'}</p>
             <div class="card-actions justify-end mt-2">
               <button class="btn btn-sm btn-ghost text-error" onclick={() => removeCustomTemplate(tpl.slug)}>Delete</button>
-              <a href="/flow/templates/edit/{tpl.slug}" class="btn btn-sm btn-accent">Edit</a>
+              <a href="{base}/flow/templates/edit/{tpl.slug}" class="btn btn-sm btn-accent">Edit</a>
             </div>
           </div>
         </div>
@@ -45,9 +46,9 @@
           <h2 class="card-title text-lg">{tpl.name}</h2>
           <p class="text-sm opacity-70">{tpl.description}</p>
           <div class="card-actions justify-end mt-2">
-            <a href="/templates/{tpl.file}" class="btn btn-sm btn-ghost" download>JSON</a>
-            <a href="/flow/templates/edit/{tpl.slug}" class="btn btn-sm btn-ghost">Edit</a>
-            <a href="/studio" class="btn btn-sm btn-accent">Open Studio</a>
+            <a href="{base}/templates/{tpl.file}" class="btn btn-sm btn-ghost" download>JSON</a>
+            <a href="{base}/flow/templates/edit/{tpl.slug}" class="btn btn-sm btn-ghost">Edit</a>
+            <a href="{base}/studio" class="btn btn-sm btn-accent">Open Studio</a>
           </div>
         </div>
       </div>

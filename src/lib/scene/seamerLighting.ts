@@ -2,6 +2,7 @@
 // direct-light lifecycles, HDRI loading, PMREM conversion, URL caching, and environment disposal.
 
 import * as THREE from 'three';
+import { base } from '$app/paths';
 import {
   ResourceScope,
   type DirectionalLightSpec,
@@ -10,9 +11,9 @@ import {
 import { isDarkTheme, onThemeChange } from '$lib/utils/theme';
 
 const HDRI: Readonly<Record<string, string>> = {
-  studio1: '/3d/hdri/photo_studio_london_hall_1k.hdr',
-  studio2: '/3d/hdri/studio_small_08_1k.hdr',
-  sunset: '/3d/hdri/cedar_bridge_sunset_1_1k.hdr'
+  studio1: `${base}/3d/hdri/photo_studio_london_hall_1k.hdr`,
+  studio2: `${base}/3d/hdri/studio_small_08_1k.hdr`,
+  sunset: `${base}/3d/hdri/cedar_bridge_sunset_1_1k.hdr`
 };
 
 const ENV_RIGS: Readonly<Record<string, readonly DirectionalLightSpec[]>> = {

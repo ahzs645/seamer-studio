@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
 </script>
 
 <svelte:head>
@@ -34,12 +35,12 @@
     <h2 class="text-2xl font-bold mt-8">Straight to the cutter</h2>
     <p>
       Finished markers export as HPGL, PDF, DXF, or SVG. See
-      <a href="/software/cutting" class="link link-primary">cutting features</a> and the
-      <a href="/cutting" class="link link-primary">Cutting Room</a> overview.
+      <a href="{base}/software/cutting" class="link link-primary">cutting features</a> and the
+      <a href="{base}/cutting" class="link link-primary">Cutting Room</a> overview.
     </p>
   </div>
 
   <div class="mt-10 text-center">
-    <a href="/studio" class="btn btn-accent btn-lg">Open Studio</a>
+    <a href="{base}/studio" class="btn btn-accent btn-lg">Open Studio</a>
   </div>
 </div>

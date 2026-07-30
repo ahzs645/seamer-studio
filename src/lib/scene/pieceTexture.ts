@@ -5,6 +5,7 @@
 // texture's offset/repeat map mm → 0..1 so the same geometry UVs sample it correctly.
 
 import * as THREE from 'three';
+import { base as pathsBase } from '$app/paths';
 import type { TextureSlot, Vec2 } from '@seamer/pattern-model';
 
 export interface PieceBake {
@@ -38,9 +39,12 @@ export function pieceNeedsBake(bake: Pick<PieceBake, 'slot' | 'internalPolys'>):
 /** Resolve a media URL the way the 2D canvas does: data/blob pass through, remote media is served
  *  from a local copy by basename under /textures. */
 function resolveTextureUrl(url: string): string {
-  if (url.startsWith('data:') || url.startsWith('blob:') || url.startsWith('/')) return url;
+  if (url.startsWith('data:') || url.startsWith('blob:')) return url;
+  if (url.startsWith('/')) {
+    return pathsBase && !url.startsWith(`${pathsBase}/`) ? `${pathsBase}${url}` : url;
+  }
   const base = url.split('/').pop()?.split('?')[0] ?? '';
-  return `/textures/${base}`;
+  return `${pathsBase}/textures/${base}`;
 }
 
 function drawBake(canvas: HTMLCanvasElement, bake: PieceBake, image: HTMLImageElement | null): void {

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
   import type { PatternSummary } from '@seamer/pattern-model';
   import { onMount } from 'svelte';
   import { listPatterns } from '$lib/stores/localDB';
@@ -37,8 +38,8 @@
         with precision, visualize in 3D on customizable avatars, and share with your team.
       </p>
       <div class="flex gap-4 justify-center">
-        <a href="/studio" class="btn btn-accent btn-lg">Open Studio</a>
-        <a href="/software" class="btn btn-outline btn-lg">Learn More</a>
+        <a href="{base}/studio" class="btn btn-accent btn-lg">Open Studio</a>
+        <a href="{base}/software" class="btn btn-outline btn-lg">Learn More</a>
       </div>
     </div>
   </div>
@@ -54,7 +55,7 @@
   {:else if patterns.length === 0}
     <div class="text-center py-12 bg-base-200 rounded-lg">
       <p class="text-lg opacity-70">No patterns yet. Start creating!</p>
-      <a href="/studio" class="btn btn-accent mt-4">Create New Pattern</a>
+      <a href="{base}/studio" class="btn btn-accent mt-4">Create New Pattern</a>
     </div>
   {:else}
     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -69,7 +70,7 @@
             <h3 class="card-title text-lg">{p.name}</h3>
             <p class="text-sm opacity-70">{p.description || 'No description'}</p>
             <div class="card-actions justify-end mt-2">
-              <a href="/studio/{p.id}" class="btn btn-sm btn-accent">Open</a>
+              <a href="{base}/studio/{p.id}" class="btn btn-sm btn-accent">Open</a>
             </div>
           </div>
         </div>

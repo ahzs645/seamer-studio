@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
 </script>
 
 <svelte:head>
@@ -35,7 +36,7 @@
       the position from formulas and <code>x</code>/<code>y</code> hold the solved result
       (cached for fast rendering). The five constraint types — offset, length/angle, sliding,
       mirror, intersection — are documented in
-      <a href="/docs/drawing/constraints" class="link link-primary">Constraints</a>.
+      <a href="{base}/docs/drawing/constraints" class="link link-primary">Constraints</a>.
     </p>
 
     <h2 class="text-2xl font-bold mt-8">Special point roles</h2>

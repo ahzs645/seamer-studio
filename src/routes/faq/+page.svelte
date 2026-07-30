@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
   const faqs: { q: string; a: string }[] = [
     {
       q: 'What is Seamer?',
@@ -51,7 +52,7 @@
   <h1 class="text-3xl font-bold font-lexend mb-6">Frequently Asked Questions</h1>
   <p class="text-lg mb-8">
     Common questions about the Seamer pattern studio. Can't find what you need?
-    Check the <a href="/docs" class="link link-primary">documentation</a>.
+    Check the <a href="{base}/docs" class="link link-primary">documentation</a>.
   </p>
 
   <div class="space-y-3">
@@ -67,6 +68,6 @@
   </div>
 
   <div class="mt-10 text-center">
-    <a href="/studio" class="btn btn-accent">Open Studio</a>
+    <a href="{base}/studio" class="btn btn-accent">Open Studio</a>
   </div>
 </div>

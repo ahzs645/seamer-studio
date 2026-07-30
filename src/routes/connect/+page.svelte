@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
   // curl example for the MCP session section — kept as a string so the template stays brace-free.
   const mcpCurlExample = `curl http://localhost:5173/api/mcp-session/<id>
 curl -X POST http://localhost:5173/api/mcp-session/<id>/ops \\
@@ -24,7 +25,7 @@ curl -X POST http://localhost:5173/api/mcp-session/<id>/ops \\
       to drive pen plotters and CNC fabric cutters, or as <strong>DXF</strong> for cutter
       software that prefers CAD exchange formats. Notches, drill holes, and grain lines are
       included in the cut output. See the
-      <a href="/cutting" class="link link-primary">Cutting Room</a> for the full pipeline.
+      <a href="{base}/cutting" class="link link-primary">Cutting Room</a> for the full pipeline.
     </p>
 
     <h2 class="text-2xl font-bold mt-8">File exchange</h2>
@@ -39,7 +40,7 @@ curl -X POST http://localhost:5173/api/mcp-session/<id>/ops \\
       A REST-style API is available at <code>/api/patterns</code> for listing, reading, and
       writing patterns programmatically — useful for batch processing, backups, and
       integrating Seamer into a wider production system. See the
-      <a href="/docs" class="link link-primary">documentation</a> for the endpoint reference.
+      <a href="{base}/docs" class="link link-primary">documentation</a> for the endpoint reference.
     </p>
 
     <h2 class="text-2xl font-bold mt-8">MCP session</h2>
@@ -63,7 +64,7 @@ curl -X POST http://localhost:5173/api/mcp-session/<id>/ops \\
     <p>
       Changes appear in the studio within a sync cycle and land in the undo history as
       "External edit". Sessions are in-memory, local-first, and expire after 30 minutes of inactivity.
-      Full endpoint + command reference: <a href="/docs/api/mcp" class="link link-primary">MCP Session API docs</a>.
+      Full endpoint + command reference: <a href="{base}/docs/api/mcp" class="link link-primary">MCP Session API docs</a>.
     </p>
   </div>
 </div>

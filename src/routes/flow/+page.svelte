@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
   const steps = [
     {
       title: '1. Draft',
@@ -52,13 +53,13 @@
     <h2 class="text-2xl font-bold mt-8">Start from a template</h2>
     <p>
       Don't draft from scratch — Seamer ships with a library of
-      <a href="/flow/templates" class="link link-primary">built-in pattern templates</a>:
+      <a href="{base}/flow/templates" class="link link-primary">built-in pattern templates</a>:
       skirt blocks, shirts, trousers, dresses, and more.
     </p>
   </div>
 
   <div class="mt-10 text-center">
-    <a href="/studio" class="btn btn-accent btn-lg">Open Studio</a>
-    <a href="/flow/templates" class="btn btn-outline btn-lg ml-2">Browse Templates</a>
+    <a href="{base}/studio" class="btn btn-accent btn-lg">Open Studio</a>
+    <a href="{base}/flow/templates" class="btn btn-outline btn-lg ml-2">Browse Templates</a>
   </div>
 </div>

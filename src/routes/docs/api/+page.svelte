@@ -1,3 +1,7 @@
+<script lang="ts">
+  import { base } from '$app/paths';
+</script>
+
 <svelte:head>
   <title>API — Seamer Docs</title>
 </svelte:head>
@@ -23,7 +27,7 @@
     </ul>
     <p>
       Patterns use the <code>.seamer.json</code> format described in the
-      <a href="/docs" class="link link-primary">documentation overview</a>.
+      <a href="{base}/docs" class="link link-primary">documentation overview</a>.
     </p>
 
     <h2 class="text-2xl font-bold mt-6">MCP session API</h2>
@@ -32,7 +36,7 @@
       create a session, read the studio's live pattern, and queue edits or commands that the studio
       applies through its undo-aware update path.
     </p>
-    <p><a href="/docs/api/mcp" class="link link-primary">Full MCP session API reference →</a></p>
+    <p><a href="{base}/docs/api/mcp" class="link link-primary">Full MCP session API reference →</a></p>
 
     <h2 class="text-2xl font-bold mt-6">Misc endpoints</h2>
     <ul class="list-disc pl-6 space-y-2">

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
 </script>
 
 <svelte:head>
@@ -41,7 +42,7 @@
     <p>
       A path can carry sliding points — points positioned along its arc length by a formula
       or fraction. They re-place automatically when the path's shape changes. See
-      <a href="/docs/elements/points" class="link link-primary">Points</a>.
+      <a href="{base}/docs/elements/points" class="link link-primary">Points</a>.
     </p>
 
     <h2 class="text-2xl font-bold mt-8">Paths in pieces</h2>
