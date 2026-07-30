@@ -413,14 +413,16 @@ export function buildSimData(pattern: Pattern, arranged: ArrangedPiece[], option
     return len;
   };
 
-  // Seam pairing, matching the original: both edges are resampled to an EQUAL particle count and
-  // linked index-to-index (fromParticles[k] <-> toParticles[k]). Our ordered chains come from the
-  // piece boundary (edgeParticles preserves PiecePath direction) with SeamRef.reversed applied by
-  // chain(), so when the seam data carries explicit orientation (any ref with reversed=true) we
-  // trust it and link forward, exactly like the original. The repo's seam editors/importers however
-  // create every ref with reversed:false unconditionally — that data genuinely lacks orientation —
-  // so as a FALLBACK we auto-detect direction: in the cached drape sewn edges are coincident, so
-  // the correct alignment (forward vs reversed) is the one with the smaller total paired distance.
+  // Seam pairing, matching the original: both edges target an equal INTERVAL count, then link
+  // index-to-index. Disconnected composite runs retain extra endpoint particles, so the proportional
+  // sampling below repeats particles on the connected side to distribute their ease/gather. Our
+  // ordered chains come from the piece boundary (edgeParticles preserves PiecePath direction) with
+  // SeamRef.reversed applied by chain(), so when the seam data carries explicit orientation (any ref
+  // with reversed=true) we trust it and link forward, exactly like the original. The repo's seam
+  // editors/importers however create every ref with reversed:false unconditionally — that data
+  // genuinely lacks orientation — so as a FALLBACK we auto-detect direction: in the cached drape
+  // sewn edges are coincident, so the correct alignment (forward vs reversed) is the one with the
+  // smaller total paired distance.
   const sampleIdx = (len: number, n: number, k: number) => (len <= 1 ? 0 : Math.round((k * (len - 1)) / (n - 1)));
   const seamPairsBySeam: { seamId: string; index: number; pairs: number[] }[] = [];
   for (const seam of pattern.seams) {

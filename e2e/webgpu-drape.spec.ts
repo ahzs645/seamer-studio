@@ -16,6 +16,7 @@ interface DrapeDebugState {
 	positionsFinite: boolean;
 	particleBounds: DrapeDebugBounds | null;
 	avatarBounds: DrapeDebugBounds | null;
+	waistbandMaxSeamPairDistanceMm: number | null;
 }
 
 interface DrapeDebugApi {
@@ -113,6 +114,14 @@ test('runs the default cloth drape on WebGPU and updates particle positions', as
 		.not.toBe(baseline.positionHash);
 	expect(finalState.positionsFinite).toBe(true);
 	expect(finalState.deviceLostReason).toBeNull();
+	expect(
+		finalState.waistbandMaxSeamPairDistanceMm,
+		'waistband attachment seam distances were not exposed'
+	).not.toBeNull();
+	expect(
+		finalState.waistbandMaxSeamPairDistanceMm!,
+		'waistband remained detached from the skirt after five seconds'
+	).toBeLessThan(30);
 	expect(finalState.particleBounds, 'live particle bounds were not exposed').not.toBeNull();
 	expect(finalState.avatarBounds, 'avatar bounds were not exposed').not.toBeNull();
 	if (!finalState.particleBounds || !finalState.avatarBounds) {

@@ -15,12 +15,75 @@ import {
   type BaseModel,
   type GenderModel
 } from '@seamer/avatar';
-import type { Pattern } from '@seamer/pattern-model';
+import type { Pattern, SeamRef } from '@seamer/pattern-model';
+import {
+  indexPaths,
+  indexPoints,
+  piecePathPolyline,
+  type Vec2
+} from '@seamer/pattern-model/utils/patternGeometry';
 import pencilSkirt from '../../../../static/templates/pencil-skirt.json';
 import { buildPieceCloth, computeSeamEdgeIntervals } from './boundary';
-import { buildSimData, type ArrangedPiece } from '../build';
+import { buildSimData, type ArrangedPiece, type SimData } from '../build';
 import { fromArrangement, prepareCloth } from '../simulator';
 import { buildCylinders } from './cylinders';
+import { arrangeParticles } from './arrangement';
+
+/** Independent oracle port of seamer/src/lib/geometry/boundary.ts::computeSeamEdgeIntervals. */
+function legacySeamEdgeIntervals(pattern: Pattern): Map<string, number> {
+  const paths = indexPaths(pattern);
+  const points = indexPoints(pattern);
+  const out = new Map<string, number>();
+  const length = (poly: Vec2[]): number => {
+    let total = 0;
+    for (let index = 1; index < poly.length; index++) {
+      total += Math.hypot(poly[index].x - poly[index - 1].x, poly[index].y - poly[index - 1].y);
+    }
+    return total;
+  };
+  const info = new Map<string, { len: number; pd: number }>();
+  for (const piece of pattern.pieces) {
+    const pd = piece.settings3d.particleDistance ?? 14;
+    for (const path of [...piece.mainPaths, ...piece.internalPaths]) {
+      const poly = piecePathPolyline(path, paths, points, Math.min(4, pd / 2));
+      if (poly.length >= 2) info.set(path.id, { len: length(poly), pd });
+    }
+  }
+  for (const seam of pattern.seams) {
+    const side = (refs: { id: string }[]) => {
+      const items = refs
+        .map((ref) => info.get(ref.id))
+        .filter((item): item is { len: number; pd: number } => !!item);
+      return {
+        items,
+        refs: refs.filter((ref) => info.has(ref.id)),
+        natural: items.reduce((sum, item) => sum + Math.max(1, Math.round(item.len / item.pd)), 0)
+      };
+    };
+    const from = side(seam.fromPaths);
+    const to = side(seam.toPaths);
+    if (!from.items.length || !to.items.length) continue;
+    const count = Math.max(from.natural, to.natural);
+    const distribute = (value: typeof from) => {
+      const totalLength = value.items.reduce((sum, item) => sum + item.len, 0) || 1;
+      const raw = value.items.map((item) => (count * item.len) / totalLength);
+      const base = raw.map((item) => Math.max(1, Math.floor(item)));
+      let remainder = count - base.reduce((sum, item) => sum + item, 0);
+      const order = raw
+        .map((item, index) => ({ index, fraction: item - Math.floor(item) }))
+        .sort((a, b) => b.fraction - a.fraction);
+      for (let index = 0; remainder > 0 && index < order.length; index++, remainder--) {
+        base[order[index].index]++;
+      }
+      value.refs.forEach((ref, index) =>
+        out.set(ref.id, Math.max(out.get(ref.id) ?? 0, base[index]))
+      );
+    };
+    distribute(from);
+    distribute(to);
+  }
+  return out;
+}
 
 function readArrayBuffer(url: URL): ArrayBuffer {
   return Uint8Array.from(readFileSync(url)).buffer;
@@ -135,6 +198,62 @@ function stretchRatios(prepared: NonNullable<ReturnType<typeof prepareCloth>>): 
   return { minimum, maximum, meanAbsoluteError: error / count, collapsed };
 }
 
+function buildArrangedPieces(
+  pattern: Pattern,
+  cylinders: ReturnType<typeof buildCylinders>,
+  intervals: Map<string, number>
+): ArrangedPiece[] {
+  const arranged: ArrangedPiece[] = [];
+  for (const piece of pattern.pieces) {
+    const cloth = buildPieceCloth(pattern, piece, undefined, intervals);
+    if (!cloth) continue;
+    const positions3d = arrangeParticles(
+      cloth.mesh.points,
+      piece.settings3d.arrangement,
+      cylinders.get(piece.settings3d.arrangement.cylinderName) ?? null,
+      { flipNormals: piece.settings3d.flipNormals }
+    );
+    arranged.push({ cloth, positions3d, arranged3d: positions3d, frozen: false, fromSaved: false });
+  }
+  return arranged;
+}
+
+function seamChain(pattern: Pattern, simData: SimData, refs: SeamRef[]): number[] {
+  const chain: number[] = [];
+  for (const ref of refs) {
+    const piece = pattern.pieces.find((candidate) =>
+      [...candidate.mainPaths, ...candidate.internalPaths].some((path) => path.id === ref.id)
+    );
+    const run = piece
+      ? simData.edgeRuns.get(`${piece.id}::${ref.id}${ref.mirrored ? '#M' : ''}`)
+      : undefined;
+    expect(run, `missing edge run for ${ref.id}${ref.mirrored ? '#M' : ''}`).toBeDefined();
+    if (!run) continue;
+    const oriented = ref.reversed ? run.slice().reverse() : run;
+    for (const particle of oriented) {
+      if (chain.at(-1) !== particle) chain.push(particle);
+    }
+  }
+  return chain;
+}
+
+function orientedRefEndpoints(pattern: Pattern, simData: SimData, refs: SeamRef[]): number[] {
+  const endpoints: number[] = [];
+  for (const ref of refs) {
+    const piece = pattern.pieces.find((candidate) =>
+      [...candidate.mainPaths, ...candidate.internalPaths].some((path) => path.id === ref.id)
+    );
+    const run = piece
+      ? simData.edgeRuns.get(`${piece.id}::${ref.id}${ref.mirrored ? '#M' : ''}`)
+      : undefined;
+    expect(run, `missing edge run for ${ref.id}${ref.mirrored ? '#M' : ''}`).toBeDefined();
+    if (!run?.length) continue;
+    endpoints.push(ref.reversed ? run.at(-1)! : run[0]);
+    endpoints.push(ref.reversed ? run[0] : run.at(-1)!);
+  }
+  return endpoints;
+}
+
 describe('mirrored half-piece seam sampling', () => {
   it('keeps reflected seam runs equal in particle count and rest length', () => {
     const pattern = structuredClone(pencilSkirt) as unknown as Pattern;
@@ -166,32 +285,35 @@ describe('mirrored half-piece seam sampling', () => {
     expect(compared).toBeGreaterThan(0);
   });
 
-  it('builds the default template without seam count or length mismatch warnings', () => {
+  it('matches legacy composite interval allocation and keeps its waistband ease pairs', () => {
     const pattern = structuredClone(pencilSkirt) as unknown as Pattern;
     const intervals = computeSeamEdgeIntervals(pattern);
-    const arranged: ArrangedPiece[] = [];
-    for (const piece of pattern.pieces) {
-      const cloth = buildPieceCloth(pattern, piece, undefined, intervals);
-      if (!cloth) continue;
-      const positions3d = new Float32Array(cloth.mesh.points.length * 3);
-      cloth.mesh.points.forEach((point, index) => {
-        positions3d[index * 3] = point.x / 1000;
-        positions3d[index * 3 + 1] = point.y / 1000;
-      });
-      arranged.push({
-        cloth,
-        positions3d,
-        frozen: false,
-        fromSaved: false
-      });
-    }
+    expect([...intervals]).toEqual([...legacySeamEdgeIntervals(pattern)]);
+    expect(intervals.get('PiecePath_fbyxnjx0s')).toBe(5);
+    expect(intervals.get('PiecePath_hnhr6x036')).toBe(5);
+
+    const arranged = buildArrangedPieces(pattern, new Map(), intervals);
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     try {
-      buildSimData(pattern, arranged);
+      const simData = buildSimData(pattern, arranged);
       const mismatches = warn.mock.calls
         .map(([message]) => String(message))
         .filter((message) => /Seam (?:particle count|length) mismatch/.test(message));
-      expect(mismatches).toEqual([]);
+      expect(mismatches).toEqual([
+        'Seam particle count mismatch (Seam_uzave2eyv): 33 vs 35 — fallback proportional sampling applied',
+        'Seam particle count mismatch (Seam_sibuwpf53): 33 vs 35 — fallback proportional sampling applied'
+      ]);
+
+      for (const seamId of ['Seam_uzave2eyv', 'Seam_sibuwpf53']) {
+        const pairs = simData.seamPairsBySeam.find((candidate) => candidate.seamId === seamId)?.pairs;
+        expect(pairs, `missing composite pairs for ${seamId}`).toBeDefined();
+        if (!pairs) continue;
+        const repeatedConnectedSide: number[] = [];
+        for (let index = 2; index < pairs.length; index += 2) {
+          if (pairs[index] === pairs[index - 2]) repeatedConnectedSide.push(index / 2);
+        }
+        expect(repeatedConnectedSide).toEqual([9, 26]);
+      }
     } finally {
       warn.mockRestore();
     }
@@ -261,5 +383,69 @@ describe('mirrored half-piece seam sampling', () => {
     expect(stretch.minimum).toBeGreaterThan(0.9);
     expect(stretch.maximum).toBeLessThan(1.12);
     expect(stretch.meanAbsoluteError).toBeLessThan(0.03);
+  });
+
+  it('keeps every default live-arrangement seam monotone, endpoint-complete, and legacy-paired', () => {
+    const pattern = structuredClone(pencilSkirt) as unknown as Pattern;
+    const avatar = buildDefaultAvatar(pattern);
+    const prepared = prepareCloth({
+      pattern,
+      avatarVertices: avatar.positions,
+      avatarIndices: avatar.indices,
+      cylinders: avatar.cylinders
+    });
+    expect(prepared).not.toBeNull();
+    if (!prepared) return;
+    const live = fromArrangement(prepared);
+    const legacySimData = buildSimData(
+      pattern,
+      buildArrangedPieces(pattern, avatar.cylinders, legacySeamEdgeIntervals(pattern))
+    );
+
+    expect(live.simData.arrangedPositions).toEqual(legacySimData.arrangedPositions);
+    expect(live.simData.seamPairsBySeam.map(({ seamId, pairs }) => ({ seamId, pairs })))
+      .toEqual(legacySimData.seamPairsBySeam.map(({ seamId, pairs }) => ({ seamId, pairs })));
+    expect(live.simData.seamPairsBySeam).toHaveLength(pattern.seams.length);
+
+    for (const seamPairs of live.simData.seamPairsBySeam) {
+      const seam = pattern.seams[seamPairs.index];
+      const fromChain = seamChain(pattern, live.simData, seam.fromPaths);
+      const toChain = seamChain(pattern, live.simData, seam.toPaths);
+      const fromPaired = seamPairs.pairs.filter((_particle, index) => index % 2 === 0);
+      const toPaired = seamPairs.pairs.filter((_particle, index) => index % 2 === 1);
+
+      expect(fromPaired[0], `${seam.id} from start`).toBe(fromChain[0]);
+      expect(toPaired[0], `${seam.id} to start`).toBe(toChain[0]);
+      expect(fromPaired.at(-1), `${seam.id} from end`).toBe(fromChain.at(-1));
+      expect(toPaired.at(-1), `${seam.id} to end`).toBe(toChain.at(-1));
+
+      for (const endpoint of orientedRefEndpoints(pattern, live.simData, seam.fromPaths)) {
+        expect(fromPaired, `${seam.id} omitted a from run/dart endpoint`).toContain(endpoint);
+      }
+      for (const endpoint of orientedRefEndpoints(pattern, live.simData, seam.toPaths)) {
+        expect(toPaired, `${seam.id} omitted a to run/dart endpoint`).toContain(endpoint);
+      }
+
+      const assertMonotone = (chain: number[], paired: number[], label: string) => {
+        let previous = -1;
+        for (const particle of paired) {
+          const ordinal = chain.indexOf(particle, Math.max(0, previous));
+          expect(ordinal, `${seam.id} ${label} crossing at particle ${particle}`)
+            .toBeGreaterThanOrEqual(previous);
+          previous = ordinal;
+        }
+      };
+      assertMonotone(fromChain, fromPaired, 'from');
+      assertMonotone(toChain, toPaired, 'to');
+    }
+
+    const frontBand = pattern.pieces.find((piece) => piece.name === 'WaistbandFront')!;
+    const backBand = pattern.pieces.find((piece) => piece.name === 'WaistbandBack')!;
+    expect(frontBand.settings3d.arrangement.cylinderName).toBe('Torso');
+    expect(backBand.settings3d.arrangement.cylinderName).toBe('Torso');
+    expect(frontBand.settings3d.arrangement.uDegrees).toBe(0);
+    expect(backBand.settings3d.arrangement.uDegrees).toBe(180);
+    expect(frontBand.settings3d.flipNormals).toBe(false);
+    expect(backBand.settings3d.flipNormals).toBe(true);
   });
 });

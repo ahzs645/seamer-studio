@@ -55,6 +55,8 @@ export interface DrapeDebugState {
   positionsFinite: boolean;
   particleBounds: DrapeDebugBounds | null;
   avatarBounds: DrapeDebugBounds | null;
+  /** Maximum live distance across skirt-to-waistband seam constraints (millimetres). */
+  waistbandMaxSeamPairDistanceMm: number | null;
 }
 
 interface ClothMeshEntry {
@@ -1278,6 +1280,43 @@ export class PatternRenderer {
       }
       positionHash = (hash >>> 0).toString(16).padStart(8, '0');
     }
+    let waistbandMaxSeamPairDistanceMm: number | null = null;
+    if (positions && this.prepared && this.pattern) {
+      const waistbandPieceIds = new Set(
+        this.pattern.pieces
+          .filter((piece) => /waistband/i.test(piece.name))
+          .map((piece) => piece.id)
+      );
+      const pathOwner = new Map<string, string>();
+      for (const piece of this.pattern.pieces) {
+        for (const path of [...piece.mainPaths, ...piece.internalPaths]) {
+          pathOwner.set(path.id, piece.id);
+        }
+      }
+      for (const seamPairs of this.prepared.simData.seamPairsBySeam) {
+        const seam = this.pattern.seams[seamPairs.index];
+        if (!seam) continue;
+        const ownerIds = [...seam.fromPaths, ...seam.toPaths]
+          .map((ref) => pathOwner.get(ref.id))
+          .filter((id): id is string => !!id);
+        const isAttachment = ownerIds.some((id) => waistbandPieceIds.has(id))
+          && ownerIds.some((id) => !waistbandPieceIds.has(id));
+        if (!isAttachment) continue;
+        for (let index = 0; index < seamPairs.pairs.length; index += 2) {
+          const first = seamPairs.pairs[index] * 4;
+          const second = seamPairs.pairs[index + 1] * 4;
+          const distanceMm = Math.hypot(
+            positions[first] - positions[second],
+            positions[first + 1] - positions[second + 1],
+            positions[first + 2] - positions[second + 2]
+          ) * 1000;
+          waistbandMaxSeamPairDistanceMm = Math.max(
+            waistbandMaxSeamPairDistanceMm ?? 0,
+            distanceMm
+          );
+        }
+      }
+    }
     return {
       deviceAcquired: this.device !== null,
       deviceLostReason: this.deviceLostReason,
@@ -1287,7 +1326,8 @@ export class PatternRenderer {
       positionHash,
       positionsFinite,
       particleBounds: bounds(positions, 4),
-      avatarBounds: bounds(this.avatar?.vertexPositions ?? null, 3)
+      avatarBounds: bounds(this.avatar?.vertexPositions ?? null, 3),
+      waistbandMaxSeamPairDistanceMm
     };
   }
 
