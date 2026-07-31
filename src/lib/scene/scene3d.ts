@@ -55,6 +55,8 @@ export interface DrapeDebugState {
   positionsFinite: boolean;
   particleBounds: DrapeDebugBounds | null;
   avatarBounds: DrapeDebugBounds | null;
+  /** Maximum live distance across every explicit seam constraint (millimetres). */
+  maxSeamPairDistanceMm: number | null;
   /** Maximum live distance across skirt-to-waistband seam constraints (millimetres). */
   waistbandMaxSeamPairDistanceMm: number | null;
 }
@@ -1280,6 +1282,7 @@ export class PatternRenderer {
       }
       positionHash = (hash >>> 0).toString(16).padStart(8, '0');
     }
+    let maxSeamPairDistanceMm: number | null = null;
     let waistbandMaxSeamPairDistanceMm: number | null = null;
     if (positions && this.prepared && this.pattern) {
       const waistbandPieceIds = new Set(
@@ -1301,7 +1304,6 @@ export class PatternRenderer {
           .filter((id): id is string => !!id);
         const isAttachment = ownerIds.some((id) => waistbandPieceIds.has(id))
           && ownerIds.some((id) => !waistbandPieceIds.has(id));
-        if (!isAttachment) continue;
         for (let index = 0; index < seamPairs.pairs.length; index += 2) {
           const first = seamPairs.pairs[index] * 4;
           const second = seamPairs.pairs[index + 1] * 4;
@@ -1310,7 +1312,8 @@ export class PatternRenderer {
             positions[first + 1] - positions[second + 1],
             positions[first + 2] - positions[second + 2]
           ) * 1000;
-          waistbandMaxSeamPairDistanceMm = Math.max(
+          maxSeamPairDistanceMm = Math.max(maxSeamPairDistanceMm ?? 0, distanceMm);
+          if (isAttachment) waistbandMaxSeamPairDistanceMm = Math.max(
             waistbandMaxSeamPairDistanceMm ?? 0,
             distanceMm
           );
@@ -1327,6 +1330,7 @@ export class PatternRenderer {
       positionsFinite,
       particleBounds: bounds(positions, 4),
       avatarBounds: bounds(this.avatar?.vertexPositions ?? null, 3),
+      maxSeamPairDistanceMm,
       waistbandMaxSeamPairDistanceMm
     };
   }
@@ -1448,13 +1452,21 @@ export class PatternRenderer {
     this.simRunner?.start();
   }
 
-  stopSimulation() {
-    const wasUser = this.userSimulating;
+  /** Freeze the live solver exactly where it is without welding seams or writing a new saved drape. */
+  pauseSimulation() {
     this.simulating = false;
     this.simRunner?.stop();
     this.releaseSimulationLease?.();
     this.releaseSimulationLease = null;
     this.userSimulating = false;
+    if (this.pattern) this.onStatus('ready');
+    this.invalidate();
+  }
+
+  /** End and bake a simulation. Lifecycle/rebuild callers use this; the user-facing control pauses. */
+  stopSimulation() {
+    const wasUser = this.userSimulating;
+    this.pauseSimulation();
     if (wasUser) {
       // Weld settled seams (counterpart particles within 2 mm snap to their midpoint — the
       // original's snapSeamPointsToCounterparts) and grade the drape before baking it.
@@ -1465,7 +1477,6 @@ export class PatternRenderer {
         this.lastStretchError = this.computeStretchError(pos);
       }
     }
-    if (this.pattern) this.onStatus('ready');
     // Bake the settled drape so it can be persisted (re-open shows the new drape instantly, and
     // body re-fits chain off the latest result rather than the stale authored blob).
     if (wasUser) { try { this.onDrapeSettled(this.extractSavedPositions()); } catch { /* ignore */ } }
@@ -1555,14 +1566,19 @@ export class PatternRenderer {
     return out;
   }
 
-  /** Reset particles to the cached/settled drape. */
+  /** Discard the live state and restore the pre-drape cylinder arrangement. */
   resetSimulation() {
-    this.stopSimulation();
-    if (this.sim) { this.sim.resetToSaved(); this.applyClothPositions(this.sim.positions); }
-    else if (this.prepared) this.applyClothPositions(this.prepared.simData.positions);
+    this.pauseSimulation();
+    if (this.sim) {
+      this.sim.resetToArranged();
+      this.applyClothPositions(this.sim.positions);
+    } else if (this.prepared) {
+      this.applyClothPositions(this.prepared.simData.arrangedPositions);
+    }
+    this.invalidate();
   }
 
-  /** "Arrange" — return the garment to its settled drape on the body. */
+  /** "Arrange" — return the garment to its pre-drape placement on the body. */
   arrange() {
     this.resetSimulation();
   }

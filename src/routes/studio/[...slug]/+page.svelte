@@ -29,7 +29,7 @@
     type ConstrainablePath
   } from '@seamer/pattern-model';
   import type { PendingPaste } from '$lib/stores/pattern';
-  import { isSimpleFormat, convertSimplePattern } from '$lib/utils/importSimplePattern';
+  import { assertPatternBuildable3d, isSimpleFormat, convertSimplePattern } from '$lib/utils/importSimplePattern';
   import Toaster from '$lib/components/Toaster.svelte';
   import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
   import GradingOverlay from '$lib/components/GradingOverlay.svelte';
@@ -392,6 +392,9 @@
   }
 
   function applyImported(data: Pattern) {
+    // Build the candidate cloth topology before touching canonical editor state. A failed import
+    // therefore leaves both the 2D document and the renderer on the same last-valid pattern.
+    assertPatternBuildable3d(data);
     currentPattern = data; patternName = data.name; pattern.set(data); pushUndo(structuredClone(data), 'Import pattern'); saved = true;
     toastSuccess(`Imported "${data.name}"`);
   }

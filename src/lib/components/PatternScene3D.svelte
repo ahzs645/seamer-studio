@@ -18,6 +18,7 @@
   import { get } from 'svelte/store';
   import { downloadBlob, sceneToGLTF } from '$lib/utils/exporters';
   import { toast, toastError, toastSuccess } from '$lib/stores/toast';
+  import { confirm } from '$lib/stores/confirm';
 
   // lightweight FPS meter for the optional stats overlay (Settings → 3D stats)
   let fps = $state(0);
@@ -370,10 +371,26 @@
 
   function toggleSimulate() {
     if (!renderer) return;
-    if (status === 'simulating') renderer.stopSimulation();
-    else renderer.simulate();
+    if (status === 'simulating') renderer.pauseSimulation();
+    else if (status === 'ready') renderer.simulate();
   }
-  function reset() { renderer?.resetSimulation(); }
+  async function reset() {
+    if (!renderer || (status !== 'ready' && status !== 'simulating')) return;
+    const accepted = await confirm({
+      title: 'Reset all simulations?',
+      message: 'Are you sure you want to reset all simulations? This will discard all simulated positions.',
+      confirmLabel: 'Reset'
+    });
+    if (!accepted) return;
+    renderer.resetSimulation();
+    if (currentPattern.pieces.some((piece) => piece.settings3d.savedPositions.length > 0)) {
+      const pieces = currentPattern.pieces.map((piece) => ({
+        ...piece,
+        settings3d: { ...piece.settings3d, savedPositions: [] }
+      }));
+      onpatternupdate?.({ ...currentPattern, pieces, hasChanged: true }, 'Reset simulation');
+    }
+  }
   // arrangeKind is kept in sync by renderer.onModeChange, so these just toggle/switch the tool.
   function toggleArrangeMode() {
     if (!renderer) return;
@@ -487,10 +504,10 @@
 
   // Right-side 3D control rail — Material Symbols icons + hover-to-expand labels, mirroring the
   // original studio. `sep` inserts a spacer before the button; `shortcut` shows a kbd on hover.
-  interface Tool { label: string; icon: string; onClick: () => void; active?: () => boolean; sep?: boolean; shortcut?: string }
+  interface Tool { label: string; icon: string; onClick: () => void; active?: () => boolean; disabled?: () => boolean; sep?: boolean; shortcut?: string }
   const tools = $derived<Tool[]>([
-    { label: status === 'simulating' ? 'Stop simulation' : 'Start simulation', icon: status === 'simulating' ? 'stop' : 'play_arrow', onClick: toggleSimulate, active: () => status === 'simulating' },
-    { label: 'Reset simulation', icon: 'refresh', onClick: reset },
+    { label: status === 'simulating' ? 'Pause simulation' : 'Start simulation', icon: status === 'simulating' ? 'pause' : 'play_arrow', onClick: toggleSimulate, active: () => status === 'simulating', disabled: () => status !== 'ready' && status !== 'simulating' },
+    { label: 'Reset simulation', icon: 'refresh', onClick: () => void reset(), disabled: () => status !== 'ready' && status !== 'simulating' },
     { label: 'Show triangles', icon: 'change_history', onClick: toggleTriangles, active: () => showTriangles, sep: true },
     { label: 'Show avatar', icon: 'person', onClick: toggleAvatar, active: () => showAvatar },
     { label: sceneMode === 'arrange' && arrangeKind === 'arrange' ? 'Exit arrange mode' : 'Arrange (A)', icon: 'scatter_plot', onClick: toggleArrangeMode, active: () => sceneMode === 'arrange' && arrangeKind === 'arrange', shortcut: 'A' },
@@ -551,6 +568,7 @@
         class="group relative flex items-center h-8 md:h-10 justify-center btn p-0 my-0.5 ml-1 mr-0 md:mr-1 max-w-[calc(100vw-3rem)] overflow-hidden transition-all self-end text-center hover:aspect-auto aspect-square shadow"
         class:btn-accent={tool.active?.()}
         class:btn-primary={!tool.active?.()}
+        disabled={tool.disabled?.()}
         onclick={tool.onClick}
       >
         <span class="min-w-0 flex-1 p-0 hidden group-hover:inline">

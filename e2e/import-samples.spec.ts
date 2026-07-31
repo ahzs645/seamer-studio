@@ -68,4 +68,47 @@ test.describe('Import samples', () => {
 		await expect(browser.getByTestId('object-browser-piece').nth(0)).toContainText('Piece 1');
 		await expect(browser.getByTestId('object-browser-piece').nth(1)).toContainText('Piece 2');
 	});
+
+	test('rejects an invalid 3D import without replacing the active document', async ({ page }) => {
+		await openStudio(page);
+		const scene = page.getByTestId('pattern-scene-3d');
+		await expect(scene).toHaveAttribute('data-status', 'ready');
+
+		const invalidLegacy = {
+			name: 'Broken bow-tie',
+			pieces: [{
+				name: 'Crossed piece',
+				origin: [0, 0],
+				grain: [0, 1],
+				materialId: 'Material',
+				boundary: [
+					[[0, 0], [100, 100]],
+					[[100, 100], [0, 100]],
+					[[0, 100], [100, 0]],
+					[[100, 0], [0, 0]]
+				],
+				sewLines: [
+					[[0, 0], [100, 100]],
+					[[100, 100], [0, 100]],
+					[[0, 100], [100, 0]],
+					[[100, 0], [0, 0]]
+				]
+			}]
+		};
+
+		const chooserPromise = page.waitForEvent('filechooser');
+		await page.getByTestId('import-menu-trigger').click();
+		await page.getByRole('button', { name: /From file/ }).click();
+		const chooser = await chooserPromise;
+		await chooser.setFiles({
+			name: 'broken.json',
+			mimeType: 'application/json',
+			buffer: Buffer.from(JSON.stringify(invalidLegacy))
+		});
+
+		await expect(page.getByText(/Cannot import "Broken bow-tie"/)).toBeVisible();
+		await expect(page.getByTestId('pattern-name-input')).toHaveValue('Pencil Skirt (3D)');
+		await expect(scene).toHaveAttribute('data-status', 'ready');
+		await expect(scene.getByRole('button', { name: 'Start simulation' })).toBeEnabled();
+	});
 });

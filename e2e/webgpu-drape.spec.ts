@@ -1,4 +1,5 @@
 import { expect, test, type ConsoleMessage, type Page } from '@playwright/test';
+import { fileURLToPath } from 'node:url';
 
 interface DrapeDebugBounds {
 	min: [number, number, number];
@@ -16,6 +17,7 @@ interface DrapeDebugState {
 	positionsFinite: boolean;
 	particleBounds: DrapeDebugBounds | null;
 	avatarBounds: DrapeDebugBounds | null;
+	maxSeamPairDistanceMm: number | null;
 	waistbandMaxSeamPairDistanceMm: number | null;
 }
 
@@ -141,4 +143,67 @@ test('runs the default cloth drape on WebGPU and updates particle positions', as
 	await expect(scene).toHaveAttribute('data-status', 'simulating');
 	expect(pageErrors).toEqual([]);
 	expect(deviceLostConsoleErrors).toEqual([]);
+});
+
+test('imports, drapes, pauses, and resets the legacy pencil skirt', async ({ page }) => {
+	const pageErrors: string[] = [];
+	page.on('pageerror', (error) => pageErrors.push(error.message));
+
+	await page.goto('/studio', { waitUntil: 'domcontentloaded' });
+	await expect(page.getByTestId('pattern-name-input')).toHaveValue('Pencil Skirt (3D)');
+
+	const chooserPromise = page.waitForEvent('filechooser');
+	await page.getByTestId('import-menu-trigger').click();
+	await page.getByRole('button', { name: /From file/ }).click();
+	const chooser = await chooserPromise;
+	await chooser.setFiles(fileURLToPath(new URL('./fixtures/pencil-skirt-legacy.json', import.meta.url)));
+
+	await expect(page.getByText('Imported "Pencil skirt - 3D"')).toBeVisible();
+	await expect(page.getByTestId('pattern-name-input')).toHaveValue('Pencil skirt - 3D');
+	await page.getByRole('button', { name: '3D', exact: true }).click();
+
+	const scene = page.getByTestId('pattern-scene-3d');
+	await expect(scene).toBeVisible();
+	await expect(scene).toHaveAttribute('data-status', 'ready');
+	await expect(scene.getByText(/Invalid shape/)).toHaveCount(0);
+
+	await scene.getByRole('button', { name: 'Start simulation' }).click();
+	await expect(scene).toHaveAttribute('data-status', 'simulating');
+	await expect
+		.poll(async () => {
+			const state = await readDrapeState(page);
+			return !!state
+				&& state.deviceAcquired
+				&& state.running
+				&& state.frameCount >= 2
+				&& state.particleCount > 0
+				&& state.positionHash !== null
+				&& state.positionsFinite;
+		}, { message: 'the imported legacy skirt did not produce finite WebGPU frames' })
+		.toBe(true);
+
+	await page.waitForTimeout(3_000);
+	const running = await readDrapeState(page);
+	expect(running?.maxSeamPairDistanceMm, 'legacy explicit seams were not built').not.toBeNull();
+	expect(running?.maxSeamPairDistanceMm ?? Infinity, 'legacy pieces did not remain sewn together').toBeLessThan(35);
+	expect(running?.waistbandMaxSeamPairDistanceMm, 'legacy waistband attachment was not built').not.toBeNull();
+	expect(running?.waistbandMaxSeamPairDistanceMm ?? Infinity).toBeLessThan(35);
+
+	await scene.getByRole('button', { name: 'Pause simulation' }).click();
+	await expect(scene).toHaveAttribute('data-status', 'ready');
+	const paused = await readDrapeState(page);
+	expect(paused?.running).toBe(false);
+	expect(paused?.positionHash).not.toBeNull();
+	await page.waitForTimeout(1_200);
+	expect((await readDrapeState(page))?.positionHash, 'Pause changed particle positions').toBe(paused?.positionHash);
+
+	await scene.getByRole('button', { name: 'Reset simulation' }).click();
+	const resetDialog = page.getByRole('dialog');
+	await expect(resetDialog).toContainText('Reset all simulations?');
+	await expect(resetDialog).toContainText('discard all simulated positions');
+	await resetDialog.getByRole('button', { name: 'Reset' }).click();
+	await expect(scene).toHaveAttribute('data-status', 'ready');
+	expect((await readDrapeState(page))?.positionHash, 'Reset did not restore the initial arrangement')
+		.not.toBe(paused?.positionHash);
+	expect(pageErrors).toEqual([]);
 });
