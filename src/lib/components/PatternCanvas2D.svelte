@@ -573,11 +573,18 @@
     mounted = true;
     ctx = canvasEl.getContext('2d');
     const observer = new ResizeObserver(() => {
-      canvasW = canvasEl.clientWidth;
-      canvasH = canvasEl.clientHeight;
+      const nextW = Math.max(1, Math.round(canvasEl.clientWidth));
+      const nextH = Math.max(1, Math.round(canvasEl.clientHeight));
+      if (nextW === canvasW && nextH === canvasH) return;
+      canvasW = nextW;
+      canvasH = nextH;
       canvasEl.width = canvasW;
       canvasEl.height = canvasH;
-      render();
+      // Split/2D mode and the inspector change the available canvas after the pattern effect has
+      // already run. Refit to the final viewport, like the legacy Studio, instead of retaining the
+      // zoom calculated for the narrow initial column.
+      if (currentPattern.points.length > 0 || currentPattern.pieces.length > 0) fitView();
+      else render();
     });
     if (canvasEl.parentElement) observer.observe(canvasEl.parentElement);
     const unsubZoom = zoom.subscribe((v) => { currentZoom = v; render(); });
@@ -665,7 +672,7 @@
   }
 
   function fitView() {
-    const placed = placedPoints(currentPattern);
+    const placed = editorPlacedPoints(currentPattern);
     if (placed.length === 0) { zoom.set(1); panOffset.set({ x: 0, y: 0 }); return; }
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (const pp of placed) {
@@ -678,9 +685,32 @@
     const pad = 1.2;
     const sx = canvasW / (w * pad * currentPattern.graphicsScale);
     const sy = canvasH / (h * pad * currentPattern.graphicsScale);
-    zoom.set(Math.max(0.05, Math.min(20, Math.min(sx, sy))));
     viewOffset = { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
+    zoom.set(Math.max(0.05, Math.min(20, Math.min(sx, sy))));
     panOffset.set({ x: 0, y: 0 });
+  }
+
+  /**
+   * The source editor shows the canonical drafting geometry as well as every placed piece copy.
+   * pattern-model's placedPoints intentionally omits a raw point once a piece owns it, so add a
+   * draft-space occurrence when none of its placed copies already occupies that coordinate.
+   */
+  function editorPlacedPoints(patternValue: Pattern, points = indexPoints(patternValue)): PlacedPoint[] {
+    const out = placedPoints(patternValue, points);
+    const occurrencesById = new Map<string, PlacedPoint[]>();
+    for (const placedPoint of out) {
+      const occurrences = occurrencesById.get(placedPoint.pointId) ?? [];
+      occurrences.push(placedPoint);
+      occurrencesById.set(placedPoint.pointId, occurrences);
+    }
+    for (const point of patternValue.points) {
+      const occurrences = occurrencesById.get(point.id) ?? [];
+      if (occurrences.length === 0 || occurrences.some((placedPoint) =>
+        Math.hypot(placedPoint.world.x - point.x, placedPoint.world.y - point.y) < 0.05
+      )) continue;
+      out.push({ pointId: point.id, pieceId: '', world: { x: point.x, y: point.y }, invert: (world) => world });
+    }
+    return out;
   }
 
   function hitTestPlaced(cx: number, cy: number, threshold = HOVER_THRESHOLD): PlacedPoint | null {
@@ -689,7 +719,7 @@
     const pts = indexPoints(currentPattern);
     let best: PlacedPoint | null = null;
     let bestDist = Infinity;
-    for (const pp of placedPoints(currentPattern, pts)) {
+    for (const pp of editorPlacedPoints(currentPattern, pts)) {
       const lid = pts.get(pp.pointId)?.layerId;
       if (!layerVisible(lid) || layerLocked(lid)) continue; // can't pick hidden/locked-layer points
       const d = Math.hypot(pt.x - pp.world.x, pt.y - pp.world.y);
@@ -835,9 +865,15 @@
 
     const paths = indexPaths(currentPattern);
     const points = indexPoints(currentPattern);
-    const placed = placedPoints(currentPattern, points);
+    const placed = editorPlacedPoints(currentPattern, points);
     const seamPP = new Set<string>();
-    for (const s of currentPattern.seams) for (const r of [...s.fromPaths, ...s.toPaths]) seamPP.add(r.id);
+    const seamPathColor = new Map<string, string>();
+    for (const [seamIndex, seam] of currentPattern.seams.entries()) {
+      for (const ref of [...seam.fromPaths, ...seam.toPaths]) {
+        seamPP.add(ref.id);
+        seamPathColor.set(ref.id, seamColor(seamIndex));
+      }
+    }
 
     // avatar silhouette behind the pieces (real projected body, centred on the x=0 draft axis)
     if (showBody && placed.length > 0) {
@@ -865,7 +901,7 @@
           const edge = piecePathPolyline(pp, paths, points, 4).map(tf);
           if (edge.length < 2) continue;
           if (pp.isMirrorLine) { c.strokeStyle = '#ef4444'; c.lineWidth = 1.5; c.setLineDash([6, 4]); }
-          else if (seamPP.has(pp.id)) { c.strokeStyle = PATH_MAGENTA; c.lineWidth = 2; c.setLineDash([]); }
+          else if (seamPP.has(pp.id)) { c.strokeStyle = seamPathColor.get(pp.id) ?? PATH_MAGENTA; c.lineWidth = 2; c.setLineDash([]); }
           else { c.strokeStyle = 'rgba(15,23,42,0.9)'; c.lineWidth = 1.5; c.setLineDash([6, 4]); }
           tracePoly(c, edge, false);
           c.stroke();
@@ -879,14 +915,21 @@
         }
         c.setLineDash([]);
       } else {
-        // unselected -> fabric-textured fill + dark boundary
+        // unselected -> fabric-textured fill, with every sewn edge retaining its seam colour.
+        // The legacy editor keeps these pair colours visible even when the seam-rung overlay is
+        // hidden, which makes the four-piece construction understandable at a glance.
         tracePoly(c, outline, true);
         c.fillStyle = pieceFill(c, materialOf(piece.materialId), piece, points);
         c.fill();
-        c.strokeStyle = 'rgba(30,41,59,0.85)';
-        c.lineWidth = 1.5;
-        tracePoly(c, outline, true);
-        c.stroke();
+        for (const pp of piece.mainPaths) {
+          const edge = piecePathPolyline(pp, paths, points, 4).map(tf);
+          if (edge.length < 2) continue;
+          if (pp.isMirrorLine) { c.strokeStyle = '#ef4444'; c.lineWidth = 1.5; c.setLineDash([6, 4]); }
+          else if (seamPP.has(pp.id)) { c.strokeStyle = seamPathColor.get(pp.id) ?? PATH_MAGENTA; c.lineWidth = 2; c.setLineDash([]); }
+          else { c.strokeStyle = 'rgba(30,41,59,0.85)'; c.lineWidth = 1.5; c.setLineDash([]); }
+          tracePoly(c, edge, false);
+          c.stroke();
+        }
         c.strokeStyle = 'rgba(30,41,59,0.55)';
         c.lineWidth = 1;
         c.setLineDash([4, 3]);
@@ -1097,17 +1140,34 @@
       }
     }
 
-    // loose paths not used by any piece
+    // Drafting geometry in its canonical (unplaced) coordinates. The source keeps this editable
+    // construction visible alongside the arranged cut pieces. Avoid drawing an exact duplicate
+    // when an identity-placed piece already represents the same path.
     const usedPaths = new Set<string>();
     for (const piece of currentPattern.pieces) {
       for (const pp of piece.mainPaths) usedPaths.add(pp.path);
       for (const pp of piece.internalPaths) usedPaths.add(pp.path);
     }
-    // Construction geometry = paths not used by any piece. Hidden when showConstruction is off.
+    const pathNeedsDraftCopy = (path: Pattern['paths'][number]) => {
+      if (!usedPaths.has(path.id)) return true;
+      const raw = pathPolyline(path, points, 4);
+      if (raw.length === 0) return false;
+      for (const piece of currentPattern.pieces) {
+        const ownsPath = [...piece.mainPaths, ...piece.internalPaths].some((piecePath) => piecePath.path === path.id);
+        if (!ownsPath) continue;
+        const transform = pieceTransform(piece, points, pieceShrinkageScale(currentPattern, piece));
+        if (raw.every((point) => {
+          const placedPoint = transform(point);
+          return Math.hypot(placedPoint.x - point.x, placedPoint.y - point.y) < 0.05;
+        })) return false;
+      }
+      return true;
+    };
+    // Construction geometry is hidden only when the Construction toggle is off.
     const showConstruction = currentPattern.showConstruction !== false;
     if (showConstruction) {
       for (const path of currentPattern.paths) {
-        if (usedPaths.has(path.id) || !layerVisible(path.layerId)) continue;
+        if (!pathNeedsDraftCopy(path) || !layerVisible(path.layerId)) continue;
         const isSelected = pathIds.has(path.id);
         const st = (layerOf(path.layerId)?.style ?? null) as LayerStyle | null;
         c.save();
@@ -1124,7 +1184,7 @@
     if (baseScale() > 0.12) {
       const selPieces = pieceIds;
       const showLabels = baseScale() > 0.18;
-      for (const pp of placedPoints(currentPattern, points)) {
+      for (const pp of editorPlacedPoints(currentPattern, points)) {
         if (!layerVisible(points.get(pp.pointId)?.layerId)) continue;
         if (!showConstruction && pp.pieceId === '') continue; // hide construction points
 
@@ -2384,7 +2444,7 @@
 
   /** Current world endpoints of a measurement, or null when an endpoint no longer exists. */
   function measurementEndpoints(m: Measurement): { a: Vec2; v: Vec2 | null; b: Vec2 } | null {
-    const placed = placedPoints(currentPattern, indexPoints(currentPattern));
+    const placed = editorPlacedPoints(currentPattern, indexPoints(currentPattern));
     const a = placed.find((p) => p.pointId === m.fromPointId)?.world;
     const b = placed.find((p) => p.pointId === m.toPointId)?.world;
     const v = m.viaPointId ? placed.find((p) => p.pointId === m.viaPointId)?.world ?? null : null;
@@ -2430,7 +2490,7 @@
     const toolActive = $selectedTool === 'measure';
     const show = currentPattern.showMeasurements !== false || toolActive;
     if (!show || (list.length === 0 && !measureFrom && measureChain.length === 0)) return;
-    const placed = placedPoints(currentPattern, points);
+    const placed = editorPlacedPoints(currentPattern, points);
     const byId = new Map(placed.map((p) => [p.pointId, p.world]));
     const u = currentPattern.lengthUnit;
     c.save();
@@ -2564,7 +2624,7 @@
     const sel = pointIds;
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     let n = 0;
-    for (const pp of placedPoints(currentPattern)) {
+    for (const pp of editorPlacedPoints(currentPattern)) {
       if (!sel.has(pp.pointId)) continue;
       const cp = toCanvas(pp.world);
       minX = Math.min(minX, cp.x); maxX = Math.max(maxX, cp.x);
@@ -2823,7 +2883,7 @@
   /** Dashed alignment guide lines through the snapped-to points (the original's guideLines). */
   function drawGuideLines(c: CanvasRenderingContext2D) {
     if (!isDragging || (!guideMatch.xPointId && !guideMatch.yPointId)) return;
-    const placed = placedPoints(currentPattern);
+    const placed = editorPlacedPoints(currentPattern);
     const find = (id: string | null) => (id ? placed.find((pp) => pp.pointId === id) : undefined);
     c.save();
     c.strokeStyle = 'rgba(14,165,233,0.7)';
@@ -2960,6 +3020,14 @@
           return;
         }
       }
+      const rawPathHit = hitTestAnyPath(pos);
+      if (rawPathHit) {
+        setPointIds([]);
+        setPieceIds([]);
+        setPathIds([rawPathHit]);
+        render();
+        return;
+      }
       const pat = toPattern(pos.x, pos.y);
       const paths = indexPaths(currentPattern);
       const points = indexPoints(currentPattern);
@@ -3089,7 +3157,7 @@
       const y0 = Math.min(marqueeStart.y, marqueeCur.y), y1 = Math.max(marqueeStart.y, marqueeCur.y);
       if (x1 - x0 > 3 || y1 - y0 > 3) {
         const sel = new Set(pointIds); // shift-drag adds to the existing selection
-        for (const pp of placedPoints(currentPattern)) {
+        for (const pp of editorPlacedPoints(currentPattern)) {
           const cp = toCanvas(pp.world);
           if (cp.x >= x0 && cp.x <= x1 && cp.y >= y0 && cp.y <= y1) sel.add(pp.pointId);
         }
@@ -3174,7 +3242,7 @@
   <button
     class="btn btn-xs"
     class:btn-active={currentPattern.showConstruction !== false}
-    title="Toggle construction geometry — helper points/paths not used by any piece"
+    title="Toggle canonical drafting and helper geometry"
     onclick={() => onchange({ ...$state.snapshot(currentPattern) as Pattern, showConstruction: currentPattern.showConstruction === false, hasChanged: true })}
   >Construction</button>
   <button class="btn btn-xs btn-ghost" title="Fit pieces to view" onclick={() => { fitView(); render(); }}>Fit</button>

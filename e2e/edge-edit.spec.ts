@@ -8,7 +8,7 @@ async function openStudio(page: Page) {
 	await page.goto('/studio', { waitUntil: 'domcontentloaded' });
 	const patternName = page.getByTestId('pattern-name-input');
 	await expect(patternName).toBeVisible();
-	await expect(patternName).toHaveValue('Pencil Skirt (3D)');
+	await expect(patternName).toHaveValue('Pencil skirt - 3D');
 }
 
 async function importRectangle(page: Page) {

@@ -68,7 +68,7 @@
 
   <div class="flex items-center gap-0.5">
     <button class="btn btn-xs" onclick={zoomOut} title="Zoom out">-</button>
-    <span class="text-xs tabular-nums w-10 text-center">{Math.round($zoom * 100)}%</span>
+    <span class="text-xs tabular-nums w-10 text-center" data-testid="zoom-percent">{Math.round($zoom * 100)}%</span>
     <button class="btn btn-xs" onclick={zoomIn} title="Zoom in">+</button>
   </div>
 

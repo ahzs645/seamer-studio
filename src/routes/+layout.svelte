@@ -1,5 +1,6 @@
 <script lang="ts">
   import { base } from '$app/paths';
+  import { page } from '$app/stores';
   import '../app.css';
   import { onMount } from 'svelte';
   import { setAvatarAssetsBase } from '@seamer/avatar/assets';
@@ -16,7 +17,11 @@
   });
 </script>
 
-<div class="relative w-full min-h-screen flex flex-col max-w-screen-2xl mx-auto bg-base-100">
+<div
+  class="relative w-full min-h-screen flex flex-col bg-base-100"
+  class:max-w-screen-2xl={!$page.url.pathname.startsWith(`${base}/studio`)}
+  class:mx-auto={!$page.url.pathname.startsWith(`${base}/studio`)}
+>
   <AppHeader />
   <main class="flex-1">
     {@render children()}

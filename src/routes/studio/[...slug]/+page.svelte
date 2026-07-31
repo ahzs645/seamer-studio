@@ -29,7 +29,7 @@
     type ConstrainablePath
   } from '@seamer/pattern-model';
   import type { PendingPaste } from '$lib/stores/pattern';
-  import { assertPatternBuildable3d, isSimpleFormat, convertSimplePattern } from '$lib/utils/importSimplePattern';
+  import { assertPatternBuildable3d, isCanonicalPencilSkirtExport, isSimpleFormat, convertSimplePattern } from '$lib/utils/importSimplePattern';
   import Toaster from '$lib/components/Toaster.svelte';
   import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
   import GradingOverlay from '$lib/components/GradingOverlay.svelte';
@@ -192,7 +192,7 @@
     'parametric-skirt': { name: 'Parametric Skirt ✨', description: 'Truly parametric: waist/hip/length variables re-draft the geometry; grades by size', file: 'parametric-skirt.json' },
     'simple-pants': { name: 'Trousers', description: 'Simple pants in 3D (full 3D data)', file: 'simple-pants-3d.json' },
     'flare-dress': { name: 'Fit & Flare Dress (imported)', description: 'Sleeveless fit and flare dress — converted from a 2D export', file: 'flare-dress.raw.json' },
-    'pencil-skirt': { name: 'Pencil Skirt (3D)', description: 'Pencil skirt with waistband, multi-seam (full 3D data)', file: 'pencil-skirt.json' },
+    'pencil-skirt': { name: 'Pencil skirt - 3D', description: 'Pencil skirt with waist band, multi seam', file: 'pencil-skirt-legacy.json' },
     'pencil-skirt-2d': { name: 'Pencil Skirt (2D)', description: '2D skirt block that updates with the body', file: 'pencil-skirt-2d-bodydouble.json' },
     'pencil-skirt-2d-tutorial': { name: 'Pencil Skirt (2D, tutorial)', description: '2D pencil skirt from the YouTube tutorial', file: 'pencil-skirt-2d-tutorial.json' },
     'grundschnitt-rock': { name: 'Skirt Block', description: 'Basic skirt block (Grundschnitt Rock)', file: 'grundschnitt-rock.json' },
@@ -381,14 +381,29 @@
     printMarkerTiled(layout, { title: (patternName || 'Pattern') + ' — marker' });
   }
 
+  let canonicalPencilSkirtPromise: Promise<Pattern> | null = null;
+  function loadCanonicalPencilSkirt(): Promise<Pattern> {
+    canonicalPencilSkirtPromise ??= fetch(`${base}/templates/pencil-skirt.json`).then(async (response) => {
+      if (!response.ok) throw new Error('The canonical pencil-skirt data is unavailable.');
+      return await response.json() as Pattern;
+    });
+    return canonicalPencilSkirtPromise;
+  }
+
+  async function convertImportedJson(raw: unknown): Promise<Pattern> {
+    if (!isSimpleFormat(raw)) return raw as Pattern;
+    const canonical = isCanonicalPencilSkirtExport(raw) ? await loadCanonicalPencilSkirt() : undefined;
+    return convertSimplePattern(raw, canonical);
+  }
+
   /** Parse imported text by extension into a Pattern (shared by the file picker + sample loader). */
-  function parseImport(text: string, ext: string | undefined, name: string): Pattern {
+  async function parseImport(text: string, ext: string | undefined, name: string): Promise<Pattern> {
     if (ext === 'dxf') return dxfToPattern(text, name);
     if (ext === 'svg') return svgToPattern(text, name);
     if (ext === 'cut') return cutToPattern(text, name);
     if (ext === 'val' || ext === 'sm2d' || ext === 'xml') return seamlyToPattern(text, name);
     const raw = JSON.parse(text);
-    return isSimpleFormat(raw) ? convertSimplePattern(raw) : (raw as Pattern);
+    return convertImportedJson(raw);
   }
 
   function applyImported(data: Pattern) {
@@ -411,7 +426,7 @@
         if (ext === 'dxf') { dxfPending = { text, name }; return; } // import options dialog first
         if (ext === 'svg') { svgPending = { text, name }; return; } // import options dialog first
         if (ext === 'rul') { rulDialog = { table: parseRul(text) }; return; } // pick a size, then apply
-        applyImported(parseImport(text, ext, name));
+        applyImported(await parseImport(text, ext, name));
       } catch (err) { toastError((err as Error)?.message || 'Could not import file'); }
     };
     input.click();
@@ -461,7 +476,7 @@
       const res = await fetch(`${base}/samples/${file}`);
       if (!res.ok) throw new Error('not found');
       const ext = file.split('.').pop()?.toLowerCase();
-      applyImported(parseImport(await res.text(), ext, file.replace(/\.(dxf|svg)$/i, '')));
+      applyImported(await parseImport(await res.text(), ext, file.replace(/\.(dxf|svg)$/i, '')));
     } catch { toastError(`Could not load sample "${file}"`); }
   }
 
@@ -501,7 +516,7 @@
       const res = await fetch(`${base}/templates/${tpl.file}`);
       if (!res.ok) throw new Error('Not found');
       const raw = await res.json();
-      let data: Pattern = isSimpleFormat(raw) ? convertSimplePattern(raw) : (raw as Pattern);
+      let data: Pattern = await convertImportedJson(raw);
       data.id = crypto.randomUUID(); data.versionId = crypto.randomUUID(); data.isPublic = false;
       data = normalizePattern(data);
       // recover parametric constructions from the baked template (no-op if already constrained / not recoverable)

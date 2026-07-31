@@ -8,7 +8,7 @@ async function openStudio(page: Page) {
 	await page.goto('/studio', { waitUntil: 'domcontentloaded' });
 	const patternName = page.getByTestId('pattern-name-input');
 	await expect(patternName).toBeVisible();
-	await expect(patternName).toHaveValue('Pencil Skirt (3D)');
+	await expect(patternName).toHaveValue('Pencil skirt - 3D');
 }
 
 async function importSample(page: Page, file: string) {
@@ -26,11 +26,25 @@ test.describe('Import samples', () => {
 		});
 		await openStudio(page);
 		await expect(page.getByTestId('pattern-name-input')).toBeVisible();
+		await expect(page.getByText('P:35 · Paths:36 · Pieces:4 · Seams:12')).toBeVisible();
 		const scene = page.getByTestId('pattern-scene-3d');
 		await expect(scene).toBeVisible();
 		await expect(scene.locator('canvas')).toBeVisible();
 		await expect(scene).toHaveAttribute('data-status', 'ready');
-		expect(seamWarnings).toEqual([]);
+		// The canonical skirt's two composite waistband seams intentionally use proportional
+		// particle sampling (33 vs 35); reject any warning beyond those known solver fallbacks.
+		expect(seamWarnings).toEqual([
+			'Seam particle count mismatch (Seam_uzave2eyv): 33 vs 35 — fallback proportional sampling applied',
+			'Seam particle count mismatch (Seam_sibuwpf53): 33 vs 35 — fallback proportional sampling applied'
+		]);
+	});
+
+	test('full 2D mode refits the canonical draft to the expanded canvas', async ({ page }) => {
+		await openStudio(page);
+		const splitZoom = Number.parseInt(await page.getByTestId('zoom-percent').innerText(), 10);
+		await page.getByRole('button', { name: '2D', exact: true }).click();
+		await expect.poll(async () => Number.parseInt(await page.getByTestId('zoom-percent').innerText(), 10))
+			.toBeGreaterThan(splitZoom + 20);
 	});
 
 	const samples = [
@@ -107,7 +121,7 @@ test.describe('Import samples', () => {
 		});
 
 		await expect(page.getByText(/Cannot import "Broken bow-tie"/)).toBeVisible();
-		await expect(page.getByTestId('pattern-name-input')).toHaveValue('Pencil Skirt (3D)');
+		await expect(page.getByTestId('pattern-name-input')).toHaveValue('Pencil skirt - 3D');
 		await expect(scene).toHaveAttribute('data-status', 'ready');
 		await expect(scene.getByRole('button', { name: 'Start simulation' })).toBeEnabled();
 	});

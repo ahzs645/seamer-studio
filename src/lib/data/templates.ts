@@ -19,7 +19,7 @@ export const BUILTIN_TEMPLATES: BuiltinTemplate[] = [
   tpl('Parametric Skirt', 'Truly parametric: waist/hip/length variables re-draft the geometry; grades by size', 'parametric-skirt.json'),
   tpl('Trousers', 'Simple pants in 3D (full 3D data)', 'simple-pants-3d.json'),
   tpl('Fit & Flare Dress', 'Sleeveless fit and flare dress — converted from a 2D export', 'flare-dress.raw.json'),
-  tpl('Pencil Skirt (3D)', 'Pencil skirt with waistband, multi-seam (full 3D data)', 'pencil-skirt.json'),
+  tpl('Pencil skirt - 3D', 'Pencil skirt with waist band, multi seam', 'pencil-skirt.json'),
   tpl('Pencil Skirt (2D)', '2D skirt block that updates with the body', 'pencil-skirt-2d-bodydouble.json'),
   tpl('Pencil Skirt (2D, tutorial)', '2D pencil skirt from the video tutorial', 'pencil-skirt-2d-tutorial.json'),
   tpl('Skirt Block', 'Basic skirt block (Grundschnitt Rock)', 'grundschnitt-rock.json'),

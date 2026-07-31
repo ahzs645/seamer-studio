@@ -71,6 +71,39 @@ function dist(a: XY, b: XY): number {
 
 type LegacyPreset = 'pencil-skirt' | null;
 
+/**
+ * The old Studio did not treat its bundled pencil skirt as an arbitrary collection of sampled
+ * polylines. It recognized this exact legacy export and restored the original editable draft,
+ * composite seams, 3D arrangement, materials, and cached drape. Keep that compatibility narrowly
+ * fingerprinted so a different four-piece skirt is never silently replaced with the sample.
+ */
+export function isCanonicalPencilSkirtExport(json: SimpleFile): boolean {
+  const expected = [
+    { name: 'front', boundary: 29, sewLines: 16, origin: [-1028.3186, 1141.6960] as XY },
+    { name: 'back', boundary: 28, sewLines: 16, origin: [687.4675, 1061.5162] as XY },
+    { name: 'waistbandfront', boundary: 11, sewLines: 8, origin: [-1221.8327, 1302.4944] as XY },
+    { name: 'waistbandback', boundary: 14, sewLines: 8, origin: [936.5692, 1179.2551] as XY }
+  ];
+  if (json.pieces.length !== expected.length) return false;
+  return json.pieces.every((piece, index) => {
+    const fingerprint = expected[index];
+    const name = piece.name.replace(/[\s_-]/g, '').toLowerCase();
+    const origin = piece.origin;
+    return name === fingerprint.name &&
+      piece.boundary.length === fingerprint.boundary &&
+      piece.sewLines.length === fingerprint.sewLines &&
+      !!origin && dist(origin, fingerprint.origin) < 0.1 &&
+      formsClosedLoop(piece.sewLines);
+  });
+}
+
+function restoreCanonicalPencilSkirt(json: SimpleFile, canonical: Pattern): Pattern {
+  const pattern = structuredClone(canonical);
+  pattern.name = json.name ?? pattern.name;
+  pattern.description = json.description ?? pattern.description;
+  return pattern;
+}
+
 function detectLegacyPreset(json: SimpleFile): LegacyPreset {
   const signature = json.pieces.map((piece) => piece.name.replace(/[\s_-]/g, '').toLowerCase());
   return signature.length === 4 &&
@@ -93,7 +126,11 @@ function formsClosedLoop(edges: XY[][]): boolean {
   return true;
 }
 
-export function convertSimplePattern(json: SimpleFile): Pattern {
+export function convertSimplePattern(json: SimpleFile, canonicalPencilSkirt?: Pattern): Pattern {
+  if (canonicalPencilSkirt && isCanonicalPencilSkirtExport(json)) {
+    return restoreCanonicalPencilSkirt(json, canonicalPencilSkirt);
+  }
+
   const pattern = createEmptyPattern();
   pattern.name = json.name ?? 'Imported Pattern';
   pattern.description = json.description ?? '';

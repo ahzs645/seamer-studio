@@ -51,7 +51,7 @@ test('runs the default cloth drape on WebGPU and updates particle positions', as
 	});
 
 	await page.goto('/studio', { waitUntil: 'domcontentloaded' });
-	await expect(page.getByTestId('pattern-name-input')).toHaveValue('Pencil Skirt (3D)');
+	await expect(page.getByTestId('pattern-name-input')).toHaveValue('Pencil skirt - 3D');
 
 	const gpuProbe = await page.evaluate(async () => {
 		if (!('gpu' in navigator) || !navigator.gpu) {
@@ -150,7 +150,7 @@ test('imports, drapes, pauses, and resets the legacy pencil skirt', async ({ pag
 	page.on('pageerror', (error) => pageErrors.push(error.message));
 
 	await page.goto('/studio', { waitUntil: 'domcontentloaded' });
-	await expect(page.getByTestId('pattern-name-input')).toHaveValue('Pencil Skirt (3D)');
+	await expect(page.getByTestId('pattern-name-input')).toHaveValue('Pencil skirt - 3D');
 
 	const chooserPromise = page.waitForEvent('filechooser');
 	await page.getByTestId('import-menu-trigger').click();
