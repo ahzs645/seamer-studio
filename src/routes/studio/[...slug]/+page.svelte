@@ -192,7 +192,10 @@
     'parametric-skirt': { name: 'Parametric Skirt ✨', description: 'Truly parametric: waist/hip/length variables re-draft the geometry; grades by size', file: 'parametric-skirt.json' },
     'simple-pants': { name: 'Trousers', description: 'Simple pants in 3D (full 3D data)', file: 'simple-pants-3d.json' },
     'flare-dress': { name: 'Fit & Flare Dress (imported)', description: 'Sleeveless fit and flare dress — converted from a 2D export', file: 'flare-dress.raw.json' },
-    'pencil-skirt': { name: 'Pencil skirt - 3D', description: 'Pencil skirt with waist band, multi seam', file: 'pencil-skirt-legacy.json' },
+    // This canonical template is the fully supported representation of the supplied legacy
+    // "Pencil skirt - 3D.json". Legacy files still resolve to this data through the importer, while
+    // fresh Studio sessions can load it directly without re-running conversion.
+    'pencil-skirt': { name: 'Pencil skirt - 3D', description: 'Pencil skirt with waist band, multi seam', file: 'pencil-skirt.json' },
     'pencil-skirt-2d': { name: 'Pencil Skirt (2D)', description: '2D skirt block that updates with the body', file: 'pencil-skirt-2d-bodydouble.json' },
     'pencil-skirt-2d-tutorial': { name: 'Pencil Skirt (2D, tutorial)', description: '2D pencil skirt from the YouTube tutorial', file: 'pencil-skirt-2d-tutorial.json' },
     'grundschnitt-rock': { name: 'Skirt Block', description: 'Basic skirt block (Grundschnitt Rock)', file: 'grundschnitt-rock.json' },
@@ -210,6 +213,7 @@
     'flared-midi-dress': { name: 'Flared Midi Dress', description: 'Snug at bust and waist with maxi flared lower part', file: 'flared-midi-dress.json' },
     'nightwing-logo': { name: 'Nightwing Logo', description: 'Nightwing chest logo applique', file: 'nightwing-logo.json' }
   };
+  const DEFAULT_STUDIO_TEMPLATE = 'pencil-skirt';
 
   let autoSaveTimer: ReturnType<typeof setInterval>;
 
@@ -251,7 +255,7 @@
           toastError('Pattern not found');
         }
       } else {
-        await loadTemplate('pencil-skirt');
+        await loadTemplate(DEFAULT_STUDIO_TEMPLATE);
       }
     })();
 

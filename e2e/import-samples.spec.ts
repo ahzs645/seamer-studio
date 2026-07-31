@@ -32,11 +32,13 @@ test.describe('Import samples', () => {
 		await expect(scene.locator('canvas')).toBeVisible();
 		await expect(scene).toHaveAttribute('data-status', 'ready');
 		// The canonical skirt's two composite waistband seams intentionally use proportional
-		// particle sampling (33 vs 35); reject any warning beyond those known solver fallbacks.
-		expect(seamWarnings).toEqual([
+		// particle sampling (33 vs 35) when the cloth is rebuilt. A saved default drape may not need
+		// that rebuild, so allow zero warnings but reject anything beyond the known fallbacks.
+		const allowedSeamWarnings = [
 			'Seam particle count mismatch (Seam_uzave2eyv): 33 vs 35 — fallback proportional sampling applied',
 			'Seam particle count mismatch (Seam_sibuwpf53): 33 vs 35 — fallback proportional sampling applied'
-		]);
+		];
+		expect(seamWarnings.filter((warning) => !allowedSeamWarnings.includes(warning))).toEqual([]);
 	});
 
 	test('full 2D mode refits the canonical draft to the expanded canvas', async ({ page }) => {

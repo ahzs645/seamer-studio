@@ -32,7 +32,6 @@
     indexPoints,
     indexPaths,
     pathPolyline,
-    pieceWorldOutline,
     pieceWorldInternalPolylines,
     pieceTransform,
     pieceShrinkageScale,
@@ -58,6 +57,7 @@
   import { draggablePanel } from '$lib/utils/draggablePanel';
   import { rebakeArc, arcPathsCenteredOn, detachArcsTouchingAnchor } from '@seamer/pattern-model/utils/arcParametric';
   import { buildWarp, drawWarpedImage } from '$lib/utils/thinPlateSpline';
+  import { explicitBoundaryMirrorAxis, pieceDisplayEdgePolylines, pieceDisplayOutline } from '$lib/utils/patternCanvasGeometry';
 
   interface Props {
     currentPattern: Pattern;
@@ -294,7 +294,7 @@
     c.setLineDash([]);
     const drawn = new Set<string>();
     for (const piece of ghost.pieces) {
-      const outline = pieceWorldOutline(ghost, piece, gPaths, gPoints, 4);
+      const outline = pieceDisplayOutline(ghost, piece, gPaths, gPoints, 4);
       if (outline.length < 2) continue;
       tracePoly(c, outline, true);
       c.stroke();
@@ -343,7 +343,10 @@
   // local view center (world point shown at canvas center); never mutate the pattern prop.
   let viewOffset = $state({ x: 0, y: 0 });
 
-  const GRID_MM = 25.4; // 1 inch
+  // The source Studio uses a coarse ten-inch drafting grid. A one-inch grid turns into visual
+  // noise as soon as the whole front/back layout is fitted into view.
+  const GRID_DRAW_MM = 254; // 10 inches
+  const GRID_SNAP_MM = 25.4; // retain one-inch editing precision
   const POINT_RADIUS = 4;
   const HOVER_THRESHOLD = 12;
   const SELECT_BLUE = '#2563eb';
@@ -680,6 +683,15 @@
       minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
       minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
     }
+    const paths = indexPaths(currentPattern);
+    const points = indexPoints(currentPattern);
+    for (const piece of currentPattern.pieces) {
+      if (piece.hidden) continue;
+      for (const p of pieceDisplayOutline(currentPattern, piece, paths, points, 4)) {
+        minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+        minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+      }
+    }
     const w = Math.max(1, maxX - minX);
     const h = Math.max(1, maxY - minY);
     const pad = 1.2;
@@ -848,7 +860,7 @@
     }
 
     if (currentPattern.showGrid) {
-      const step = GRID_MM * baseScale();
+      const step = GRID_DRAW_MM * baseScale();
       if (step > 4) {
         const origin = toCanvas({ x: 0, y: 0 });
         const ox = ((origin.x % step) + step) % step;
@@ -885,7 +897,7 @@
     for (const piece of currentPattern.pieces) {
       if (piece.hidden || !layerVisible(piece.layerId)) continue; // hidden piece or hidden layer
       const isSelected = pieceIds.has(piece.id);
-      const outline = pieceWorldOutline(currentPattern, piece, paths, points, 4);
+      const outline = pieceDisplayOutline(currentPattern, piece, paths, points, 4);
       if (outline.length < 2) continue;
 
       const tf = pieceTransform(piece, points, pieceShrinkageScale(currentPattern, piece));
@@ -898,13 +910,12 @@
         tracePoly(c, outline, true);
         c.fill();
         for (const pp of piece.mainPaths) {
-          const edge = piecePathPolyline(pp, paths, points, 4).map(tf);
-          if (edge.length < 2) continue;
-          if (pp.isMirrorLine) { c.strokeStyle = '#ef4444'; c.lineWidth = 1.5; c.setLineDash([6, 4]); }
-          else if (seamPP.has(pp.id)) { c.strokeStyle = seamPathColor.get(pp.id) ?? PATH_MAGENTA; c.lineWidth = 2; c.setLineDash([]); }
+          if (seamPP.has(pp.id)) { c.strokeStyle = seamPathColor.get(pp.id) ?? PATH_MAGENTA; c.lineWidth = 2; c.setLineDash([]); }
           else { c.strokeStyle = 'rgba(15,23,42,0.9)'; c.lineWidth = 1.5; c.setLineDash([6, 4]); }
-          tracePoly(c, edge, false);
-          c.stroke();
+          for (const edge of pieceDisplayEdgePolylines(currentPattern, piece, pp, paths, points, 4)) {
+            tracePoly(c, edge, false);
+            c.stroke();
+          }
         }
         c.setLineDash([]);
         c.strokeStyle = '#1d4ed8';
@@ -922,13 +933,12 @@
         c.fillStyle = pieceFill(c, materialOf(piece.materialId), piece, points);
         c.fill();
         for (const pp of piece.mainPaths) {
-          const edge = piecePathPolyline(pp, paths, points, 4).map(tf);
-          if (edge.length < 2) continue;
-          if (pp.isMirrorLine) { c.strokeStyle = '#ef4444'; c.lineWidth = 1.5; c.setLineDash([6, 4]); }
-          else if (seamPP.has(pp.id)) { c.strokeStyle = seamPathColor.get(pp.id) ?? PATH_MAGENTA; c.lineWidth = 2; c.setLineDash([]); }
+          if (seamPP.has(pp.id)) { c.strokeStyle = seamPathColor.get(pp.id) ?? PATH_MAGENTA; c.lineWidth = 2; c.setLineDash([]); }
           else { c.strokeStyle = 'rgba(30,41,59,0.85)'; c.lineWidth = 1.5; c.setLineDash([]); }
-          tracePoly(c, edge, false);
-          c.stroke();
+          for (const edge of pieceDisplayEdgePolylines(currentPattern, piece, pp, paths, points, 4)) {
+            tracePoly(c, edge, false);
+            c.stroke();
+          }
         }
         c.strokeStyle = 'rgba(30,41,59,0.55)';
         c.lineWidth = 1;
@@ -943,7 +953,9 @@
       // honouring a per-piece override and per-edge corner joins (radius/byLength/intersection cap).
       const sa = piece.seamAllowance ?? currentPattern.seamAllowance ?? 0;
       if (sa > 0.05 && outline.length >= 3) {
-        const allow = pieceAllowancePolygon(currentPattern, piece, piece.seamAllowanceInside ? -sa : sa, paths, points);
+        const allow = explicitBoundaryMirrorAxis(piece, points)
+          ? offsetPolygon(outline, piece.seamAllowanceInside ? -sa : sa)
+          : pieceAllowancePolygon(currentPattern, piece, piece.seamAllowanceInside ? -sa : sa, paths, points);
         c.save();
         c.strokeStyle = isSelected ? 'rgba(29,78,216,0.5)' : 'rgba(30,41,59,0.4)';
         c.lineWidth = 1;
@@ -1181,10 +1193,14 @@
       }
     }
 
-    if (baseScale() > 0.12) {
+    if (baseScale() > 0.12 || pointIds.size > 0 || hoveredPointId) {
       const selPieces = pieceIds;
-      const showLabels = baseScale() > 0.18;
-      for (const pp of editorPlacedPoints(currentPattern, points)) {
+      const allEditorPoints = editorPlacedPoints(currentPattern, points);
+      const idsWithDraftCopy = new Set(allEditorPoints.filter((point) => point.pieceId === '').map((point) => point.pointId));
+      const basePointIds = new Set(currentPattern.paths.map((path) => path.basePoint).filter((id): id is string => !!id));
+      const showDraftMarkers = baseScale() > 0.18;
+      const showLabels = baseScale() > 0.28;
+      for (const pp of allEditorPoints) {
         if (!layerVisible(points.get(pp.pointId)?.layerId)) continue;
         if (!showConstruction && pp.pieceId === '') continue; // hide construction points
 
@@ -1193,24 +1209,33 @@
         const isHovered = hoveredPointId === pp.pointId;
         const isSelected = pointIds.has(pp.pointId);
         const onSelPiece = pp.pieceId !== '' && selPieces.has(pp.pieceId);
-        const r = isHovered ? POINT_RADIUS + 2 : isSelected ? POINT_RADIUS + 1 : POINT_RADIUS;
+        const isDraftCopy = pp.pieceId === '';
+        // When the canonical draft is shown in the centre, do not repeat all of its dots on the
+        // arranged cut pieces. The source reveals those placed anchors only while their piece or
+        // point is selected. Identity-placed patterns still retain their sole visible occurrence.
+        const isRedBasePoint = basePointIds.has(pp.pointId);
+        const hasSeparateDraftCopy = idsWithDraftCopy.has(pp.pointId);
+        if (!isSelected && !isHovered && !onSelPiece &&
+          ((hasSeparateDraftCopy && !isDraftCopy) || (isDraftCopy && !showDraftMarkers))) continue;
+        const r = isHovered ? POINT_RADIUS + 2 : isSelected || isRedBasePoint ? POINT_RADIUS + 1.5 : POINT_RADIUS;
         c.beginPath();
         c.arc(cp.x, cp.y, r, 0, Math.PI * 2);
-        c.fillStyle = isSelected ? '#f97316' : isHovered ? '#fb923c' : (onSelPiece ? SELECT_BLUE : '#64748b');
+        c.fillStyle = isSelected ? '#f97316' : isHovered ? '#fb923c'
+          : isDraftCopy ? (isRedBasePoint ? '#ef4444' : SELECT_BLUE)
+          : (onSelPiece ? SELECT_BLUE : '#64748b');
         c.fill();
-        c.strokeStyle = '#fff';
-        c.lineWidth = 1.25;
-        c.stroke();
+        if (isSelected || isHovered || !isDraftCopy) {
+          c.strokeStyle = '#fff';
+          c.lineWidth = 1.25;
+          c.stroke();
+        }
         // point name label (A0, A1, ...) — like the source
         const nm = points.get(pp.pointId)?.name;
         if (showLabels && nm && (selPieces.size === 0 || onSelPiece || isSelected)) {
           c.font = '11px sans-serif';
           c.textAlign = 'left';
-          c.fillStyle = 'rgba(255,255,255,0.85)';
-          const tw = c.measureText(nm).width;
-          c.fillRect(cp.x + 6, cp.y - 16, tw + 4, 13);
           c.fillStyle = '#334155';
-          c.fillText(nm, cp.x + 8, cp.y - 6);
+          c.fillText(nm, cp.x + 6, cp.y - 6);
         }
       }
       // measurement + bezier handles ONLY for the clicked boundary edge (like the source)
@@ -1386,7 +1411,7 @@
     const points = indexPoints(currentPattern);
     for (const piece of currentPattern.pieces) {
       if (piece.hidden || !layerVisible(piece.layerId) || layerLocked(piece.layerId)) continue;
-      if (pointInPolygon(pat, pieceWorldOutline(currentPattern, piece, paths, points, 6))) return piece;
+      if (pointInPolygon(pat, pieceDisplayOutline(currentPattern, piece, paths, points, 6))) return piece;
     }
     return null;
   }
@@ -2103,7 +2128,7 @@
     for (const piece of currentPattern.pieces) {
       if (piece.hidden || !layerVisible(piece.layerId) || layerLocked(piece.layerId)) continue;
       if (piece.type !== 'dynamic') continue;
-      if (!pointInPolygon(world, pieceWorldOutline(currentPattern, piece, paths, points, 6))) continue;
+      if (!pointInPolygon(world, pieceDisplayOutline(currentPattern, piece, paths, points, 6))) continue;
       const draft = pieceInverseTransform(piece, points)(world);
       const next = piecePointAdd($state.snapshot(currentPattern) as Pattern, piece.id, draft.x, draft.y, undefined, uid);
       if (next !== currentPattern) { onchange(next, 'Add piece point'); toast('Piece point added', 'success'); }
@@ -2788,7 +2813,7 @@
       const points = indexPoints(currentPattern);
       for (const item of pp.items) {
         const ghost = { ...item, position: { x: item.position.x + dx, y: item.position.y + dy } } as Piece;
-        const outline = pieceWorldOutline(currentPattern, ghost, paths, points, 4);
+        const outline = pieceDisplayOutline(currentPattern, ghost, paths, points, 4);
         if (outline.length >= 2) { tracePoly(c, outline, true); c.stroke(); }
       }
     } else if (pp.kind === 'paths') {
@@ -2840,8 +2865,8 @@
     guideMatch = { xPointId: null, yPointId: null };
     if (bypass) return { x, y }; // Alt/Ctrl/Cmd held: raw position (the original's modifier bypass)
     if (currentPattern.snapToGrid) {
-      x = Math.round(x / GRID_MM) * GRID_MM;
-      y = Math.round(y / GRID_MM) * GRID_MM;
+      x = Math.round(x / GRID_SNAP_MM) * GRID_SNAP_MM;
+      y = Math.round(y / GRID_SNAP_MM) * GRID_SNAP_MM;
     }
     if (currentPattern.snapToGuides) {
       const tol = 8 / baseScale();
@@ -3034,7 +3059,7 @@
       let hitPiece: string | null = null;
       for (const piece of currentPattern.pieces) {
         if (piece.hidden || !layerVisible(piece.layerId) || layerLocked(piece.layerId)) continue;
-        if (pointInPolygon(pat, pieceWorldOutline(currentPattern, piece, paths, points, 6))) { hitPiece = piece.id; break; }
+        if (pointInPolygon(pat, pieceDisplayOutline(currentPattern, piece, paths, points, 6))) { hitPiece = piece.id; break; }
       }
       if (hitPiece) {
         setPointIds([]);
