@@ -2109,6 +2109,23 @@ export class PatternRenderer {
   getCameraFov(): number {
     return this.viewport.camera.getFov();
   }
+
+  /** Synchronous camera checkpoint for project export. Unlike the debounced change callback this
+   *  cannot miss an orbit/zoom performed immediately before the user clicks Export. */
+  getCameraState(): {
+    position: [number, number, number];
+    target: [number, number, number];
+    fov: number;
+  } {
+    const p = this.camera.position;
+    const t = this.controls.target;
+    return {
+      position: [p.x, p.y, p.z],
+      target: [t.x, t.y, t.z],
+      fov: this.camera.fov
+    };
+  }
+
   setCameraFov(deg: number): void {
     this.viewport.camera.setFov(deg);
     this.invalidate();

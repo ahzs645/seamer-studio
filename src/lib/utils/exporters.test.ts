@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { createEmptyPattern } from '@seamer/pattern-model';
-import { patternToSSP, sspToPattern } from './exporters';
+import { createSSPArchive, patternToSSP, readSSPEnvelope, sspToPattern } from './exporters';
+
+const TEXTURE = 'data:image/png;base64,iVBORw0KGgo=';
+const PREVIEW = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==';
 
 describe('legacy SSP avatar compatibility', () => {
   it('preserves body measurements while marking a settled SeamScape snapshot for its default avatar', async () => {
@@ -25,5 +28,96 @@ describe('legacy SSP avatar compatibility', () => {
     const pattern = createEmptyPattern();
     const restored = await sspToPattern(await patternToSSP(pattern));
     expect(restored.body.useLegacyDefaultAvatar).toBeUndefined();
+  });
+
+  it('writes a versioned SSP v2 envelope with workspace and zero-velocity checkpoint metadata', async () => {
+    const pattern = createEmptyPattern();
+    pattern.viewMode = '3d';
+    pattern.settings3d.lightingMode = 'sunset';
+    pattern.settings3d.cameraPosition = [1, 2, 3];
+    pattern.settings3d.controlsTarget = [0, 1, 0];
+    pattern.settings3d.cameraFov = 37;
+    pattern.pieces = [{
+      id: 'piece',
+      name: 'Front',
+      settings3d: { savedPositions: [0, 0, 1, 2, 3, 10, 0, 4, 5, 6] }
+    } as never];
+    pattern.images = [
+      { id: 'one', url: TEXTURE, x: 0, y: 0, width: 10, height: 10 },
+      { id: 'two', url: TEXTURE, x: 10, y: 0, width: 10, height: 10 }
+    ];
+
+    const { blob, manifest } = await createSSPArchive(pattern, {
+      previewDataUrl: PREVIEW,
+      now: () => new Date('2026-08-10T12:00:00.000Z')
+    });
+    const envelope = await readSSPEnvelope(blob);
+
+    expect(envelope?.format).toBe('seamer-project');
+    expect(manifest).toMatchObject({
+      schemaVersion: 2,
+      minimumReaderSchemaVersion: 2,
+      createdAt: '2026-08-10T12:00:00.000Z',
+      workspace: {
+        viewMode: '3d', lightingMode: 'sunset', cameraPosition: [1, 2, 3],
+        controlsTarget: [0, 1, 0], cameraFov: 37
+      },
+      checkpoint: { kind: 'particle-positions', resumePolicy: 'zero-velocity', pieceCount: 1, particleCount: 2 },
+      assetCount: 2,
+      unresolvedAssets: []
+    });
+    expect(envelope?.assets).toHaveLength(2); // duplicate image URLs are stored once + one preview
+    expect(envelope?.pattern.images[0].url).toBe(envelope?.pattern.images[1].url);
+    expect(envelope?.pattern.images[0].url).toMatch(/^ssp-asset:\/\//);
+
+    const restored = await sspToPattern(blob);
+    expect(restored.images[0].url).toBe(TEXTURE);
+    expect(restored.images[1].url).toBe(TEXTURE);
+    expect(restored.thumbnailUrl).toBe(PREVIEW);
+    expect(restored.pieces[0].settings3d.savedPositions).toEqual(pattern.pieces[0].settings3d.savedPositions);
+  });
+
+  it('archives a remote texture from its local mirror and reports URLs that cannot be fetched', async () => {
+    const pattern = createEmptyPattern();
+    pattern.images = [
+      { id: 'ok', url: 'https://media.seamscape.com/fabric.png', x: 0, y: 0, width: 10, height: 10 },
+      { id: 'missing', url: 'https://example.com/missing.png', x: 0, y: 0, width: 10, height: 10 }
+    ];
+    const requests: string[] = [];
+    const fetcher = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      requests.push(url);
+      if (url === '/seamer-studio/templates/textures/fabric.png') {
+        return new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { 'content-type': 'image/png' } });
+      }
+      return new Response('', { status: 404 });
+    }) as typeof fetch;
+
+    const { blob, manifest } = await createSSPArchive(pattern, { basePath: '/seamer-studio', fetcher });
+    const restored = await sspToPattern(blob);
+
+    expect(requests[0]).toBe('/seamer-studio/templates/textures/fabric.png');
+    expect(restored.images[0].url).toBe('data:image/png;base64,AQID');
+    expect(restored.images[1].url).toBe('https://example.com/missing.png');
+    expect(manifest.unresolvedAssets).toEqual(['https://example.com/missing.png']);
+  });
+
+  it('still opens the old gzip Pattern-root format', async () => {
+    const pattern = createEmptyPattern();
+    pattern.name = 'SSP v1 project';
+    const stream = new Blob([JSON.stringify(pattern)]).stream().pipeThrough(new CompressionStream('gzip'));
+    const legacyBlob = await new Response(stream).blob();
+
+    expect((await sspToPattern(legacyBlob)).name).toBe('SSP v1 project');
+    expect(await readSSPEnvelope(legacyBlob)).toBeNull();
+  });
+
+  it('still opens legacy SeamScape deflate projects', async () => {
+    const pattern = createEmptyPattern();
+    pattern.name = 'Legacy SeamScape project';
+    const stream = new Blob([JSON.stringify(pattern)]).stream().pipeThrough(new CompressionStream('deflate'));
+    const legacyBlob = await new Response(stream).blob();
+
+    expect((await sspToPattern(legacyBlob)).name).toBe('Legacy SeamScape project');
   });
 });

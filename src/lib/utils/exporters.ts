@@ -288,43 +288,9 @@ export async function markerToHPGL(layout: { placements: { name?: string; poly: 
   return polylinesToHPGL(polys, { texts });
 }
 
-// --- .ssp compressed project (the original's toCompressed) --------------------
-
-/** Whole pattern → gzip-compressed JSON blob (.ssp). */
-export async function patternToSSP(pattern: Pattern): Promise<Blob> {
-  const stream = new Blob([JSON.stringify(pattern)]).stream().pipeThrough(new CompressionStream('gzip'));
-  return await new Response(stream).blob();
-}
-
-/** .ssp blob → Pattern. Current Seamer projects use gzip; legacy SeamScape projects use a zlib
- *  wrapper (`deflate`). Accept both so a project downloaded from the reference studio opens here. */
-export async function sspToPattern(blob: Blob): Promise<Pattern> {
-  const signature = new Uint8Array(await blob.slice(0, 2).arrayBuffer());
-  const format: CompressionFormat = signature[0] === 0x1f && signature[1] === 0x8b ? 'gzip' : 'deflate';
-  const text = await new Response(blob.stream().pipeThrough(new DecompressionStream(format))).text();
-  const pattern = JSON.parse(text) as Pattern;
-  const hasLegacySettledMesh = (pattern.pieces ?? []).some((piece) => {
-    const settings = piece.settings3d as typeof piece.settings3d & { savedMeshSnapshot?: unknown };
-    return settings?.savedMeshSnapshot != null;
-  });
-  if (hasLegacySettledMesh && pattern.body) {
-    // The source Studio displays its model-pack mean avatar for these imported snapshots. Retain
-    // the measurements for round-trip/export, but mark the display behavior so the same saved
-    // surface is not hidden inside a newly reconstructed, measurement-driven body.
-    pattern.body = { ...pattern.body, useLegacyDefaultAvatar: true };
-  }
-  // SeamScape v0.0.1 cached its settled mesh as `savedMeshSnapshot`; Seamer stores a remappable
-  // x2d/y2d + x3d/y3d/z3d array. Keep the source cache untouched and initialize the modern field
-  // so the arrangement and 22 explicit seams can be rebuilt safely even before cache conversion.
-  pattern.pieces = (pattern.pieces ?? []).map((piece) => ({
-    ...piece,
-    settings3d: {
-      ...piece.settings3d,
-      savedPositions: piece.settings3d?.savedPositions ?? []
-    }
-  }));
-  return pattern;
-}
+// --- .ssp versioned project archive -------------------------------------------
+// Kept re-exported here because Studio callers historically imported every exporter from this file.
+export { createSSPArchive, patternToSSP, readSSPEnvelope, sspToPattern } from './ssp';
 
 export function patternToCSV(pattern: Pattern): string {
   // @atelier/io.toCSV intentionally exports neutral Drawing vertices. This legacy CSV is the

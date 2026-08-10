@@ -19,6 +19,10 @@ async function importSample(page: Page, file: string) {
 test.describe('Import samples', () => {
 	test('studio loads and pattern name input is present', async ({ page }) => {
 		const seamWarnings: string[] = [];
+		const templateRequests: string[] = [];
+		page.on('request', (request) => {
+			if (request.url().includes('/templates/')) templateRequests.push(request.url());
+		});
 		page.on('console', (message) => {
 			if (/Seam (?:particle count|length) mismatch/.test(message.text())) {
 				seamWarnings.push(message.text());
@@ -31,9 +35,10 @@ test.describe('Import samples', () => {
 		await expect(scene).toBeVisible();
 		await expect(scene.locator('canvas')).toBeVisible();
 		await expect(scene).toHaveAttribute('data-status', 'ready');
-		// The canonical skirt's two composite waistband seams intentionally use proportional
-		// particle sampling (33 vs 35) when the cloth is rebuilt. A saved default drape may not need
-		// that rebuild, so allow zero warnings but reject anything beyond the known fallbacks.
+		expect(templateRequests.some((url) => url.endsWith('/templates/pencil-skirt.seamer.ssp'))).toBe(true);
+		// The native SSP intentionally starts without a saved drape. Its two composite waistband
+		// seams use proportional particle sampling (33 vs 35) during the source arrangement rebuild,
+		// so allow those known fallbacks but reject every other warning.
 		const allowedSeamWarnings = [
 			'Seam particle count mismatch (Seam_uzave2eyv): 33 vs 35 — fallback proportional sampling applied',
 			'Seam particle count mismatch (Seam_sibuwpf53): 33 vs 35 — fallback proportional sampling applied'
@@ -47,6 +52,22 @@ test.describe('Import samples', () => {
 		await page.getByRole('button', { name: '2D', exact: true }).click();
 		await expect.poll(async () => Number.parseInt(await page.getByTestId('zoom-percent').innerText(), 10))
 			.toBeGreaterThan(splitZoom + 20);
+	});
+
+	test('complete SSP sample library is visible and loads a bundled project', async ({ page }) => {
+		await openStudio(page);
+		await page.getByTestId('templates-menu-trigger').click();
+		await expect(page.getByText('Complete SSP samples (21)')).toBeVisible();
+		await expect(page.locator('[data-testid^="template-"]')).toHaveCount(23);
+
+		const sampleResponse = page.waitForResponse((response) =>
+			response.url().endsWith('/templates/reference-ssp/04-panty-block.seamer.ssp') && response.ok()
+		);
+		await page.getByTestId('template-panty-block').click();
+		await sampleResponse;
+
+		await expect(page.getByTestId('pattern-name-input')).toHaveValue('Panty Block');
+		await expect(page.getByText(/Pieces:3 · Seams:0/)).toBeVisible();
 	});
 
 	const samples = [

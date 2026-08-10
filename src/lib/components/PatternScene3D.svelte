@@ -55,6 +55,23 @@
 
   let viewportInstance: Viewport | null = null;
   let renderer: PatternRenderer | null = null;
+
+  /** Stable project-export checkpoint. Current particle positions are captured even while the
+   *  solver is running; import resumes from this geometry with zero velocity. */
+  export function captureProjectState() {
+    if (!renderer) return null;
+    const camera = renderer.getCameraState();
+    let previewDataUrl: string | null = null;
+    try { previewDataUrl = renderer.captureImage(); } catch { /* 2D preview remains the fallback */ }
+    return {
+      savedByPiece: renderer.extractSavedPositions(),
+      cameraPosition: camera.position,
+      controlsTarget: camera.target,
+      cameraFov: camera.fov,
+      lightingMode,
+      previewDataUrl
+    };
+  }
   type DrapeDebugApi = { getState: () => DrapeDebugState | null };
   type DrapeDebugWindow = Window & { __seamerWebgpuDrape?: DrapeDebugApi };
   let drapeDebugApi: DrapeDebugApi | null = null;
@@ -412,7 +429,17 @@
   }
   function setGizmoMode(m: 'translate' | 'rotate') { gizmoMode = m; renderer?.setArrangeTransformMode(m); }
   function drapeFromArrangement() { renderer?.simulateFromArrangement(); }
-  function setLighting(mode: string) { lightingMode = mode; renderer?.setLightingMode(mode); }
+  function setLighting(mode: string) {
+    lightingMode = mode;
+    renderer?.setLightingMode(mode);
+    if (currentPattern.settings3d.lightingMode !== mode) {
+      onpatternupdate?.({
+        ...currentPattern,
+        settings3d: { ...currentPattern.settings3d, lightingMode: mode },
+        hasChanged: true
+      }, `Use ${lightingTabs.find((tab) => tab.id === mode)?.label ?? mode} lighting`);
+    }
+  }
   // Dark mode flips the app's DaisyUI data-theme; both the 3D scene and the 2D canvas observe it and
   // re-theme themselves (see utils/theme), and all DaisyUI panels switch with it.
   function toggleDark() { dark = toggleTheme() === 'dark'; }

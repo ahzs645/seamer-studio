@@ -41,7 +41,7 @@
   import GradingOverlay from '$lib/components/GradingOverlay.svelte';
   import { toast, toastSuccess, toastError } from '$lib/stores/toast';
   import { confirm } from '$lib/stores/confirm';
-  import { patternToSVG, patternToSVG2, patternToDXF, patternToCSV, downloadText, patternToPNG, downloadBlob, printPattern, printMarkerTiled, patternToHPGL, patternToSSP, sspToPattern } from '$lib/utils/exporters';
+  import { patternToSVG, patternToSVG2, patternToDXF, patternToCSV, downloadText, patternToPNG, downloadBlob, printPattern, printMarkerTiled, patternToHPGL, createSSPArchive, sspToPattern } from '$lib/utils/exporters';
   import { patternThumbnail } from '$lib/utils/thumbnail';
   import { nestPieces, markerToSVG, type CutOffType } from '$lib/utils/markerLayout';
   import {
@@ -78,6 +78,7 @@
   import { configureMcpSession } from '$lib/stores/mcpSession';
   import { get } from 'svelte/store';
   import { autoSaveSeconds } from '$lib/stores/pattern';
+  import { referenceSspTemplates } from '$lib/data/referenceSspTemplates';
 
   let showCommandPalette = $state(false);
   let showBugReport = $state(false);
@@ -107,6 +108,15 @@
   }
   let saved = $state(true);
   let viewMode = $state<'2d' | '3d' | 'both'>('both');
+  type Project3DCapture = {
+    savedByPiece: Record<string, number[]>;
+    cameraPosition: [number, number, number];
+    controlsTarget: [number, number, number];
+    cameraFov: number;
+    lightingMode: string;
+    previewDataUrl: string | null;
+  };
+  let scene3d = $state<{ captureProjectState: () => Project3DCapture | null } | null>(null);
   let leftTab = $state<'layers' | 'body' | 'materials' | 'seams'>('layers');
   let showRightPanel = $state(true);
   let showLeftPanel = $state(true);
@@ -119,9 +129,22 @@
 
   function setViewMode(mode: '2d' | '3d' | 'both') {
     viewMode = mode;
+    if (currentPattern.viewMode !== mode) {
+      currentPattern = { ...currentPattern, viewMode: mode, hasChanged: true };
+      pattern.set(currentPattern);
+      saved = false;
+    }
     // Match the reference Studio's focused 3D workspace on entry. The top-bar panel toggles remain
     // available when someone explicitly wants properties or layers beside the garment.
     if (mode === '3d') {
+      showLeftPanel = false;
+      showRightPanel = false;
+    }
+  }
+
+  function restoreWorkspace(patternData: Pattern) {
+    viewMode = patternData.viewMode ?? 'both';
+    if (viewMode === '3d') {
       showLeftPanel = false;
       showRightPanel = false;
     }
@@ -205,31 +228,23 @@
     currentPattern = next; saved = false; pattern.set(next);
   }
 
-  const templatePatterns: Record<string, { name: string; description: string; file: string }> = {
-    'parametric-skirt': { name: 'Parametric Skirt ✨', description: 'Truly parametric: waist/hip/length variables re-draft the geometry; grades by size', file: 'parametric-skirt.json' },
-    'simple-pants': { name: 'Trousers', description: 'Simple pants in 3D (full 3D data)', file: 'simple-pants-3d.json' },
-    'flare-dress': { name: 'Fit & Flare Dress (imported)', description: 'Sleeveless fit and flare dress — converted from a 2D export', file: 'flare-dress.raw.json' },
-    // This canonical template is the fully supported representation of the supplied legacy
-    // "Pencil skirt - 3D.json". Legacy files still resolve to this data through the importer, while
-    // fresh Studio sessions can load it directly without re-running conversion.
-    'pencil-skirt': { name: 'Pencil skirt - 3D', description: 'Pencil skirt with waist band, multi seam', file: 'pencil-skirt.json' },
-    'pencil-skirt-2d': { name: 'Pencil Skirt (2D)', description: '2D skirt block that updates with the body', file: 'pencil-skirt-2d-bodydouble.json' },
-    'pencil-skirt-2d-tutorial': { name: 'Pencil Skirt (2D, tutorial)', description: '2D pencil skirt from the YouTube tutorial', file: 'pencil-skirt-2d-tutorial.json' },
-    'grundschnitt-rock': { name: 'Skirt Block', description: 'Basic skirt block (Grundschnitt Rock)', file: 'grundschnitt-rock.json' },
-    'panty-block': { name: 'Panty Block', description: 'Basic highwaisted panty block', file: 'panty-block.json' },
-    'russ-pants': { name: 'Russ Pants', description: "Norwegian 'russ' party pants", file: 'russ-pants.json' },
-    'tshirt-basic': { name: 'T-Shirt (Basic)', description: 'Front and back pieces with many variables', file: 'tshirt-basic.json' },
-    'long-sleeve-shirt': { name: 'Long Sleeve Shirt', description: 'Long sleeve shirt with collar and cuffs', file: 'long-sleeve-shirt.json' },
-    'parametric-shirt': { name: 'Parametric Shirt', description: 'Long sleeve shirt controlled by measurements', file: 'parametric-shirt.json' },
-    'shirt-with-pocket': { name: 'Shirt with Pocket', description: 'Shirt with a front chest pocket', file: 'shirt-with-pocket.json' },
-    'test-shirt-3d': { name: 'Test Shirt (3D)', description: 'Demo shirt in 3D', file: 'test-shirt-3d.json' },
-    'tailored-shirt': { name: 'Tailored Shirt', description: "Sample pattern from Aldrich's book", file: 'tailored-shirt.json' },
-    'womens-jacket': { name: "Women's Jacket", description: "Ladies' basic jacket with two-piece sleeves", file: 'womens-jacket.json' },
-    'oversized-blazer': { name: 'Oversized Blazer', description: 'Oversized longline blazer base (WIP)', file: 'oversized-blazer.json' },
-    'black-dress': { name: 'Black Dress', description: 'Little black dress, simple', file: 'black-dress.json' },
-    'flared-midi-dress': { name: 'Flared Midi Dress', description: 'Snug at bust and waist with maxi flared lower part', file: 'flared-midi-dress.json' },
-    'nightwing-logo': { name: 'Nightwing Logo', description: 'Nightwing chest logo applique', file: 'nightwing-logo.json' }
-  };
+  const draftingTemplates = [
+    {
+      key: 'parametric-skirt',
+      name: 'Parametric Skirt ✨',
+      description: 'Native Seamer example that re-drafts from waist, hip, and length variables.',
+      file: 'parametric-skirt.json'
+    },
+    {
+      key: 'grundschnitt-rock',
+      name: 'Skirt Block',
+      description: 'Basic skirt block (Grundschnitt Rock).',
+      file: 'grundschnitt-rock.json'
+    }
+  ] as const;
+  const templatePatterns = Object.fromEntries(
+    [...referenceSspTemplates, ...draftingTemplates].map((template) => [template.key, template])
+  ) as Record<string, { name: string; description: string; file: string }>;
   const DEFAULT_STUDIO_TEMPLATE = 'pencil-skirt';
 
   let autoSaveTimer: ReturnType<typeof setInterval>;
@@ -264,7 +279,7 @@
           } catch { /* offline — fall through to blank editor */ }
         }
         if (loaded) {
-          currentPattern = loaded; patternName = loaded.name;
+          currentPattern = loaded; patternName = loaded.name; restoreWorkspace(loaded);
           pattern.set(currentPattern);
           // Editor restores this pattern's persisted undo/redo asynchronously.
           await restoreHistory(id);
@@ -440,6 +455,7 @@
     assertPatternBuildable3d(data);
     currentPattern = data;
     patternName = data.name;
+    restoreWorkspace(data);
     pattern.set(data);
     saved = false;
     syncPatternRoute(data.id);
@@ -457,6 +473,7 @@
     // neither changes the route nor discards the document's history.
     assertPatternBuildable3d(data);
     patternName = data.name;
+    restoreWorkspace(data);
     handlePatternUpdate(data, 'Restore version');
   }
 
@@ -595,9 +612,42 @@
   }
 
   async function exportSSP() {
-    const blob = await patternToSSP($state.snapshot(currentPattern) as Pattern);
-    downloadBlob(`${patternName.replace(/\s+/g, '_') || 'pattern'}.ssp`, blob);
-    toastSuccess('Exported compressed project (.ssp)');
+    try {
+      let project = structuredClone($state.snapshot(currentPattern) as Pattern);
+      const capture = scene3d?.captureProjectState() ?? null;
+      if (capture) {
+        project = {
+          ...project,
+          pieces: project.pieces.map((piece) => ({
+            ...piece,
+            settings3d: {
+              ...piece.settings3d,
+              savedPositions: capture.savedByPiece[piece.id] ?? piece.settings3d.savedPositions
+            }
+          })),
+          settings3d: {
+            ...project.settings3d,
+            cameraPosition: capture.cameraPosition,
+            controlsTarget: capture.controlsTarget,
+            cameraFov: capture.cameraFov,
+            lightingMode: capture.lightingMode
+          },
+          viewMode
+        };
+      } else {
+        project.viewMode = viewMode;
+      }
+      const previewDataUrl = capture?.previewDataUrl ?? patternThumbnail(project);
+      const { blob, manifest } = await createSSPArchive(project, { previewDataUrl, basePath: base });
+      downloadBlob(`${patternName.replace(/\s+/g, '_') || 'pattern'}.ssp`, blob);
+      if (manifest.unresolvedAssets.length) {
+        toast(`Exported SSP v2 with ${manifest.unresolvedAssets.length} linked asset${manifest.unresolvedAssets.length === 1 ? '' : 's'} that could not be embedded`, 'info', 6000);
+      } else {
+        toastSuccess(`Exported Seamer project (.ssp) · ${manifest.assetCount} embedded asset${manifest.assetCount === 1 ? '' : 's'}`);
+      }
+    } catch (err) {
+      toastError((err as Error)?.message || 'Could not export Seamer project');
+    }
   }
 
   async function importDxfWithOptions(options: DxfImportOptions) {
@@ -652,7 +702,7 @@
       if (!ok) return;
     }
     pushUndo($state.snapshot(currentPattern) as Pattern, 'New pattern');
-    currentPattern = structuredClone(EMPTY_PATTERN); patternName = 'New Pattern'; pattern.set(currentPattern); saved = true;
+    currentPattern = structuredClone(EMPTY_PATTERN); patternName = 'New Pattern'; restoreWorkspace(currentPattern); pattern.set(currentPattern); saved = true;
     toastSuccess('Scene cleared');
   }
 
@@ -677,16 +727,20 @@
     try {
       const res = await fetch(`${base}/templates/${tpl.file}`);
       if (!res.ok) throw new Error('Not found');
-      const raw = await res.json();
-      let data: Pattern = await convertImportedJson(raw);
+      let data: Pattern;
+      if (tpl.file.toLowerCase().endsWith('.ssp')) {
+        data = await sspToPattern(await res.blob());
+      } else {
+        data = await convertImportedJson(await res.json());
+      }
       data.id = crypto.randomUUID(); data.versionId = crypto.randomUUID(); data.isPublic = false;
       data = normalizePattern(data);
       // recover parametric constructions from the baked template (no-op if already constrained / not recoverable)
       data = makeParametric(data);
-      currentPattern = data; patternName = tpl.name || data.name; pattern.set(data); await restoreHistory(data.id); saved = true;
+      currentPattern = data; patternName = tpl.name || data.name; restoreWorkspace(data); pattern.set(data); await restoreHistory(data.id); saved = true;
     } catch {
       currentPattern = { ...EMPTY_PATTERN, name: tpl.name, description: tpl.description, enable3d: true, viewMode: 'both' };
-      patternName = tpl.name; pattern.set(currentPattern); await restoreHistory(currentPattern.id); saved = true;
+      patternName = tpl.name; restoreWorkspace(currentPattern); pattern.set(currentPattern); await restoreHistory(currentPattern.id); saved = true;
     }
   }
 
@@ -697,8 +751,8 @@
     setSelection((current) => current.replace('piece', id ? [id] : []).clear('point').clear('path'));
   }
 
-  function handleUndo() { const prev = undo($state.snapshot(currentPattern) as Pattern); if (prev) { currentPattern = prev; patternName = prev.name; pattern.set(prev); saved = false; } }
-  function handleRedo() { const next = redo($state.snapshot(currentPattern) as Pattern); if (next) { currentPattern = next; patternName = next.name; pattern.set(next); saved = false; } }
+  function handleUndo() { const prev = undo($state.snapshot(currentPattern) as Pattern); if (prev) { currentPattern = prev; patternName = prev.name; restoreWorkspace(prev); pattern.set(prev); saved = false; } }
+  function handleRedo() { const next = redo($state.snapshot(currentPattern) as Pattern); if (next) { currentPattern = next; patternName = next.name; restoreWorkspace(next); pattern.set(next); saved = false; } }
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
@@ -822,10 +876,33 @@
     <div class="flex items-center gap-2">
       <input type="text" class="input input-bordered input-xs w-40 lg:w-56" placeholder="Pattern name..." bind:value={patternName} data-testid="pattern-name-input" />
       <div class="dropdown dropdown-end">
-        <div role="button" class="btn btn-xs btn-ghost">Templates</div>
-        <ul class="dropdown-content menu bg-base-200 rounded-box z-50 w-56 p-2 shadow">
-          {#each Object.entries(templatePatterns) as [key, tpl]}
-            <li><button class="w-full text-left" onclick={() => loadTemplate(key)}>{tpl.name}<span class="text-xs opacity-50 ml-1">{tpl.description.substring(0, 40)}</span></button></li>
+        <div role="button" tabindex="0" class="btn btn-xs btn-ghost" data-testid="templates-menu-trigger">Templates</div>
+        <ul class="dropdown-content menu bg-base-200 rounded-box z-50 mt-1 max-h-[80vh] w-80 flex-nowrap overflow-y-auto p-2 shadow-xl">
+          <li class="menu-title"><span>Complete SSP samples ({referenceSspTemplates.length})</span></li>
+          {#each referenceSspTemplates as tpl}
+            <li>
+              <button
+                class="w-full items-start gap-2 py-2 text-left"
+                onclick={() => loadTemplate(tpl.key)}
+                data-testid={`template-${tpl.key}`}
+                title={`${tpl.description} By ${tpl.author}. ${tpl.pieces} pieces, ${tpl.seams} seams, ${tpl.materials} materials.`}
+              >
+                <span class={`badge badge-xs mt-0.5 shrink-0 ${tpl.dimension === '3D' ? 'badge-accent' : 'badge-ghost'}`}>{tpl.dimension}</span>
+                <span class="min-w-0">
+                  <span class="block truncate text-sm font-medium">{tpl.name}</span>
+                  <span class="block truncate text-xs opacity-55">{tpl.author} · {tpl.pieces} pieces · {tpl.seams} seams</span>
+                </span>
+              </button>
+            </li>
+          {/each}
+          <li class="menu-title pt-2"><span>Drafting examples</span></li>
+          {#each draftingTemplates as tpl}
+            <li>
+              <button class="w-full text-left" onclick={() => loadTemplate(tpl.key)} data-testid={`template-${tpl.key}`}>
+                <span class="block truncate text-sm font-medium">{tpl.name}</span>
+                <span class="block truncate text-xs opacity-55">{tpl.description}</span>
+              </button>
+            </li>
           {/each}
         </ul>
       </div>
@@ -861,9 +938,9 @@
       </div>
       <div class="dropdown dropdown-end">
         <div role="button" tabindex="0" class="btn btn-ghost btn-xs">Export</div>
-        <ul class="dropdown-content menu bg-base-200 rounded-box z-50 w-44 p-2 shadow text-sm">
+        <ul class="dropdown-content menu bg-base-200 rounded-box z-50 w-72 p-2 shadow text-sm">
           <li><button onclick={handleExport}>JSON (.seamer.json)</button></li>
-          <li><button onclick={exportSSP}>Compressed project (.ssp)</button></li>
+          <li><button onclick={exportSSP}>Seamer Project — 2D + 3D (.ssp)</button></li>
           <li><button onclick={() => exportAs('svg')}>SVG</button></li>
           <li><button onclick={() => exportAs('svg2')}>Export SVG 2 (Beta)</button></li>
           <li><button onclick={() => exportAs('dxf')}>DXF</button></li>
@@ -933,11 +1010,11 @@
     <div class="flex-1 min-w-0 flex overflow-hidden">
       {#if viewMode === 'both'}
         <div class="w-1/2 min-w-0 border-r relative" data-tour-id="tour-canvas-2d">{#key $patternEditor}<PatternCanvas2D {currentPattern} editor={$patternEditor} onchange={handlePatternUpdate} />{/key}</div>
-        <div class="w-1/2 min-w-0 relative" data-tour-id="tour-canvas-3d"><PatternScene3D {currentPattern} selectedPieceId={[...pieceIds][0] ?? null} onpieceselect={handlePieceSelect} ondrapesettled={handleDrapeSettled} onpatternupdate={handlePatternUpdate} oncamerachange={handleCameraChange} {labelDisplay} /></div>
+        <div class="w-1/2 min-w-0 relative" data-tour-id="tour-canvas-3d"><PatternScene3D bind:this={scene3d} {currentPattern} selectedPieceId={[...pieceIds][0] ?? null} onpieceselect={handlePieceSelect} ondrapesettled={handleDrapeSettled} onpatternupdate={handlePatternUpdate} oncamerachange={handleCameraChange} {labelDisplay} /></div>
       {:else if viewMode === '2d'}
         <div class="flex-1 min-w-0 relative" data-tour-id="tour-canvas-2d">{#key $patternEditor}<PatternCanvas2D {currentPattern} editor={$patternEditor} onchange={handlePatternUpdate} />{/key}</div>
       {:else}
-        <div class="flex-1 min-w-0 relative" data-tour-id="tour-canvas-3d"><PatternScene3D {currentPattern} selectedPieceId={[...pieceIds][0] ?? null} onpieceselect={handlePieceSelect} ondrapesettled={handleDrapeSettled} onpatternupdate={handlePatternUpdate} oncamerachange={handleCameraChange} {labelDisplay} /></div>
+        <div class="flex-1 min-w-0 relative" data-tour-id="tour-canvas-3d"><PatternScene3D bind:this={scene3d} {currentPattern} selectedPieceId={[...pieceIds][0] ?? null} onpieceselect={handlePieceSelect} ondrapesettled={handleDrapeSettled} onpatternupdate={handlePatternUpdate} oncamerachange={handleCameraChange} {labelDisplay} /></div>
       {/if}
     </div>
 
