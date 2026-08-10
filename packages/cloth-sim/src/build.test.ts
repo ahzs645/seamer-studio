@@ -132,6 +132,24 @@ describe('SeamScape XPBD defaults', () => {
   });
 });
 
+describe('collision triangle winding', () => {
+  it('reverses the inward render shell for source-compatible outward collision normals', () => {
+    const cloth = quadCloth('P1');
+    // Production boundary triangulation winds this square inward/clockwise. The render mesh keeps
+    // that order because its fabric face is BackSide, while collision normals must face outward.
+    cloth.mesh.triangles = [0, 2, 1, 0, 3, 2];
+    const sim = buildSimData(
+      patternWith([makePiece('P1', [])]),
+      [arrangedQuad(cloth, QUAD_POS_A)]
+    );
+
+    expect(sim.pieces[0].triangles.slice(0, 3)).toEqual([0, 2, 1]);
+    expect(Array.from(sim.triangles.slice(0, 4))).toEqual([0, 1, 2, 0]);
+    expect(sim.maxIncidentTrianglesPerParticle).toBe(12);
+    expect(sim.incidentTriangles).toHaveLength(sim.particleCount * 13);
+  });
+});
+
 function seamOf(fromId: string, toId: string, opts: { fromRev?: boolean; toRev?: boolean } = {}): Seam {
   return {
     id: 'seam1',
@@ -299,6 +317,29 @@ describe('seam linking', () => {
       arrangedQuad(quadCloth('P1', 'eA'), QUAD_POS_A, { fromSaved: true }),
       arrangedQuad(quadCloth('P2', 'eB'), QUAD_POS_B_FORWARD, { fromSaved: true })
     ]);
+    expect(seamPartners(sim, 0)).toEqual([4]);
+    expect(seamPartners(sim, 1)).toEqual([5]);
+    expect(seamPartners(sim, 2)).toEqual([6]);
+  });
+
+  it('repairs explicit orientation after a mirrored legacy outline was flattened', () => {
+    const first = makePiece('P1', ['eA']);
+    const flattened = makePiece('P2', ['eB']);
+    flattened.legacyGeometry = {
+      format: 'seamscape-json',
+      boundary: [],
+      sewLines: [],
+      notches: []
+    };
+    const pattern = patternWith(
+      [first, flattened],
+      [seamOf('eA', 'eB', { toRev: true })]
+    );
+    const sim = buildSimData(pattern, [
+      arrangedQuad(quadCloth('P1', 'eA'), QUAD_POS_A),
+      arrangedQuad(quadCloth('P2', 'eB'), QUAD_POS_B_FORWARD)
+    ]);
+
     expect(seamPartners(sim, 0)).toEqual([4]);
     expect(seamPartners(sim, 1)).toEqual([5]);
     expect(seamPartners(sim, 2)).toEqual([6]);

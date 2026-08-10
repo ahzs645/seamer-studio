@@ -72,6 +72,7 @@
   import CuttingRoomModal from '$lib/components/CuttingRoomModal.svelte';
   import VersionsModal from '$lib/components/VersionsModal.svelte';
   import SettingsModal from '$lib/components/SettingsModal.svelte';
+  import ThemeToggle from '$lib/components/ThemeToggle.svelte';
   import StatusBar from '$lib/components/StatusBar.svelte';
   import HistoryMenu from '$lib/components/HistoryMenu.svelte';
   import { configureMcpSession } from '$lib/stores/mcpSession';
@@ -891,6 +892,7 @@
       <button class="btn btn-ghost btn-xs" onclick={() => showVersions = true} title="Version history" aria-label="Version history">
         <span class="material-symbols-rounded notranslate align-middle" style="font-size:18px">history</span>
       </button>
+      <ThemeToggle size="xs" />
       <button class="btn btn-ghost btn-xs" onclick={() => showSettings = true} title="Settings" aria-label="Settings">
         <span class="material-symbols-rounded notranslate align-middle" style="font-size:18px">settings</span>
       </button>

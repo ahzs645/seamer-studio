@@ -1,6 +1,7 @@
 <script lang="ts">
   import { base } from '$app/paths';
   import { page } from '$app/stores';
+  import ThemeToggle from '$lib/components/ThemeToggle.svelte';
 
   const navLinks = [
     { href: `${base}/`, label: 'Home' },
@@ -55,6 +56,7 @@
     </div>
 
     <div class="flex-initial flex items-center gap-2 pr-2">
+      <ThemeToggle />
       <a href="{base}/studio" class="btn btn-accent btn-sm">Open Studio</a>
     </div>
   </div>

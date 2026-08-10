@@ -486,6 +486,16 @@ export function buildSimData(pattern: Pattern, arranged: ArrangedPiece[], option
       seam.fromPaths.some((r) => r.reversed) || seam.toPaths.some((r) => r.reversed);
     const hasCachedDrape = [...fromChain, ...toChain]
       .every((particle) => anchors[particle * 4 + 3] > 0);
+    // Raw SeamScape JSON flattens mirrored pieces into explicit perimeter geometry. The paired
+    // project still describes seam direction in its original dynamic-piece frame, and matching an
+    // edge by world-space endpoints can leave both refs carrying the same boolean even though their
+    // flattened runs oppose one another (the two centre seams in Simple Pants are the canonical
+    // example). The source cylinder arrangement deliberately places corresponding edges nearest
+    // each other, so use that stronger geometric signal for converted legacy outlines. Native
+    // editable patterns continue to honour their explicit orientation literally.
+    const hasFlattenedLegacyOutline = [...seam.fromPaths, ...seam.toPaths].some((reference) =>
+      ownerByPath.get(reference.id)?.legacyGeometry?.format === 'seamscape-json'
+    );
     const alignCost = (rev: boolean) => {
       let c = 0;
       for (let k = 0; k < n; k++) {
@@ -495,9 +505,8 @@ export function buildSimData(pattern: Pattern, arranged: ArrangedPiece[], option
       }
       return c;
     };
-    const rev = hasExplicitOrientation && !hasCachedDrape
-      ? false
-      : alignCost(true) < alignCost(false);
+    const shouldAutoAlign = hasCachedDrape || !hasExplicitOrientation || hasFlattenedLegacyOutline;
+    const rev = shouldAutoAlign && alignCost(true) < alignCost(false);
     const pairList: number[] = [];
     for (let k = 0; k < n; k++) {
       const a = fromChain[sampleIndex(fromChain.length, n, k)];
@@ -577,7 +586,8 @@ export function buildSimData(pattern: Pattern, arranged: ArrangedPiece[], option
   const particleLayers = new Uint32Array(total);
   // Incident triangles for the body-collision cloth-normal filter: per particle a filter flag + the
   // global indices of the cloth triangles it belongs to (used to estimate the cloth surface normal).
-  const MAX_INCIDENT = 8;
+  // Source compiler packs twelve incident triangles plus the per-particle normal-filter flag.
+  const MAX_INCIDENT = 12;
   const incidentStride = MAX_INCIDENT + 1;
   const incidentTriangles = new Int32Array(total * incidentStride).fill(-1);
   const incidentCount = new Uint8Array(total); // filled slots per particle (excl. the flag slot)
@@ -593,7 +603,14 @@ export function buildSimData(pattern: Pattern, arranged: ArrangedPiece[], option
       }
       for (let t = 0; t < sp.triangles.length; t += 3) {
         const a = sp.triangles[t], b = sp.triangles[t + 1], c = sp.triangles[t + 2];
-        triangles[o++] = a; triangles[o++] = b; triangles[o++] = c; triangles[o++] = meta;
+        // The tolerant/live triangulators wind the render shell inward (the renderer deliberately
+        // treats BackSide as the fabric face). SeamScape's collision model uses the opposite,
+        // outward winding for both self-collision sideness and the optional cloth-normal body
+        // filter. Reusing the render order here inverted every incident cloth normal: source
+        // projects with filterExternalCollisionsByClothNormal=true then rejected valid avatar
+        // contacts and simply fell through/off the body. Keep rendering unchanged, but reverse the
+        // collision-only triangle buffer to match the source solver's convention.
+        triangles[o++] = a; triangles[o++] = c; triangles[o++] = b; triangles[o++] = meta;
         for (const v of [a, b, c]) {
           const n = incidentCount[v];
           if (n < MAX_INCIDENT) { incidentTriangles[v * incidentStride + 1 + n] = triGlobal; incidentCount[v] = n + 1; }

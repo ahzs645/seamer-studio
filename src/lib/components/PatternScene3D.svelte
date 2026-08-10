@@ -13,7 +13,7 @@
   import { PatternRenderer, type DrapeDebugState, type RendererStatus, type SceneMode } from '$lib/scene/scene3d';
   import { createSeamerAoPass } from '$lib/scene/n8aoPost';
   import type { SimConfig } from '@seamer/cloth-sim';
-  import { isDarkTheme, toggleTheme, applyStoredTheme } from '$lib/utils/theme';
+  import { isDarkTheme, toggleTheme, applyStoredTheme, onThemeChange } from '$lib/utils/theme';
   import { show3dStats, simAnchors, selectedTool, seamTool, selectedSeamId, bodyZoomRequest } from '$lib/stores/pattern';
   import { get } from 'svelte/store';
   import { downloadBlob, sceneToGLTF } from '$lib/utils/exporters';
@@ -73,6 +73,7 @@
   let gizmoMode = $state<'translate' | 'rotate'>('translate');
   let lightingMode = $state<string>('flat');
   let dark = $state(false);
+  let unsubscribeTheme: (() => void) | null = null;
   const lightingTabs = [
     { id: 'flat', label: 'Flat' },
     { id: 'studio1', label: 'Studio 1' },
@@ -141,6 +142,7 @@
   onMount(() => {
     applyStoredTheme();
     dark = isDarkTheme();
+    unsubscribeTheme = onThemeChange(() => (dark = isDarkTheme()));
     if (!viewportInstance) {
       status = 'error';
       statusMessage = '3D viewport failed to initialize';
@@ -216,6 +218,8 @@
 
   onDestroy(() => {
     clearTimeout(rebuildTimer);
+    unsubscribeTheme?.();
+    unsubscribeTheme = null;
     // onDestroy also runs during SSR, where window is undefined
     if (import.meta.env.DEV && typeof window !== 'undefined') {
       const target = window as DrapeDebugWindow;

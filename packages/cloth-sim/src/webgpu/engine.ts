@@ -7,6 +7,7 @@
 import type { SimConfig } from '../config';
 import { seamMaxDisplacementSq } from '../config';
 import type { SimData, ColorGroup } from '../build';
+import { applyInitialVerticalTilt } from '../geometry/initialTilt';
 import {
   WORKGROUP_SIZE,
   integrateWGSL,
@@ -174,7 +175,9 @@ export class ClothEngine {
     const STORAGE = GPUBufferUsage.STORAGE;
     const COPY_DST = GPUBufferUsage.COPY_DST;
     const COPY_SRC = GPUBufferUsage.COPY_SRC;
-    this.positions = this.buf(sim.positions, STORAGE | COPY_DST | COPY_SRC);
+    const initialPositions = sim.positions.slice();
+    applyInitialVerticalTilt(initialPositions, sim.positions2d);
+    this.positions = this.buf(initialPositions, STORAGE | COPY_DST | COPY_SRC);
     this.velocities = d.createBuffer({ size: this.particleCount * 16, usage: STORAGE | COPY_DST });
     d.queue.writeBuffer(this.velocities, 0, new Float32Array(this.particleCount * 4));
     this.lastPositions = d.createBuffer({ size: this.particleCount * 16, usage: STORAGE | COPY_DST });

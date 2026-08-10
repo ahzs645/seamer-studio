@@ -26,8 +26,16 @@ interface RadiusSample {
 function fitLinearEnvelope(samples: RadiusSample[]): [number, number] {
   const n = samples.length;
   if (n === 0) return [0.05, 0.05];
+  // SeamScape fits a cylinder only across the finite bone segment. Sample vertices can project
+  // slightly above/below the endpoint bones (especially around the hip), so its legacy fitter
+  // clamps their axial coordinate before regression. Leaving those values unbounded biases the
+  // endpoint radii with samples that are outside the segment the cylinder represents.
+  const finite = samples.map((sample) => ({
+    v: Math.min(1, Math.max(0, sample.v)),
+    r: sample.r
+  }));
   let sv = 0, sr = 0, svv = 0, svr = 0;
-  for (const s of samples) { sv += s.v; sr += s.r; svv += s.v * s.v; svr += s.v * s.r; }
+  for (const s of finite) { sv += s.v; sr += s.r; svv += s.v * s.v; svr += s.v * s.r; }
   const denom = n * svv - sv * sv;
   let slope = 0;
   let intercept = sr / n;
@@ -36,7 +44,7 @@ function fitLinearEnvelope(samples: RadiusSample[]): [number, number] {
     intercept = (sr - slope * sv) / n;
   }
   let lift = 0;
-  for (const s of samples) lift = Math.max(lift, s.r - (slope * s.v + intercept));
+  for (const s of finite) lift = Math.max(lift, s.r - (slope * s.v + intercept));
   intercept += lift;
   return [Math.max(0, intercept), Math.max(0, slope + intercept)];
 }

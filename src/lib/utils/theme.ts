@@ -2,6 +2,26 @@
 // convention), falling back to the OS `prefers-color-scheme`. The 2D and 3D canvases use this so they
 // follow whatever theme the app is in.
 
+export type AppTheme = 'light' | 'dark';
+
+const STORAGE_KEY = 'theme';
+
+function systemTheme(): AppTheme {
+  return typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-color-scheme: dark)').matches
+    ? 'dark'
+    : 'light';
+}
+
+export function setTheme(theme: AppTheme, persist = true): AppTheme {
+  if (typeof document === 'undefined') return theme;
+  document.documentElement.setAttribute('data-theme', theme);
+  document.documentElement.style.colorScheme = theme;
+  if (persist) {
+    try { localStorage.setItem(STORAGE_KEY, theme); } catch { /* ignore */ }
+  }
+  return theme;
+}
+
 export function isDarkTheme(): boolean {
   if (typeof document === 'undefined') return false;
   const t = document.documentElement.getAttribute('data-theme');
@@ -23,16 +43,15 @@ export function onThemeChange(cb: () => void): () => void {
 /** Flip the app between the DaisyUI 'light' and 'dark' themes (persisted to localStorage). */
 export function toggleTheme(): 'light' | 'dark' {
   const next = isDarkTheme() ? 'light' : 'dark';
-  document.documentElement.setAttribute('data-theme', next);
-  try { localStorage.setItem('theme', next); } catch { /* ignore */ }
-  return next;
+  return setTheme(next);
 }
 
-/** Apply the persisted theme (call once on app start). */
-export function applyStoredTheme(): void {
-  if (typeof document === 'undefined') return;
+/** Apply the persisted theme, or the OS preference on a first visit. */
+export function applyStoredTheme(): AppTheme {
+  if (typeof document === 'undefined') return 'light';
   try {
-    const t = localStorage.getItem('theme');
-    if (t === 'dark' || t === 'light') document.documentElement.setAttribute('data-theme', t);
+    const stored = localStorage.getItem(STORAGE_KEY);
+    if (stored === 'dark' || stored === 'light') return setTheme(stored, false);
   } catch { /* ignore */ }
+  return setTheme(systemTheme(), false);
 }

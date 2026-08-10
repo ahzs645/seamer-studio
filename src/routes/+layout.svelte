@@ -5,6 +5,7 @@
   import { onMount } from 'svelte';
   import { setAvatarAssetsBase } from '@seamer/avatar/assets';
   import AppHeader from '$lib/components/AppHeader.svelte';
+  import { applyStoredTheme } from '$lib/utils/theme';
 
   let { children } = $props();
   const studioRoot = `${base}/studio`;
@@ -15,6 +16,7 @@
   setAvatarAssetsBase(`${base}/models`);
 
   onMount(() => {
+    applyStoredTheme();
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register(`${base}/service-worker.js`).catch(() => {});
     }
