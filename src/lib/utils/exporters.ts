@@ -303,6 +303,16 @@ export async function sspToPattern(blob: Blob): Promise<Pattern> {
   const format: CompressionFormat = signature[0] === 0x1f && signature[1] === 0x8b ? 'gzip' : 'deflate';
   const text = await new Response(blob.stream().pipeThrough(new DecompressionStream(format))).text();
   const pattern = JSON.parse(text) as Pattern;
+  const hasLegacySettledMesh = (pattern.pieces ?? []).some((piece) => {
+    const settings = piece.settings3d as typeof piece.settings3d & { savedMeshSnapshot?: unknown };
+    return settings?.savedMeshSnapshot != null;
+  });
+  if (hasLegacySettledMesh && pattern.body) {
+    // The source Studio displays its model-pack mean avatar for these imported snapshots. Retain
+    // the measurements for round-trip/export, but mark the display behavior so the same saved
+    // surface is not hidden inside a newly reconstructed, measurement-driven body.
+    pattern.body = { ...pattern.body, useLegacyDefaultAvatar: true };
+  }
   // SeamScape v0.0.1 cached its settled mesh as `savedMeshSnapshot`; Seamer stores a remappable
   // x2d/y2d + x3d/y3d/z3d array. Keep the source cache untouched and initialize the modern field
   // so the arrangement and 22 explicit seams can be rebuilt safely even before cache conversion.

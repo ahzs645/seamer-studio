@@ -394,6 +394,13 @@ export interface Body {
   gender: 'female' | 'male' | string;
   unitType: 'imperial' | 'metric' | string;
   bodyColor: string; // hex
+  /**
+   * SeamScape's legacy Studio keeps rendering the model-pack mean avatar when an imported SSP
+   * contains a settled cloth snapshot, even though the project's measurement fields round-trip.
+   * Keep that compatibility state explicit so we can preserve the source measurements without
+   * forcing the cached garment onto a different body. Editing a measurement clears this flag.
+   */
+  useLegacyDefaultAvatar?: boolean;
 }
 
 export interface Layer {

@@ -426,6 +426,10 @@ export function convertSimplePatternWithLegacyProject(
       ...restored.settings3d,
       ...structuredClone(legacyProject.settings3d)
     };
+    restored.body = {
+      ...structuredClone(legacyProject.body),
+      useLegacyDefaultAvatar: legacyProject.body.useLegacyDefaultAvatar ?? true
+    };
     restored.enable3d = legacyProject.enable3d !== false;
     restored.viewMode = legacyProject.viewMode ?? restored.viewMode;
     return restored;
@@ -619,7 +623,12 @@ export function convertSimplePatternWithLegacyProject(
   });
 
   pattern.materials = structuredClone(legacyProject.materials);
-  pattern.body = structuredClone(legacyProject.body);
+  pattern.body = {
+    ...structuredClone(legacyProject.body),
+    // Direct SSP decoding sets this flag. Keep the fallback for callers that provide an already
+    // decoded legacy object (the CLI converter and compatibility tests do this as well).
+    useLegacyDefaultAvatar: legacyProject.body.useLegacyDefaultAvatar ?? true
+  };
 
   // Copy garment-level project settings that do not reference the discarded legacy drafting graph.
   const transferable = [

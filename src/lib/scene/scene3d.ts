@@ -718,7 +718,10 @@ export class PatternRenderer {
     const wasRunning = this.userSimulating;
     this.stopSimulation();
     // Track whether the body changed vs the one the cached drape was authored on.
-    const bodyKey = JSON.stringify(pattern.body);
+    const avatarBody = pattern.body.useLegacyDefaultAvatar
+      ? { ...pattern.body, fields: {} }
+      : pattern.body;
+    const bodyKey = JSON.stringify(avatarBody);
     this.lastBodyKey = bodyKey;
     if (pattern.id !== this.patternId) {
       this.patternId = pattern.id;
@@ -730,11 +733,11 @@ export class PatternRenderer {
     this.onStatus('loading');
     try {
       if (!this.avatar) {
-        this.avatar = await AvatarController.create(pattern.body, createAvatarMaterial(pattern.body.bodyColor));
+        this.avatar = await AvatarController.create(avatarBody, createAvatarMaterial(pattern.body.bodyColor));
         const mesh = this.avatar.mesh;
         if (mesh) this.scene.add(mesh);
       } else {
-        await this.avatar.setBody(pattern.body);
+        await this.avatar.setBody(avatarBody);
         this.avatar.setMaterial(createAvatarMaterial(pattern.body.bodyColor));
       }
       this.setAvatarVisible(

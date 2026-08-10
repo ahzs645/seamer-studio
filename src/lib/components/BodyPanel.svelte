@@ -61,14 +61,21 @@
   }
 
   function setGender(gender: 'male' | 'female' | 'neutral') {
-    onchange({ ...currentPattern, body: { ...currentPattern.body, gender }, hasChanged: true });
+    onchange({ ...currentPattern, body: { ...currentPattern.body, gender, useLegacyDefaultAvatar: false }, hasChanged: true });
   }
   function setUnit(unitType: 'imperial' | 'metric') {
     onchange({ ...currentPattern, body: { ...currentPattern.body, unitType }, hasChanged: true });
   }
+  function useImportedMeasurements() {
+    onchange({
+      ...currentPattern,
+      body: { ...currentPattern.body, useLegacyDefaultAvatar: false },
+      hasChanged: true
+    });
+  }
   function updateField(name: string, value: number) {
     const fields = { ...currentPattern.body.fields, [name]: Math.round(value * 10) / 10 };
-    onchange({ ...currentPattern, body: { ...currentPattern.body, fields }, hasChanged: true });
+    onchange({ ...currentPattern, body: { ...currentPattern.body, fields, useLegacyDefaultAvatar: false }, hasChanged: true });
   }
   function bump(f: MeasurementDef, dir: number) {
     updateField(f.name, displayValue(f) + dir * stepSize(f));
@@ -76,7 +83,7 @@
   function clearField(name: string) {
     const fields = { ...currentPattern.body.fields };
     delete fields[name];
-    onchange({ ...currentPattern, body: { ...currentPattern.body, fields }, hasChanged: true });
+    onchange({ ...currentPattern, body: { ...currentPattern.body, fields, useLegacyDefaultAvatar: false }, hasChanged: true });
   }
   function updateBodyColor(color: string) {
     onchange({ ...currentPattern, body: { ...currentPattern.body, bodyColor: color }, hasChanged: true });
@@ -91,7 +98,11 @@
     selectedProfileId = id;
     const profile = $bodyProfiles.find((p) => p.id === id);
     if (!profile) return;
-    onchange({ ...currentPattern, body: structuredClone(profile.body), hasChanged: true });
+    onchange({
+      ...currentPattern,
+      body: { ...structuredClone(profile.body), useLegacyDefaultAvatar: false },
+      hasChanged: true
+    });
     toastSuccess(`Applied body "${profile.name}"`);
   }
   function saveAsNewProfile() {
@@ -138,6 +149,14 @@
 
 <div class="text-xs">
   <h3 class="font-bold mb-2">Body</h3>
+
+  {#if currentPattern.body.useLegacyDefaultAvatar}
+    <div class="alert alert-info p-2 mb-2 block text-[11px] leading-snug">
+      <div class="font-semibold">Reference avatar active</div>
+      <div class="opacity-75 mt-0.5">This legacy SSP keeps its saved drape on SeamScape’s default body. The imported measurements are still preserved.</div>
+      <button class="btn btn-info btn-xs w-full mt-2" onclick={useImportedMeasurements}>Apply imported measurements</button>
+    </div>
+  {/if}
 
   <div class="mb-2">
     <span class="text-xs opacity-70">Body profile</span>
