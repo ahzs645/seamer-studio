@@ -6,6 +6,7 @@
 // conservative arrangement/seam heuristics for other files.
 
 import { createEmptyPattern, type Pattern, type ConstrainablePoint, type ConstrainablePath, type Piece, type Material, type Seam, type PiecePath } from '@seamer/pattern-model';
+import { indexPaths, indexPoints, piecePathPolyline, pieceTransform } from '@seamer/pattern-model/utils/patternGeometry';
 import { buildPieceCloth, computeSeamEdgeIntervals } from '@seamer/cloth-sim';
 
 type XY = [number, number];
@@ -14,13 +15,27 @@ export interface SimplePiece {
   name: string;
   origin?: XY;
   grain?: XY;
-  materialId?: string;
+  grainVector?: XY;
+  materialId?: string | null;
   boundary: XY[][]; // ordered edge segments, each a polyline
   sewLines: XY[][];
+  cutBoundary?: XY[] | null;
+  cutPaths?: XY[][];
+  internalLines?: XY[][];
+  notches?: XY[][];
+  drillHoles?: XY[];
+  text?: string | null;
+  description?: string;
+  rotation?: number;
+  rightPieces?: number;
+  leftPieces?: number;
+  mirrorLeftPiecesAxis?: 'X' | 'Y' | string;
+  [key: string]: unknown;
 }
 export interface SimpleFile {
   name?: string;
   description?: string;
+  itemId?: string | null;
   pieces: SimplePiece[];
 }
 
@@ -56,15 +71,6 @@ export function assertPatternBuildable3d(pattern: Pattern): void {
 
 const PALETTE = ['#5b6b8c', '#7a6a8f', '#6b8f7a', '#8f7a6a', '#6a8f8f', '#8f6a7a'];
 
-function len(poly: XY[]): number {
-  let s = 0;
-  for (let i = 1; i < poly.length; i++) s += Math.hypot(poly[i][0] - poly[i - 1][0], poly[i][1] - poly[i - 1][1]);
-  return s;
-}
-function mid(poly: XY[]): XY {
-  const a = poly[0], b = poly[poly.length - 1];
-  return [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
-}
 function dist(a: XY, b: XY): number {
   return Math.hypot(a[0] - b[0], a[1] - b[1]);
 }
@@ -134,6 +140,7 @@ export function convertSimplePattern(json: SimpleFile, canonicalPencilSkirt?: Pa
   const pattern = createEmptyPattern();
   pattern.name = json.name ?? 'Imported Pattern';
   pattern.description = json.description ?? '';
+  pattern.sourceItemId = json.itemId ?? null;
   pattern.lengthUnit = 'mm';
   const preset = detectLegacyPreset(json);
 
@@ -143,7 +150,8 @@ export function convertSimplePattern(json: SimpleFile, canonicalPencilSkirt?: Pa
   const materialsMap = new Map<string, Material>();
   const seams: Seam[] = [];
 
-  // dedup points by rounded coordinate
+  // Deduplicate sampled anchors by coordinate. Raw source pieces are static sampled polylines, so
+  // their anchors intentionally have no drafting labels and are hidden by the piece by default.
   const pointMap = new Map<string, string>();
   let pointCounter = 0;
   const pt = (xy: XY): string => {
@@ -151,12 +159,12 @@ export function convertSimplePattern(json: SimpleFile, canonicalPencilSkirt?: Pa
     const existing = pointMap.get(k);
     if (existing) return existing;
     const id = `P${pointCounter++}`;
-    points.push({ id, name: id, x: xy[0], y: xy[1] });
+    points.push({ id, name: '', x: xy[0], y: xy[1] });
     pointMap.set(k, id);
     return id;
   };
 
-  const matId = (label: string | undefined): string => {
+  const matId = (label: string | null | undefined): string => {
     const key = label ?? 'Material';
     if (!materialsMap.has(key)) {
       const idx = materialsMap.size;
@@ -194,9 +202,6 @@ export function convertSimplePattern(json: SimpleFile, canonicalPencilSkirt?: Pa
   const tallCount = json.pieces.filter((p, i) => (pieceBox[i].maxY - pieceBox[i].minY) > 1.6 * (pieceBox[i].maxX - pieceBox[i].minX)).length;
   const looksLikeTrousers = tallCount >= 4;
 
-  // collect sewLine descriptors for global pairing
-  interface SewRef { pieceIdx: number; ppId: string; length: number; midpoint: XY; }
-  const allSew: SewRef[] = [];
   const piecePathIds: string[][] = [];
 
   // classify pieces for arrangement (trousers: waistbands vs legs; front/back split per side)
@@ -216,9 +221,9 @@ export function convertSimplePattern(json: SimpleFile, canonicalPencilSkirt?: Pa
     // constrained edge.
     const boundaryEdges = formsClosedLoop(sp.sewLines) ? sp.sewLines : sp.boundary;
 
-    // boundary -> one ConstrainablePath + PiecePath per segment
+    // `sewLines` are the stitch outline used to triangulate the cloth. `boundary` is the physical
+    // cut outline (usually including seam allowance) and remains losslessly attached below.
     const mainPaths: PiecePath[] = [];
-    const segMids: { ppId: string; mid: XY; length: number }[] = [];
     const currentPiecePathIds: string[] = [];
     boundaryEdges.forEach((seg, si) => {
       const pathId = `Path_${pi}_${si}`;
@@ -227,17 +232,26 @@ export function convertSimplePattern(json: SimpleFile, canonicalPencilSkirt?: Pa
       const ppId = `PP_${pi}_${si}`;
       currentPiecePathIds.push(ppId);
       mainPaths.push({ id: ppId, name: '', path: pathId, from: pathPoints[0].id, to: pathPoints[pathPoints.length - 1].id, reversed: false, notches: [] });
-      segMids.push({ ppId, mid: mid(seg), length: len(seg) });
     });
     piecePathIds.push(currentPiecePathIds);
 
-    // map each sewLine to its nearest boundary PiecePath
-    sp.sewLines.forEach((sl) => {
-      const m = mid(sl);
-      let best = segMids[0];
-      let bd = Infinity;
-      for (const s of segMids) { const d = dist(m, s.mid); if (d < bd) { bd = d; best = s; } }
-      if (best) allSew.push({ pieceIdx: pi, ppId: best.ppId, length: len(sl), midpoint: m });
+    // Source-only markings which have a native Seamer equivalent become internal piece paths.
+    const internalPaths: PiecePath[] = [];
+    [...(sp.cutPaths ?? []), ...(sp.internalLines ?? [])].forEach((seg, si) => {
+      if (seg.length < 2) return;
+      const pathId = `LegacyInternalPath_${pi}_${si}`;
+      const pathPoints = seg.map((q) => ({ id: pt(q) }));
+      paths.push({ id: pathId, name: '', pathType: 'line', pathPoints, basePoint: pathPoints[0]?.id ?? null, version: 1 });
+      internalPaths.push({
+        id: `LegacyInternalPP_${pi}_${si}`,
+        name: '',
+        path: pathId,
+        from: pathPoints[0].id,
+        to: pathPoints[pathPoints.length - 1].id,
+        reversed: false,
+        notches: [],
+        showIn3d: (sp.internalLines ?? []).includes(seg)
+      });
     });
 
     // heuristic arrangement
@@ -247,14 +261,15 @@ export function convertSimplePattern(json: SimpleFile, canonicalPencilSkirt?: Pa
     if (isLeg) { legOrdinal = leftSide ? legSeen.left++ : legSeen.right++; }
     const arrangement = preset === 'pencil-skirt'
       ? pencilSkirtArrangement(pi)
-      : inferArrangement(looksLikeTrousers, isLeg, leftSide, legOrdinal, cx, gMinX, gMaxX);
+      : inferArrangement(looksLikeTrousers, isLeg, leftSide, legOrdinal, cx, gMinX, gMaxX, sp.name);
 
-    const grain = sp.grain ?? [0, 1];
+    const grain = sp.grain ?? sp.grainVector ?? [0, 1];
     const origin: XY = sp.origin ?? [cx, cy];
     const originPoint = pt(origin);
     pieces.push({
       id: `Piece_${pi}`,
       name: sp.name || `Piece ${pi + 1}`,
+      label: sp.description ?? null,
       type: 'dynamic',
       materialId: matId(sp.materialId),
       // Legacy boundary coordinates are already in placed-plan space. Referencing the legacy
@@ -263,18 +278,41 @@ export function convertSimplePattern(json: SimpleFile, canonicalPencilSkirt?: Pa
       origin: { id: `O${pi}`, name: '', x: origin[0], y: origin[1] },
       originPoint,
       position: { x: origin[0], y: origin[1] },
-      rotation: 0,
+      rotation: sp.rotation ?? 0,
       grainVector: { id: `G${pi}`, name: '', x: grain[0], y: grain[1] },
-      text: null,
-      rightPieces: 1, leftPieces: 0, mirrorLeftPiecesAxis: 'X', mirrorX: false, mirrorY: false,
+      text: sp.text ?? null,
+      rightPieces: sp.rightPieces ?? 1,
+      leftPieces: sp.leftPieces ?? 0,
+      mirrorLeftPiecesAxis: sp.mirrorLeftPiecesAxis ?? 'X',
+      mirrorX: false, mirrorY: false,
       seamAllowanceInside: false,
       mainPaths,
-      internalPaths: [],
+      internalPaths,
+      markers: (sp.drillHoles ?? []).map((q, markerIndex) => ({
+        id: `LegacyDrill_${pi}_${markerIndex}`,
+        type: 'drill' as const,
+        x: q[0],
+        y: q[1]
+      })),
+      legacyGeometry: {
+        format: 'seamscape-json',
+        boundary: structuredClone(sp.boundary),
+        sewLines: structuredClone(sp.sewLines),
+        cutBoundary: sp.cutBoundary ? structuredClone(sp.cutBoundary) : null,
+        cutPaths: structuredClone(sp.cutPaths ?? []),
+        internalLines: structuredClone(sp.internalLines ?? []),
+        notches: structuredClone(sp.notches ?? []),
+        drillHoles: structuredClone(sp.drillHoles ?? []),
+        source: Object.fromEntries(Object.entries(sp).filter(([key]) => ![
+          'boundary', 'sewLines', 'cutBoundary', 'cutPaths', 'internalLines', 'notches', 'drillHoles'
+        ].includes(key)))
+      },
+      hideEditorPoints: true,
       settings3d: {
         arrangement,
         enable3d: true, frozen: false, flipNormals: preset === 'pencil-skirt' && (pi === 1 || pi === 3),
         filterExternalCollisionsByClothNormal: false, collisionLayer: 0,
-        particleDistance: 14,
+        particleDistance: 10,
         savedPositions: []
       }
     });
@@ -282,26 +320,6 @@ export function convertSimplePattern(json: SimpleFile, canonicalPencilSkirt?: Pa
 
   if (preset === 'pencil-skirt') {
     seams.push(...pencilSkirtSeams(piecePathIds));
-  } else {
-    // Pair sewLines across different pieces by closest length (fallback for unidentified files).
-    const used = new Array(allSew.length).fill(false);
-    for (let i = 0; i < allSew.length; i++) {
-      if (used[i]) continue;
-      let bestJ = -1, bestDiff = 12; // mm tolerance
-      for (let j = 0; j < allSew.length; j++) {
-        if (used[j] || j === i || allSew[j].pieceIdx === allSew[i].pieceIdx) continue;
-        const diff = Math.abs(allSew[j].length - allSew[i].length);
-        if (diff < bestDiff) { bestDiff = diff; bestJ = j; }
-      }
-      if (bestJ === -1) continue;
-      used[i] = used[bestJ] = true;
-      seams.push({
-        id: `Seam_${i}`,
-        name: '',
-        fromPaths: [{ id: allSew[i].ppId, mirrored: false, reversed: false }],
-        toPaths: [{ id: allSew[bestJ].ppId, mirrored: false, reversed: false }]
-      });
-    }
   }
 
   pattern.points = points;
@@ -313,6 +331,312 @@ export function convertSimplePattern(json: SimpleFile, canonicalPencilSkirt?: Pa
   pattern.graphicsScale = 0.3;
   pattern.viewMode = 'both';
   pattern.enable3d = true;
+  pattern.showConstruction = false;
+  return pattern;
+}
+
+type LegacyMeshSnapshot = NonNullable<Piece['settings3d']['savedMeshSnapshot']>;
+
+/** Decode SeamScape v0.0.1's packed mesh cache. Its first two values are piece-local millimetres.
+ * Apply the legacy piece's mirror/rotation so they share the expanded Raw JSON piece's local frame,
+ * while retaining piece-local coordinates for source-compatible surface projection. */
+function legacySnapshotToSavedPositions(sourcePiece: Piece, snapshot?: LegacyMeshSnapshot): number[] {
+  if (!snapshot?.positions) return [];
+  try {
+    const binary = atob(snapshot.positions);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    if (bytes.byteLength % 20 !== 0) return [];
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const count = bytes.byteLength / 20;
+    if (snapshot.vertexCount && snapshot.vertexCount !== count) return [];
+    const result = new Array<number>(count * 5);
+    const mirrorX = sourcePiece.mirrorX ? -1 : 1;
+    const mirrorY = sourcePiece.mirrorY ? -1 : 1;
+    const radians = ((sourcePiece.rotation ?? 0) * Math.PI) / 180;
+    const cos = Math.cos(radians);
+    const sin = Math.sin(radians);
+    for (let index = 0; index < count; index += 1) {
+      const offset = index * 20;
+      const localX = view.getFloat32(offset, true) * mirrorX;
+      const localY = view.getFloat32(offset + 4, true) * mirrorY;
+      result[index * 5] = localX * cos - localY * sin;
+      result[index * 5 + 1] = localX * sin + localY * cos;
+      result[index * 5 + 2] = view.getFloat32(offset + 8, true);
+      result[index * 5 + 3] = view.getFloat32(offset + 12, true);
+      result[index * 5 + 4] = view.getFloat32(offset + 16, true);
+    }
+    return result;
+  } catch {
+    return [];
+  }
+}
+
+/** Settled positions are project-owned state. A legacy indexed snapshot needs conversion, while a
+ * modern stride-5 cache can be retained verbatim; absence must stay absent instead of falling back
+ * to cache bundled in a canonical geometry template. */
+function legacyPieceSavedPositions(sourcePiece: Piece): number[] {
+  const convertedSnapshot = legacySnapshotToSavedPositions(
+    sourcePiece,
+    sourcePiece.settings3d.savedMeshSnapshot
+  );
+  if (convertedSnapshot.length > 0) return convertedSnapshot;
+  return structuredClone(sourcePiece.settings3d.savedPositions ?? []);
+}
+
+/**
+ * Combine the two complementary exports produced by the reference Studio:
+ *
+ * - Raw JSON supplies the exact sampled, already-expanded outlines that the current triangulator can
+ *   build reliably.
+ * - The full legacy project supplies explicit seam topology, body/material settings, exact 3D
+ *   arrangements, and its settled mesh cache.
+ *
+ * The old full project alone contains editable Bezier spans whose constraints are invalid under the
+ * newer triangulator. Keeping its metadata while using the source's own sampled outlines preserves
+ * the garment without silently throwing away the information unique to either export.
+ */
+export function convertSimplePatternWithLegacyProject(
+  json: SimpleFile,
+  legacyProject: Pattern,
+  canonicalPencilSkirt?: Pattern
+): Pattern {
+  // This fingerprint is the exact bundled editable project, not an interpreted sampled outline.
+  // Remapping its already-canonical seam graph back through the Raw JSON only loses orientation.
+  if (canonicalPencilSkirt && isCanonicalPencilSkirtExport(json)) {
+    const restored = restoreCanonicalPencilSkirt(json, canonicalPencilSkirt);
+    const sourcePiecesByName = new Map(legacyProject.pieces.map((piece) => [piece.name, piece]));
+    // The canonical template is geometry scaffolding, not an authority for runtime state. Its
+    // bundled settled drape must not leak into a source project that has no saved positions: doing
+    // so makes Play start from a stale equilibrium instead of the source cylinder arrangement.
+    restored.pieces = restored.pieces.map((piece) => {
+      const source = sourcePiecesByName.get(piece.name);
+      if (!source) return piece;
+      return {
+        ...piece,
+        materialId: source.materialId ?? piece.materialId,
+        settings3d: {
+          ...piece.settings3d,
+          ...structuredClone(source.settings3d),
+          savedPositions: legacyPieceSavedPositions(source)
+        }
+      };
+    });
+    restored.settings3d = {
+      ...restored.settings3d,
+      ...structuredClone(legacyProject.settings3d)
+    };
+    restored.enable3d = legacyProject.enable3d !== false;
+    restored.viewMode = legacyProject.viewMode ?? restored.viewMode;
+    return restored;
+  }
+  const pattern = convertSimplePattern(json, canonicalPencilSkirt);
+
+  const sourcePiecesByName = new Map(legacyProject.pieces.map((piece) => [piece.name, piece]));
+  const sourcePoints = indexPoints(legacyProject);
+  const sourcePaths = indexPaths(legacyProject);
+  const defaultLegacyMaterialId = legacyProject.materials[0]?.id;
+  const sourceOwners = new Map<string, {
+    piece: Piece;
+    path: PiecePath;
+    kind: 'main' | 'internal';
+    index: number;
+  }>();
+  for (const piece of legacyProject.pieces) {
+    piece.mainPaths.forEach((path, index) => sourceOwners.set(path.id, { piece, path, kind: 'main', index }));
+    piece.internalPaths.forEach((path, index) => sourceOwners.set(path.id, { piece, path, kind: 'internal', index }));
+  }
+
+  pattern.pieces = pattern.pieces.map((piece) => {
+    const source = sourcePiecesByName.get(piece.name);
+    if (!source) return piece;
+    const sourceSettings = source.settings3d;
+    return {
+      ...piece,
+      label: source.label ?? piece.label,
+      text: source.text ?? piece.text,
+      // In SeamScape a null material means the pattern's first/default material. Falling back to
+      // Raw JSON here leaves labels such as "Material 4" that do not exist in the UUID material
+      // library, causing Seamer's blue-grey missing-material fallback instead of the source white.
+      materialId: source.materialId ?? defaultLegacyMaterialId ?? piece.materialId,
+      settings3d: {
+        ...piece.settings3d,
+        ...sourceSettings,
+        savedPositions: legacyPieceSavedPositions(source)
+      }
+    };
+  });
+
+  const targetPoints = indexPoints(pattern);
+  const targetPiecesByName = new Map(pattern.pieces.map((piece) => [piece.name, piece]));
+  const basePieceName = (name: string) => name
+    .trim()
+    .toLowerCase()
+    .replace(/\s*\((?:r|l)\d+\)\s*$/, '');
+  const candidatePieces = (sourcePiece: Piece) => {
+    const exact = targetPiecesByName.get(sourcePiece.name);
+    const base = basePieceName(sourcePiece.name);
+    const matching = pattern.pieces.filter((piece) => basePieceName(piece.name) === base);
+    return exact ? [exact, ...matching.filter((piece) => piece !== exact)] : matching;
+  };
+  const reflectAcrossLine = (
+    point: { x: number; y: number },
+    from: { x: number; y: number },
+    to: { x: number; y: number }
+  ) => {
+    const dx = to.x - from.x, dy = to.y - from.y;
+    const lengthSquared = dx * dx + dy * dy || 1;
+    const ratio = ((point.x - from.x) * dx + (point.y - from.y) * dy) / lengthSquared;
+    const projected = { x: from.x + dx * ratio, y: from.y + dy * ratio };
+    return { x: 2 * projected.x - point.x, y: 2 * projected.y - point.y };
+  };
+  const sourceWorldPolyline = (owner: NonNullable<ReturnType<typeof sourceOwners.get>>, mirrored: boolean) => {
+    const toWorld = pieceTransform(owner.piece, sourcePoints);
+    let polyline = piecePathPolyline(owner.path, sourcePaths, sourcePoints, 4).map(toWorld);
+    if (!mirrored) return polyline;
+    const mirrorPath = owner.piece.mainPaths.find((path) => path.isMirrorLine);
+    const mirrorFrom = mirrorPath && sourcePoints.get(mirrorPath.from);
+    const mirrorTo = mirrorPath && sourcePoints.get(mirrorPath.to);
+    if (!mirrorFrom || !mirrorTo) return polyline;
+    const axisFrom = toWorld(mirrorFrom), axisTo = toWorld(mirrorTo);
+    polyline = polyline.map((point) => reflectAcrossLine(point, axisFrom, axisTo));
+    return polyline;
+  };
+  const targetPathEndpoints = (piece: Piece, path: PiecePath) => {
+    const from = targetPoints.get(path.from), to = targetPoints.get(path.to);
+    if (!from || !to) return null;
+    const toWorld = pieceTransform(piece, targetPoints);
+    return [toWorld(from), toWorld(to)] as const;
+  };
+  const bestTargetPath = (
+    owner: NonNullable<ReturnType<typeof sourceOwners.get>>,
+    reference: Seam['fromPaths'][number]
+  ) => {
+    const sourcePolyline = sourceWorldPolyline(owner, reference.mirrored);
+    const sourceA = sourcePolyline[0], sourceB = sourcePolyline.at(-1);
+    if (!sourceA || !sourceB) return null;
+    let best: { piece: Piece; path: PiecePath; orientationFlipped: boolean; score: number } | null = null;
+    for (const piece of candidatePieces(owner.piece)) {
+      const paths = owner.kind === 'main' ? piece.mainPaths : piece.internalPaths;
+      for (const path of paths) {
+        const endpoints = targetPathEndpoints(piece, path);
+        if (!endpoints) continue;
+        const [targetA, targetB] = endpoints;
+        const forward = Math.hypot(sourceA.x - targetA.x, sourceA.y - targetA.y)
+          + Math.hypot(sourceB.x - targetB.x, sourceB.y - targetB.y);
+        const reverse = Math.hypot(sourceA.x - targetB.x, sourceA.y - targetB.y)
+          + Math.hypot(sourceB.x - targetA.x, sourceB.y - targetA.y);
+        const score = Math.min(forward, reverse);
+        if (!best || score < best.score) {
+          best = { piece, path, orientationFlipped: reverse < forward, score };
+        }
+      }
+    }
+    return { best, sourcePolyline };
+  };
+  const materializedInternalPaths = new Map<string, PiecePath>();
+  const materializeInternalPath = (
+    owner: NonNullable<ReturnType<typeof sourceOwners.get>>,
+    reference: Seam['fromPaths'][number],
+    sourcePolyline: Array<{ x: number; y: number }>
+  ): PiecePath | null => {
+    const cacheKey = `${owner.path.id}:${reference.mirrored ? 'mirrored' : 'base'}`;
+    const cached = materializedInternalPaths.get(cacheKey);
+    if (cached) return cached;
+    const targets = candidatePieces(owner.piece);
+    const targetPiece = targets[0];
+    if (!targetPiece || sourcePolyline.length < 2) return null;
+    const token = `${owner.path.id}_${reference.mirrored ? 'M' : 'B'}`.replace(/[^a-zA-Z0-9_]/g, '_');
+    const pathPoints = sourcePolyline.map((point, index) => {
+      const id = `LegacySourceInternalPoint_${token}_${index}`;
+      pattern.points.push({ id, name: '', x: point.x, y: point.y });
+      return { id };
+    });
+    const pathId = `LegacySourceInternalPath_${token}`;
+    const piecePath: PiecePath = {
+      id: `LegacySourceInternalPP_${token}`,
+      name: owner.path.name ?? '',
+      path: pathId,
+      from: pathPoints[0].id,
+      to: pathPoints.at(-1)!.id,
+      reversed: false,
+      notches: [],
+      showIn3d: true
+    };
+    pattern.paths.push({
+      id: pathId,
+      name: owner.path.name ?? '',
+      pathType: 'line',
+      pathPoints,
+      basePoint: pathPoints[0].id,
+      version: 1
+    });
+    targetPiece.internalPaths.push(piecePath);
+    materializedInternalPaths.set(cacheKey, piecePath);
+    return piecePath;
+  };
+
+  const mapReference = (reference: Seam['fromPaths'][number]): Seam['fromPaths'][number] | null => {
+    const owner = sourceOwners.get(reference.id);
+    if (!owner) return null;
+    const exactTargetPiece = targetPiecesByName.get(owner.piece.name);
+    // The reference project stores B/F as half pieces with a fold edge. Raw JSON expands those
+    // halves into eight explicit perimeter edges: left half is 4..7, reflected right is 3..0.
+    if (owner.kind === 'main' && exactTargetPiece
+      && owner.piece.mainPaths.length === 5 && exactTargetPiece.mainPaths.length === 8) {
+      if (owner.index === 0) return null; // fold line is internal after expansion
+      const targetIndex = reference.mirrored ? 4 - owner.index : owner.index + 3;
+      const targetPath = exactTargetPiece.mainPaths[targetIndex];
+      return targetPath
+        ? { id: targetPath.id, mirrored: false, reversed: reference.reversed }
+        : null;
+    }
+    const match = bestTargetPath(owner, reference);
+    if (!match) return null;
+    if (owner.kind === 'internal') {
+      const sourceA = match.sourcePolyline[0], sourceB = match.sourcePolyline.at(-1)!;
+      const sourceLength = Math.hypot(sourceB.x - sourceA.x, sourceB.y - sourceA.y);
+      const acceptableScore = Math.max(5, sourceLength * 0.25);
+      if (!match.best || match.best.score > acceptableScore) {
+        const targetPath = materializeInternalPath(owner, reference, match.sourcePolyline);
+        return targetPath
+          ? { id: targetPath.id, mirrored: false, reversed: reference.reversed }
+          : null;
+      }
+    }
+    if (!match.best) return null;
+    return {
+      id: match.best.path.id,
+      mirrored: false,
+      reversed: reference.reversed !== match.best.orientationFlipped
+    };
+  };
+
+  pattern.seams = legacyProject.seams.flatMap((seam) => {
+    const fromPaths = seam.fromPaths.map(mapReference).filter((ref): ref is NonNullable<typeof ref> => !!ref);
+    const toPaths = seam.toPaths.map(mapReference).filter((ref): ref is NonNullable<typeof ref> => !!ref);
+    return fromPaths.length > 0 && toPaths.length > 0 ? [{ ...seam, fromPaths, toPaths }] : [];
+  });
+
+  pattern.materials = structuredClone(legacyProject.materials);
+  pattern.body = structuredClone(legacyProject.body);
+
+  // Copy garment-level project settings that do not reference the discarded legacy drafting graph.
+  const transferable = [
+    'lengthUnit', 'angleUnit', 'defaultNotchSize', 'currentSize', 'seamAllowance', 'settings3d',
+    'gradingProfile', 'markerSettings', 'graphicsOffset', 'graphicsScale', 'enable3d', 'viewMode',
+    'showCompass', 'showGrid', 'snapToGrid', 'snapToGuides', 'showPieceNames', 'useBodyMeasurementsForSizes'
+  ] as const;
+  const sourceRecord = legacyProject as unknown as Record<string, unknown>;
+  const targetRecord = pattern as unknown as Record<string, unknown>;
+  for (const key of transferable) {
+    if (sourceRecord[key] !== undefined) targetRecord[key] = structuredClone(sourceRecord[key]);
+  }
+
+  pattern.name = json.name ?? legacyProject.name ?? pattern.name;
+  pattern.description = json.description ?? legacyProject.description ?? pattern.description;
+  pattern.enable3d = legacyProject.enable3d !== false;
+  pattern.viewMode = legacyProject.viewMode ?? (pattern.enable3d ? 'both' : pattern.viewMode);
   return pattern;
 }
 
@@ -379,16 +703,38 @@ function pencilSkirtSeams(piecePathIds: string[][]): Seam[] {
   ];
 }
 
-function inferArrangement(trousers: boolean, isLeg: boolean, leftSide: boolean, legOrdinal: number, cx: number, gMinX: number, gMaxX: number) {
+function inferArrangement(trousers: boolean, isLeg: boolean, leftSide: boolean, legOrdinal: number, cx: number, gMinX: number, gMaxX: number, pieceName = '') {
   // Torso cylinder runs neck(v=0) -> hips(v=1); leg cylinders run hip(v=0) -> knee(v=1).
   const base = { ...arrangementBase(), radialOffsetMm: 10 };
   if (isLeg) {
+    // Common panel names exported by the source carry more information than their arbitrary 2D
+    // position. Centre/side front/back panels are distributed around the correct leg instead of
+    // stacking at only 0° and 180° (the cause of the pants import's exploded 3D preview).
+    const normalized = pieceName.trim().toLowerCase();
+    const namedPanel = /^(?:copy of )?(?:c[bf]|s[bf]|piece)(?:\s+(?:left|right))?$/.test(normalized);
+    if (namedPanel) {
+      const right = normalized.includes('right') || normalized.startsWith('copy of ');
+      const panel = normalized.replace(/^copy of /, '').replace(/\s+(?:left|right)$/, '');
+      const magnitude = panel.startsWith('c') ? (panel === 'cb' ? 165 : 15)
+        : panel.startsWith('s') ? (panel === 'sb' ? 115 : 65)
+        : 65;
+      const uDegrees = right ? -magnitude : magnitude;
+      return {
+        ...base,
+        mode: 'flat',
+        cylinderName: right ? 'RightUpperLeg' : 'LeftUpperLeg',
+        uDegrees,
+        v: 0.58,
+        radialOffsetMm: 18
+      };
+    }
     // two panels per leg: first -> front (u 0), second -> back (u 180)
     return { ...base, cylinderName: leftSide ? 'LeftUpperLeg' : 'RightUpperLeg', uDegrees: legOrdinal % 2 === 0 ? 0 : 180, v: 0.45 };
   }
   if (trousers) {
     // waistband: wrap the hips (bottom of the torso cylinder)
-    return { ...base, cylinderName: 'Torso', uDegrees: leftSide ? 0 : 180, v: 0.92 };
+    const normalized = pieceName.trim().toLowerCase();
+    return { ...base, cylinderName: 'Torso', uDegrees: normalized === 'f' ? 0 : normalized === 'b' ? 180 : (leftSide ? 0 : 180), v: 0.92 };
   }
   // generic garment (dress/top): wrap around the torso, u from x-position, sit mid-torso
   const u = ((cx - (gMinX + gMaxX) / 2) / Math.max(1, gMaxX - gMinX)) * 180;

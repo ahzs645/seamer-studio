@@ -12,7 +12,9 @@ export class AvatarController {
   private assets: AvatarAssets;
   private material: THREE.Material;
   private skinned: SkinnedAvatar | null = null;
-  private pose: string | null = 'T';
+  // The reference Studio opens in the avatar's neutral/rest pose. Named poses are opt-in controls;
+  // defaulting to T made imported saved garments appear to target a different body silhouette.
+  private pose: string | null = null;
   private gender = 'female';
 
   private constructor(assets: AvatarAssets, material: THREE.Material) {

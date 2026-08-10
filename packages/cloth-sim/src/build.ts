@@ -9,7 +9,7 @@
 // is a distance constraint between opposite corners. Edges are greedily colored so each color group
 // has no shared vertex (conflict-free Gauss-Seidel).
 
-import type { Pattern, Material } from '@seamer/pattern-model';
+import type { Pattern, Material, SeamRef } from '@seamer/pattern-model';
 import type { PieceCloth } from './geometry/boundary';
 import type { Vec2 } from '@seamer/pattern-model/utils/patternGeometry';
 import {
@@ -374,26 +374,33 @@ export function buildSimData(pattern: Pattern, arranged: ArrangedPiece[], option
   const dist3 = (a: number, b: number) => Math.hypot(
     positions[a * 4] - positions[b * 4], positions[a * 4 + 1] - positions[b * 4 + 1], positions[a * 4 + 2] - positions[b * 4 + 2]
   );
-  const chain = (refs: { id: string; mirrored: boolean; reversed: boolean }[], seamId: string): number[] => {
+  const ownerByPath = new Map<string, (typeof pattern.pieces)[number]>();
+  const resolveRun = (reference: SeamRef, seamId: string): number[] | null => {
+    const owner = ownerByPath.get(reference.id) ?? pattern.pieces.find((piece) =>
+      piece.mainPaths.some((path) => path.id === reference.id)
+      || piece.internalPaths.some((path) => path.id === reference.id)
+    );
+    if (!owner) {
+      console.warn(`Seam ${seamId}: ref ${reference.id} has no owning piece — dropped`);
+      return null;
+    }
+    ownerByPath.set(reference.id, owner);
+    const edgeKey = reference.mirrored ? `${reference.id}#M` : reference.id;
+    const particles = edgeParticlesGlobal.get(key(owner.id, edgeKey));
+    if (!particles) {
+      console.warn(`Seam ${seamId}: edge ${edgeKey} of piece "${owner.name}" has no particles in the sim mesh — dropped`);
+      return null;
+    }
+    return reference.reversed ? particles.slice().reverse() : particles.slice();
+  };
+  const chain = (refs: SeamRef[], seamId: string): number[] => {
     const out: number[] = [];
-    for (const r of refs) {
-      // a mirrored ref targets the mirror instance; find the owning piece for this PiecePath id
-      const owner = pattern.pieces.find((p) => p.mainPaths.some((mp) => mp.id === r.id) || p.internalPaths.some((mp) => mp.id === r.id));
-      if (!owner) {
-        console.warn(`Seam ${seamId}: ref ${r.id} has no owning piece — dropped`);
-        continue;
-      }
-      const edgeKey = r.mirrored ? `${r.id}#M` : r.id;
-      const arr = edgeParticlesGlobal.get(key(owner.id, edgeKey));
-      if (!arr) {
-        // the original logs "Missing seam subsegment" — surface the drop instead of silently skipping
-        console.warn(`Seam ${seamId}: edge ${edgeKey} of piece "${owner.name}" has no particles in the sim mesh — dropped`);
-        continue;
-      }
-      const run = r.reversed ? arr.slice().reverse() : arr.slice();
+    for (const reference of refs) {
+      const resolved = resolveRun(reference, seamId);
+      if (!resolved) continue;
       // contiguous edges share their endpoint particle — drop the duplicate so composite chains
       // count particles once (keeps equal-interval sides at equal particle counts)
-      for (const idx of run) {
+      for (const idx of resolved) {
         if (out.length && out[out.length - 1] === idx) continue;
         out.push(idx);
       }
@@ -413,19 +420,47 @@ export function buildSimData(pattern: Pattern, arranged: ArrangedPiece[], option
     return len;
   };
 
+  interface CompositeSegment {
+    particles: number[];
+    length: number;
+  }
+  const buildComposite = (refs: SeamRef[], seamId: string) => {
+    const segments: CompositeSegment[] = [];
+    let totalLength = 0;
+    for (const reference of refs) {
+      const resolved = resolveRun(reference, seamId);
+      if (!resolved?.length) continue;
+      const length = chainLen2d(resolved);
+      segments.push({
+        particles: resolved,
+        length
+      });
+      totalLength += length;
+    }
+    return { segments, totalLength };
+  };
+
+  // Keep per-entry lengths separate: a composite can contain a dart gap whose two endpoint
+  // particles occupy the same normalized seam location but must both remain in the sewn chain.
+  const composites = pattern.seams.map((seam) => ({
+    from: buildComposite(seam.fromPaths, seam.id),
+    to: buildComposite(seam.toPaths, seam.id)
+  }));
+
   // Seam pairing, matching the original: both edges target an equal INTERVAL count, then link
   // index-to-index. Disconnected composite runs retain extra endpoint particles, so the proportional
   // sampling below repeats particles on the connected side to distribute their ease/gather. Our
   // ordered chains come from the piece boundary (edgeParticles preserves PiecePath direction) with
-  // SeamRef.reversed applied by chain(), so when the seam data carries explicit orientation (any ref
-  // with reversed=true) we trust it and link forward, exactly like the original. The repo's seam
-  // editors/importers however create every ref with reversed:false unconditionally — that data
-  // genuinely lacks orientation — so as a FALLBACK we auto-detect direction: in the cached drape
-  // sewn edges are coincident, so the correct alignment (forward vs reversed) is the one with the
-  // smaller total paired distance.
-  const sampleIdx = (len: number, n: number, k: number) => (len <= 1 ? 0 : Math.round((k * (len - 1)) / (n - 1)));
+  // SeamRef.reversed is applied by chain(), so fresh/live geometry with explicit orientation links
+  // forward exactly like the original. A restored saved drape is stronger evidence, however: its
+  // sewn edges are already coincident, while rebuilding/stitching a sampled perimeter can reverse
+  // an individual edge run relative to the legacy PiecePath. For cached drapes (and for data with
+  // no explicit orientation) choose the direction with the smaller paired 3D distance.
+  const sampleIndex = (length: number, count: number, sample: number) =>
+    length <= 1 ? 0 : Math.round((sample * (length - 1)) / (count - 1));
   const seamPairsBySeam: { seamId: string; index: number; pairs: number[] }[] = [];
-  for (const seam of pattern.seams) {
+  for (let seamIndex = 0; seamIndex < pattern.seams.length; seamIndex++) {
+    const seam = pattern.seams[seamIndex];
     const fromChain = chain(seam.fromPaths, seam.id);
     const toChain = chain(seam.toPaths, seam.id);
     if (fromChain.length === 0 || toChain.length === 0) {
@@ -436,37 +471,41 @@ export function buildSimData(pattern: Pattern, arranged: ArrangedPiece[], option
     }
     // Diagnostics matching the original's runtime warnings
     {
-      const lf = chainLen2d(fromChain), lt = chainLen2d(toChain);
+      const lf = composites[seamIndex].from.totalLength;
+      const lt = composites[seamIndex].to.totalLength;
       const rel = Math.abs(lf - lt) / Math.max(lf, lt, 1);
       if (rel > 0.15 && Math.abs(lf - lt) > 10) {
         console.warn(`Seam length mismatch (${seam.id}): from ${lf.toFixed(0)}mm vs to ${lt.toFixed(0)}mm — the longer edge will gather/ease`);
       }
-      if (fromChain.length !== toChain.length) {
-        console.warn(`Seam particle count mismatch (${seam.id}): ${fromChain.length} vs ${toChain.length} — fallback proportional sampling applied`);
-      }
     }
-    // Equal-count resampling: walk a common index range, mapping proportionally onto each chain.
+    // The source's sub-segment assignment seeks equal arrays while retaining every sub-segment
+    // endpoint. Sampling the denser chain and repeating particles on the shorter side reproduces
+    // that endpoint-complete result for this schema (where PiecePaths are the sub-segment unit).
     const n = Math.max(fromChain.length, toChain.length);
     const hasExplicitOrientation =
       seam.fromPaths.some((r) => r.reversed) || seam.toPaths.some((r) => r.reversed);
+    const hasCachedDrape = [...fromChain, ...toChain]
+      .every((particle) => anchors[particle * 4 + 3] > 0);
     const alignCost = (rev: boolean) => {
       let c = 0;
       for (let k = 0; k < n; k++) {
-        const a = fromChain[sampleIdx(fromChain.length, n, k)];
-        const b = toChain[sampleIdx(toChain.length, n, rev ? n - 1 - k : k)];
+        const a = fromChain[sampleIndex(fromChain.length, n, k)];
+        const b = toChain[sampleIndex(toChain.length, n, rev ? n - 1 - k : k)];
         c += dist3(a, b);
       }
       return c;
     };
-    const rev = hasExplicitOrientation ? false : alignCost(true) < alignCost(false);
+    const rev = hasExplicitOrientation && !hasCachedDrape
+      ? false
+      : alignCost(true) < alignCost(false);
     const pairList: number[] = [];
     for (let k = 0; k < n; k++) {
-      const a = fromChain[sampleIdx(fromChain.length, n, k)];
-      const b = toChain[sampleIdx(toChain.length, n, rev ? n - 1 - k : k)];
+      const a = fromChain[sampleIndex(fromChain.length, n, k)];
+      const b = toChain[sampleIndex(toChain.length, n, rev ? n - 1 - k : k)];
       addSeamLink(a, b); addSeamLink(b, a);
       pairList.push(a, b);
     }
-    seamPairsBySeam.push({ seamId: seam.id, index: pattern.seams.indexOf(seam), pairs: pairList });
+    seamPairsBySeam.push({ seamId: seam.id, index: seamIndex, pairs: pairList });
   }
 
   // Repo extension (default OFF — the original has no proximity-based sewing; see BuildSimOptions):

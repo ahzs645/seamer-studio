@@ -224,6 +224,16 @@ export interface PieceSettings3D {
   // flat per-particle cache of the settled rest state, stride 5: [x2d, y2d, x3d, y3d, z3d]
   // x2d/y2d in mm, x3d/y3d/z3d in meters.
   savedPositions: number[];
+  /** SeamScape v0.0.1's indexed mesh cache. Legacy imports retain this so the exact source face
+   * topology can be rendered; current saves continue to use savedPositions above. */
+  savedMeshSnapshot?: {
+    version?: number;
+    coordinateSpace?: string;
+    vertexCount?: number;
+    positions?: string;
+    faces?: string;
+    faceIndexType?: string;
+  };
 }
 
 /** A construction marker placed inside a piece (drill hole / punch), in piece-local drafting mm. */
@@ -241,6 +251,24 @@ export interface PiecePoint {
   name: string;
   x: number; // drafting mm (transformed by the piece placement like the rest of its geometry)
   y: number;
+}
+
+/**
+ * Lossless geometry carried by SeamScape's raw JSON interchange format. The old studio stores a
+ * sampled stitch outline (`sewLines`) separately from the physical cut boundary and from internal
+ * markings. Seamer promotes the stitch outline to editable `mainPaths`, but keeps this envelope so
+ * cut geometry and source-only annotations are not discarded on import/export.
+ */
+export interface LegacyPieceGeometry {
+  format: 'seamscape-json';
+  boundary: [number, number][][];
+  sewLines: [number, number][][];
+  cutBoundary?: [number, number][] | null;
+  cutPaths?: [number, number][][];
+  internalLines?: [number, number][][];
+  notches?: [number, number][][];
+  drillHoles?: [number, number][];
+  source?: Record<string, unknown>;
 }
 
 export interface Piece {
@@ -277,6 +305,10 @@ export interface Piece {
   internalPaths: PiecePath[]; // darts / internal seams / fold lines
   markers?: PieceMarker[]; // drill holes / punch markers (piece-local mm)
   piecePoints?: PiecePoint[]; // piece-local construction points (dynamic pieces only)
+  legacyGeometry?: LegacyPieceGeometry;
+  /** Raw imported pieces have thousands of sampled anchors which the source treated as a static
+   *  polyline. Keep them editable in the model without covering the canvas in anchor dots. */
+  hideEditorPoints?: boolean;
   settings3d: PieceSettings3D;
   hidden?: boolean; // object-browser visibility toggle (omitted = visible)
 }
@@ -495,6 +527,8 @@ export interface Pattern {
   id: string;
   name: string;
   description: string;
+  /** Original library/item identifier when supplied by an imported interchange document. */
+  sourceItemId?: string | null;
   lengthUnit: 'inch' | 'cm' | 'mm';
   angleUnit: 'degrees' | 'radians';
   defaultNotchSize: number; // mm

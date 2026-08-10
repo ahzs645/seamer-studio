@@ -15,6 +15,7 @@
     "test:e2e:webgpu": "playwright test --project=webgpu",
     "test:unit": "vitest run",
     "test:unit:watch": "vitest",
+    "audit:simulator": "node scripts/audit-simulator-parity.mjs",
     "lint": "eslint .",
     "dev:link": "pnpm -r --parallel typecheck --watch"
   },

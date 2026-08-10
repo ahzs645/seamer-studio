@@ -61,7 +61,7 @@
   let status = $state<RendererStatus>('idle');
   let statusMessage = $state('');
   let poses = $state<string[]>([]);
-  let currentPose = $state('T');
+  let currentPose = $state('');
   let webgpu = $state(true);
   let showTriangles = $state(false);
   let showAvatar = $state(true);
@@ -258,7 +258,8 @@
     renderer?.setHighlightedPiece(id ?? null);
   });
 
-  // "Anchor to saved drape" toggle (persisted): OFF = source-parity free-run (anchor scale 0)
+  // "Anchor to saved drape" toggle (persisted): ON preserves imported/source equilibria; grabbed
+  // regions release it locally, while OFF opts into a fully free-running solve.
   $effect(() => { renderer?.setAnchorsEnabled($simAnchors); });
 
   // seam tool active? push the shared selection into the 3D overlay (tubes + direction cones)
@@ -322,8 +323,9 @@
     renderer?.setAvatarVisible(showAvatar);
   });
   $effect(() => {
-    showTriangles = currentPattern.settings3d.showTriangles;
-    renderer?.setShowTriangles(showTriangles);
+    const next = currentPattern.settings3d.showTriangles;
+    showTriangles = next;
+    renderer?.setShowTriangles(next);
   });
   $effect(() => {
     lightingMode = currentPattern.settings3d.lightingMode || 'flat';
@@ -411,7 +413,18 @@
   // re-theme themselves (see utils/theme), and all DaisyUI panels switch with it.
   function toggleDark() { dark = toggleTheme() === 'dark'; }
   function setPose(p: string) { currentPose = p; renderer?.setPose(p); }
-  function toggleTriangles() { showTriangles = !showTriangles; renderer?.setShowTriangles(showTriangles); }
+  function toggleTriangles() {
+    const next = !showTriangles;
+    showTriangles = next;
+    renderer?.setShowTriangles(next);
+    if (currentPattern.settings3d.showTriangles !== next) {
+      onpatternupdate?.({
+        ...currentPattern,
+        settings3d: { ...currentPattern.settings3d, showTriangles: next },
+        hasChanged: true
+      }, next ? 'Show triangles' : 'Hide triangles');
+    }
+  }
   function toggleAvatar() { showAvatar = !showAvatar; renderer?.setAvatarVisible(showAvatar); }
 
   // apply the piece-label display setting (driven from the Properties panel)
@@ -554,7 +567,10 @@
     <div class="absolute top-2 left-1/2 -translate-x-1/2 z-10 bg-warning text-warning-content text-xs rounded px-3 py-1 shadow max-w-md text-center">{statusMessage}</div>
   {/if}
   {#if status === 'loading'}
-    <div class="absolute inset-0 flex items-center justify-center z-10 pointer-events-none"><span class="loading loading-spinner loading-md opacity-60"></span></div>
+    <div class="absolute inset-0 flex flex-col gap-2 items-center justify-center z-10 pointer-events-none" role="status" aria-live="polite">
+      <span class="loading loading-spinner loading-md opacity-70"></span>
+      <span class="rounded bg-base-100/85 px-3 py-1 text-xs shadow backdrop-blur-sm">Preparing 3D garment…</span>
+    </div>
   {/if}
 
   <!-- Right-side control toolbar (mirrors the original studio) -->
@@ -619,7 +635,7 @@
         <input type="checkbox" class="toggle toggle-xs" checked={simCfg.handleExternalCollisions} onchange={(e) => setSim({ handleExternalCollisions: e.currentTarget.checked })} /></label>
       <label class="flex items-center justify-between gap-2"><span>Use bending</span>
         <input type="checkbox" class="toggle toggle-xs" checked={simCfg.useBending} onchange={(e) => setSim({ useBending: e.currentTarget.checked })} /></label>
-      <label class="flex items-center justify-between gap-2" title="ON: softly hold the saved drape while simulating. OFF: free-run like the original solver."><span>Anchor to saved drape</span>
+      <label class="flex items-center justify-between gap-2" title="ON: softly preserve the saved drape while remaining interactive. OFF: fully free-run the local solver."><span>Anchor to saved drape</span>
         <input type="checkbox" class="toggle toggle-xs" checked={$simAnchors} onchange={(e) => simAnchors.set(e.currentTarget.checked)} /></label>
       <label class="flex items-center justify-between gap-2"><span>Time step</span>
         <input type="number" class="input input-bordered input-xs w-20" min="0.001" max="1" step="0.001" value={simCfg.timeStep}

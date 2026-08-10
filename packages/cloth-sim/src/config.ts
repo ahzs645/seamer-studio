@@ -53,7 +53,7 @@ export const SIM_CONFIG: SimConfig = {
   simulationThickness: 0.005,
   edgeThickness: 0.005,
   maxVelocity: 1,
-  minVelocity: 0.01,
+  minVelocity: 0,
   seamStrength: 1,
   selfCollisionFriction: 0.1,
   externalCollisionFriction: 0.3,

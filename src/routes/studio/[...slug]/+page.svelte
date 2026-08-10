@@ -12,7 +12,7 @@
   import MaterialPanel from '$lib/components/MaterialPanel.svelte';
   import SeamPanel from '$lib/components/SeamPanel.svelte';
   import ObjectBrowser from '$lib/components/ObjectBrowser.svelte';
-  import { pattern, patternEditor, pushUndo, undo, redo, undoLabel, redoLabel, restoreHistory, pendingPaste, panelRequest, installSeamerAutomation, getPatternEditor } from '$lib/stores/pattern';
+  import { pattern, patternEditor, pushUndo, undo, redo, undoLabel, redoLabel, restoreHistory, clearPersistedHistory, pendingPaste, panelRequest, installSeamerAutomation, getPatternEditor } from '$lib/stores/pattern';
   import EditorStateBridge from '$lib/components/EditorStateBridge.svelte';
   import type { Selection } from '@atelier/core';
   import type { EditorState } from '@atelier/svelte';
@@ -29,7 +29,13 @@
     type ConstrainablePath
   } from '@seamer/pattern-model';
   import type { PendingPaste } from '$lib/stores/pattern';
-  import { assertPatternBuildable3d, isCanonicalPencilSkirtExport, isSimpleFormat, convertSimplePattern } from '$lib/utils/importSimplePattern';
+  import {
+    assertPatternBuildable3d,
+    convertSimplePattern,
+    convertSimplePatternWithLegacyProject,
+    isCanonicalPencilSkirtExport,
+    isSimpleFormat
+  } from '$lib/utils/importSimplePattern';
   import Toaster from '$lib/components/Toaster.svelte';
   import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
   import GradingOverlay from '$lib/components/GradingOverlay.svelte';
@@ -109,6 +115,16 @@
   let showShortcuts = $state(false);
   let showGrading = $state(false);
   let showAlterations = $state(false);
+
+  function setViewMode(mode: '2d' | '3d' | 'both') {
+    viewMode = mode;
+    // Match the reference Studio's focused 3D workspace on entry. The top-bar panel toggles remain
+    // available when someone explicitly wants properties or layers beside the garment.
+    if (mode === '3d') {
+      showLeftPanel = false;
+      showRightPanel = false;
+    }
+  }
   // Alteration edit mode: while active, the canvas shows the (driver-specific) formula BASE with
   // alterations suppressed and live re-drafting frozen, so dragging points sticks. Saving a sample
   // captures delta = edited − base; on exit we restore the base draft and re-apply via redraft.
@@ -321,8 +337,15 @@
     currentPattern = { ...currentPattern, name: patternName, thumbnailUrl: thumb ?? currentPattern.thumbnailUrl ?? null };
     await saveToDB(currentPattern); saved = true; saveCount += 1;
     // keep the pattern id in the URL so a reload reopens this pattern
-    if ($page.params.slug?.split('/')[0] !== currentPattern.id) replaceState(`${base}/studio/${currentPattern.id}`, {});
+    syncPatternRoute(currentPattern.id);
     toastSuccess('Pattern saved');
+  }
+
+  /** Keep refresh/deep links attached to the document currently shown in the editor. */
+  function syncPatternRoute(patternId: string) {
+    if ($page.params.slug?.split('/')[0] !== patternId) {
+      replaceState(`${base}/studio/${encodeURIComponent(patternId)}`, {});
+    }
   }
 
   async function handleExport() {
@@ -410,12 +433,30 @@
     return convertImportedJson(raw);
   }
 
-  function applyImported(data: Pattern) {
+  async function applyImported(data: Pattern) {
     // Build the candidate cloth topology before touching canonical editor state. A failed import
     // therefore leaves both the 2D document and the renderer on the same last-valid pattern.
     assertPatternBuildable3d(data);
-    currentPattern = data; patternName = data.name; pattern.set(data); pushUndo(structuredClone(data), 'Import pattern'); saved = true;
+    currentPattern = data;
+    patternName = data.name;
+    pattern.set(data);
+    saved = false;
+    syncPatternRoute(data.id);
     toastSuccess(`Imported "${data.name}"`);
+
+    // An import opens/replaces a document; it must not inherit the previous document's undo stack.
+    // Clearing an existing stack for the same id is important when re-importing a corrected legacy
+    // project, otherwise the old local history can restore data that the new import replaced.
+    await clearPersistedHistory(data.id);
+    if (currentPattern.id === data.id) await restoreHistory(data.id);
+  }
+
+  function applyRestoredVersion(data: Pattern) {
+    // A version restore stays in the same document and should be undoable; unlike a file import it
+    // neither changes the route nor discards the document's history.
+    assertPatternBuildable3d(data);
+    patternName = data.name;
+    handlePatternUpdate(data, 'Restore version');
   }
 
   function handleImport() {
@@ -424,14 +465,130 @@
       const file = (e.target as HTMLInputElement).files?.[0]; if (!file) return;
       const ext = file.name.split('.').pop()?.toLowerCase();
       try {
-        if (ext === 'ssp') { applyImported(await sspToPattern(file)); return; } // gzip-compressed project
+        if (ext === 'ssp') { await applyImported(await sspToPattern(file)); return; } // gzip-compressed project
         const text = await file.text();
         const name = file.name.replace(/\.(dxf|svg|cut|val|sm2d|xml|json|rul|seamer\.json)$/i, '');
         if (ext === 'dxf') { dxfPending = { text, name }; return; } // import options dialog first
         if (ext === 'svg') { svgPending = { text, name }; return; } // import options dialog first
         if (ext === 'rul') { rulDialog = { table: parseRul(text) }; return; } // pick a size, then apply
-        applyImported(await parseImport(text, ext, name));
+        await applyImported(await parseImport(text, ext, name));
       } catch (err) { toastError((err as Error)?.message || 'Could not import file'); }
+    };
+    input.click();
+  }
+
+  /** SeamScape's Raw JSON contains the editable geometry while its legacy project contains the
+   *  saved 3D arrangement, materials, and seam references. Import both to avoid dropping either
+   *  half of the document during migration. */
+  function handleLegacySourcePair() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.multiple = true;
+    input.accept = '.ssp,.json,application/json';
+    input.onchange = async () => {
+      const files = [...(input.files ?? [])];
+      const projectFile = files.find((file) => file.name.toLowerCase().endsWith('.ssp'));
+      const jsonFiles = files.filter((file) => file.name.toLowerCase().endsWith('.json'));
+      try {
+        if (!projectFile || jsonFiles.length !== 1) {
+          throw new Error('Select exactly one SeamScape .ssp project and its matching Raw JSON file.');
+        }
+        const raw = JSON.parse(await jsonFiles[0].text()) as unknown;
+        if (!isSimpleFormat(raw)) {
+          throw new Error('The JSON file is not SeamScape Raw JSON. Select the matching raw export.');
+        }
+        const legacy = await sspToPattern(projectFile);
+        const canonical = isCanonicalPencilSkirtExport(raw) ? await loadCanonicalPencilSkirt() : undefined;
+        await applyImported(convertSimplePatternWithLegacyProject(raw, legacy, canonical));
+      } catch (err) {
+        toastError((err as Error)?.message || 'Could not import the SeamScape project pair');
+      }
+    };
+    input.click();
+  }
+
+  type SourceImportKind = 'raw-json' | 'seamly' | 'cut' | 'hpgl' | 'svg' | 'dxf' | 'image';
+
+  /** The source studio exposes one picker per importer. Keeping those entry points separate avoids
+   *  ambiguous extension sniffing and lets each format show its own options/error message. */
+  function handleSourceImport(kind: SourceImportKind) {
+    const accepts: Record<SourceImportKind, string> = {
+      'raw-json': '.json,application/json',
+      seamly: '.val,.sm2d,.xml,application/xml,text/xml',
+      cut: '.cut,text/plain',
+      hpgl: '.plt,.hpgl,.hp,text/plain',
+      svg: '.svg,image/svg+xml',
+      dxf: '.dxf,application/dxf,text/plain',
+      image: 'image/*'
+    };
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = accepts[kind];
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      const name = file.name.replace(/\.(json|val|sm2d|xml|cut|plt|hpgl|hp|svg|dxf)$/i, '');
+      try {
+        if (kind === 'image') {
+          const url = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onerror = () => reject(new Error('Could not read the image'));
+            reader.onload = () => resolve(String(reader.result));
+            reader.readAsDataURL(file);
+          });
+          const dimensions = await new Promise<{ width: number; height: number }>((resolve, reject) => {
+            const probe = new Image();
+            probe.onerror = () => reject(new Error('The selected image is invalid'));
+            probe.onload = () => resolve({ width: probe.naturalWidth, height: probe.naturalHeight });
+            probe.src = url;
+          });
+          const width = 300;
+          const next = {
+            ...$state.snapshot(currentPattern) as Pattern,
+            images: [...currentPattern.images, {
+              id: `Image_${crypto.randomUUID().replace(/-/g, '').slice(0, 9)}`,
+              url, x: 0, y: 0, width,
+              height: width * (dimensions.height / Math.max(1, dimensions.width)),
+              rotation: 0, opacity: 1
+            }],
+            hasChanged: true
+          };
+          currentPattern = next; pushUndo($state.snapshot(currentPattern) as Pattern, 'Import background image'); pattern.set(next); saved = false;
+          toastSuccess(`Imported background image "${file.name}"`);
+          return;
+        }
+
+        const text = await file.text();
+        if (kind === 'raw-json') {
+          const raw = JSON.parse(text) as unknown;
+          if (!isSimpleFormat(raw)) throw new Error('This is not SeamScape Raw JSON. Use “Seamer project” for native project files.');
+          await applyImported(await convertImportedJson(raw));
+          return;
+        }
+        if (kind === 'dxf') { dxfPending = { text, name }; return; }
+        if (kind === 'svg') { svgPending = { text, name }; return; }
+        if (kind === 'cut') { await applyImported(cutToPattern(text, name)); return; }
+        if (kind === 'seamly') { await applyImported(seamlyToPattern(text, name)); return; }
+
+        // HPGL is an interchange drawing, so closed pen strokes become SVG loops and then pass
+        // through the same well-tested outline importer as a native SVG file.
+        const { parseHPGL } = await import('@atelier/io');
+        const polylines = parseHPGL(text).filter((poly) => poly.length >= 3);
+        if (!polylines.length) throw new Error('The HPGL/PLT file contains no drawable polylines.');
+        const all = polylines.flat();
+        const minX = Math.min(...all.map((point) => point.x));
+        const minY = Math.min(...all.map((point) => point.y));
+        const maxX = Math.max(...all.map((point) => point.x));
+        const maxY = Math.max(...all.map((point) => point.y));
+        const width = Math.max(1, maxX - minX), height = Math.max(1, maxY - minY);
+        const paths = polylines.map((poly) => {
+          const first = poly[0], last = poly[poly.length - 1];
+          const close = Math.hypot(first.x - last.x, first.y - last.y) < 1;
+          return `<path d="M ${poly.map((point) => `${point.x} ${point.y}`).join(' L ')}${close ? ' Z' : ''}"/>`;
+        }).join('');
+        const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}mm" height="${height}mm" viewBox="${minX} ${minY} ${width} ${height}"><g fill="none" stroke="black">${paths}</g></svg>`;
+        await applyImported(svgToPattern(svg, name, { unitsOverride: 'mm' }));
+      } catch (err) { toastError((err as Error)?.message || `Could not import ${file.name}`); }
     };
     input.click();
   }
@@ -442,18 +599,18 @@
     toastSuccess('Exported compressed project (.ssp)');
   }
 
-  function importDxfWithOptions(options: DxfImportOptions) {
+  async function importDxfWithOptions(options: DxfImportOptions) {
     if (!dxfPending) return;
     try {
-      applyImported(dxfToPattern(dxfPending.text, dxfPending.name, options));
+      await applyImported(dxfToPattern(dxfPending.text, dxfPending.name, options));
     } catch (err) { toastError((err as Error)?.message || 'Could not import file'); }
     dxfPending = null;
   }
 
-  function importSvgWithOptions(options: SvgImportOptions) {
+  async function importSvgWithOptions(options: SvgImportOptions) {
     if (!svgPending) return;
     try {
-      applyImported(svgToPattern(svgPending.text, svgPending.name, options));
+      await applyImported(svgToPattern(svgPending.text, svgPending.name, options));
     } catch (err) { toastError((err as Error)?.message || 'Could not import file'); }
     svgPending = null;
   }
@@ -480,7 +637,7 @@
       const res = await fetch(`${base}/samples/${file}`);
       if (!res.ok) throw new Error('not found');
       const ext = file.split('.').pop()?.toLowerCase();
-      applyImported(await parseImport(await res.text(), ext, file.replace(/\.(dxf|svg)$/i, '')));
+      await applyImported(await parseImport(await res.text(), ext, file.replace(/\.(dxf|svg)$/i, '')));
     } catch { toastError(`Could not load sample "${file}"`); }
   }
 
@@ -672,9 +829,9 @@
         </ul>
       </div>
       <div class="join join-horizontal" data-tour-id="tour-view-mode">
-        <button class="join-item btn btn-xs" class:btn-active={viewMode === '2d'} onclick={() => viewMode = '2d'}>2D</button>
-        <button class="join-item btn btn-xs" class:btn-active={viewMode === 'both'} onclick={() => viewMode = 'both'}>Both</button>
-        <button class="join-item btn btn-xs" class:btn-active={viewMode === '3d'} onclick={() => viewMode = '3d'}>3D</button>
+        <button class="join-item btn btn-xs" class:btn-active={viewMode === '2d'} onclick={() => setViewMode('2d')}>2D</button>
+        <button class="join-item btn btn-xs" class:btn-active={viewMode === 'both'} onclick={() => setViewMode('both')}>Both</button>
+        <button class="join-item btn btn-xs" class:btn-active={viewMode === '3d'} onclick={() => setViewMode('3d')}>3D</button>
       </div>
     </div>
     <div class="flex items-center gap-1">
@@ -682,8 +839,18 @@
       <button class="btn btn-ghost btn-xs" onclick={handleRedo} disabled={!$redoLabel} title={$redoLabel ? `Redo ${$redoLabel} (Ctrl+Shift+Z)` : 'Nothing to redo'}>&#x21AA;</button>
       <div class="dropdown dropdown-end">
         <div role="button" tabindex="0" class="btn btn-ghost btn-xs" data-testid="import-menu-trigger">Import</div>
-        <ul class="dropdown-content menu bg-base-200 rounded-box z-50 w-52 p-2 shadow text-sm">
-          <li><button onclick={handleImport}>From file… (JSON/DXF/SVG/CUT/Seamly)</button></li>
+        <ul class="dropdown-content menu bg-base-200 rounded-box z-50 w-60 p-2 shadow text-sm">
+          <li class="menu-title">SeamScape importers</li>
+          <li><button onclick={handleLegacySourcePair}>Project + Raw JSON (complete)…</button></li>
+          <li><button onclick={() => handleSourceImport('image')}>Background image…</button></li>
+          <li><button onclick={() => handleSourceImport('seamly')}>Seamly… <span class="text-xs opacity-50">Experimental</span></button></li>
+          <li><button onclick={() => handleSourceImport('cut')}>CUT (plot)…</button></li>
+          <li><button onclick={() => handleSourceImport('hpgl')}>PLT / HPGL… <span class="text-xs opacity-50">Beta</span></button></li>
+          <li><button onclick={() => handleSourceImport('svg')}>SVG…</button></li>
+          <li><button onclick={() => handleSourceImport('dxf')}>DXF…</button></li>
+          <li><button onclick={() => handleSourceImport('raw-json')}>Raw JSON (SeamScape)…</button></li>
+          <li class="menu-title pt-2">Seamer</li>
+          <li><button onclick={handleImport}>From file… (project or auto-detect)</button></li>
           <li><button onclick={() => (rulDialog = { table: null })}>RUL grade rules…</button></li>
           <li class="menu-title pt-2">Samples</li>
           {#each importSamples as s}
@@ -761,14 +928,14 @@
       </div>
     {/if}
 
-    <div class="flex-1 flex overflow-hidden">
+    <div class="flex-1 min-w-0 flex overflow-hidden">
       {#if viewMode === 'both'}
-        <div class="w-1/2 border-r relative" data-tour-id="tour-canvas-2d">{#key $patternEditor}<PatternCanvas2D {currentPattern} editor={$patternEditor} onchange={handlePatternUpdate} />{/key}</div>
-        <div class="w-1/2 relative" data-tour-id="tour-canvas-3d"><PatternScene3D {currentPattern} selectedPieceId={[...pieceIds][0] ?? null} onpieceselect={handlePieceSelect} ondrapesettled={handleDrapeSettled} onpatternupdate={handlePatternUpdate} oncamerachange={handleCameraChange} {labelDisplay} /></div>
+        <div class="w-1/2 min-w-0 border-r relative" data-tour-id="tour-canvas-2d">{#key $patternEditor}<PatternCanvas2D {currentPattern} editor={$patternEditor} onchange={handlePatternUpdate} />{/key}</div>
+        <div class="w-1/2 min-w-0 relative" data-tour-id="tour-canvas-3d"><PatternScene3D {currentPattern} selectedPieceId={[...pieceIds][0] ?? null} onpieceselect={handlePieceSelect} ondrapesettled={handleDrapeSettled} onpatternupdate={handlePatternUpdate} oncamerachange={handleCameraChange} {labelDisplay} /></div>
       {:else if viewMode === '2d'}
-        <div class="flex-1 relative" data-tour-id="tour-canvas-2d">{#key $patternEditor}<PatternCanvas2D {currentPattern} editor={$patternEditor} onchange={handlePatternUpdate} />{/key}</div>
+        <div class="flex-1 min-w-0 relative" data-tour-id="tour-canvas-2d">{#key $patternEditor}<PatternCanvas2D {currentPattern} editor={$patternEditor} onchange={handlePatternUpdate} />{/key}</div>
       {:else}
-        <div class="flex-1 relative" data-tour-id="tour-canvas-3d"><PatternScene3D {currentPattern} selectedPieceId={[...pieceIds][0] ?? null} onpieceselect={handlePieceSelect} ondrapesettled={handleDrapeSettled} onpatternupdate={handlePatternUpdate} oncamerachange={handleCameraChange} {labelDisplay} /></div>
+        <div class="flex-1 min-w-0 relative" data-tour-id="tour-canvas-3d"><PatternScene3D {currentPattern} selectedPieceId={[...pieceIds][0] ?? null} onpieceselect={handlePieceSelect} ondrapesettled={handleDrapeSettled} onpatternupdate={handlePatternUpdate} oncamerachange={handleCameraChange} {labelDisplay} /></div>
       {/if}
     </div>
 
@@ -777,9 +944,11 @@
     {/if}
   </div>
 
-  <div class="h-10 border-t bg-base-200 shrink-0" data-tour-id="tour-toolbar">
-    {#key $patternEditor}<StudioToolbar {currentPattern} editor={$patternEditor} onchange={handlePatternUpdate} />{/key}
-  </div>
+  {#if viewMode !== '3d'}
+    <div class="h-10 border-t bg-base-200 shrink-0" data-tour-id="tour-toolbar">
+      {#key $patternEditor}<StudioToolbar {currentPattern} editor={$patternEditor} onchange={handlePatternUpdate} />{/key}
+    </div>
+  {/if}
 
   {#key $patternEditor}<StatusBar {currentPattern} {saved} editor={$patternEditor} />{/key}
 
@@ -796,7 +965,7 @@
 {#if showCommandPalette}<CommandPalette onclose={() => (showCommandPalette = false)} />{/if}
 {#if showBugReport}<BugReportModal {currentPattern} onclose={() => (showBugReport = false)} />{/if}
 {#if showCuttingRoom}<CuttingRoomModal {currentPattern} onchange={handlePatternUpdate} onclose={() => (showCuttingRoom = false)} />{/if}
-{#if showVersions}<VersionsModal {currentPattern} onrestore={applyImported} onchange={handlePatternUpdate} onclose={() => (showVersions = false)} />{/if}
+{#if showVersions}<VersionsModal {currentPattern} onrestore={applyRestoredVersion} onchange={handlePatternUpdate} onclose={() => (showVersions = false)} />{/if}
 {#if showSettings}<SettingsModal onclose={() => (showSettings = false)} />{/if}
 {#if showPrintDialog}<PrintDialog pattern={currentPattern} {patternName} onclose={() => (showPrintDialog = false)} />{/if}
 {#if dxfPending}<DxfImportDialog filename={dxfPending.name} onapply={importDxfWithOptions} oncancel={() => (dxfPending = null)} />{/if}

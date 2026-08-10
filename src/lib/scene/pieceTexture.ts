@@ -7,6 +7,7 @@
 import * as THREE from 'three';
 import { base as pathsBase } from '$app/paths';
 import type { TextureSlot, Vec2 } from '@seamer/pattern-model';
+import { loadImageFromCandidates, textureUrlCandidates } from './textureUrl';
 
 export interface PieceBake {
   /** material texture slot driving the print (null = solid color piece) */
@@ -34,17 +35,6 @@ const isMobile = (): boolean =>
 /** A piece needs a bake when it has a print to align or internal lines to show. */
 export function pieceNeedsBake(bake: Pick<PieceBake, 'slot' | 'internalPolys'>): boolean {
   return !!bake.slot?.url || bake.internalPolys.some((p) => p.length >= 2);
-}
-
-/** Resolve a media URL the way the 2D canvas does: data/blob pass through, remote media is served
- *  from a local copy by basename under /textures. */
-function resolveTextureUrl(url: string): string {
-  if (url.startsWith('data:') || url.startsWith('blob:')) return url;
-  if (url.startsWith('/')) {
-    return pathsBase && !url.startsWith(`${pathsBase}/`) ? `${pathsBase}${url}` : url;
-  }
-  const base = url.split('/').pop()?.split('?')[0] ?? '';
-  return `${pathsBase}/textures/${base}`;
 }
 
 function drawBake(canvas: HTMLCanvasElement, bake: PieceBake, image: HTMLImageElement | null): void {
@@ -122,7 +112,7 @@ export function createPieceTexture(bake: PieceBake): THREE.CanvasTexture {
       drawBake(canvas, bake, img);
       tex.needsUpdate = true;
     };
-    img.src = resolveTextureUrl(bake.slot.url);
+    loadImageFromCandidates(img, textureUrlCandidates(bake.slot.url, pathsBase));
   }
   return tex;
 }

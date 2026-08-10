@@ -339,14 +339,24 @@ export class SeamerOverlays {
     if (!this.prepared || (!this.showSeams && !this.selectedSeam)) return;
     for (const { seamId, index, pairs } of this.prepared.simData.seamPairsBySeam) {
       if (pairs.length === 0) continue;
+      // `pairs` is [from0,to0, from1,to1, ...]. Drawing it directly produces a dense ladder of
+      // cross-seam links which can read as brightly filled/torn triangles. The source's “show all
+      // seams” view traces each sewn boundary on the cloth surface instead.
+      const edgeSegments: number[] = [];
+      for (let side = 0; side < 2; side += 1) {
+        for (let particle = side; particle + 2 < pairs.length; particle += 2) {
+          edgeSegments.push(pairs[particle], pairs[particle + 2]);
+        }
+      }
+      if (edgeSegments.length === 0) continue;
       const id = `seamer-seam-${seamId}`;
       this.viewport.overlays.addLines(
         id,
-        this.positionsForIndices(pairs),
-        { color: seamColor(index), width: 2.5, opacity: 0.95 },
+        this.positionsForIndices(edgeSegments),
+        { color: seamColor(index), width: 1.5, opacity: 0.78 },
         { parent: this.clothGroup, depthTest: true, renderOrder: 3 }
       );
-      this.seamLines.push({ id, seamId, pairs });
+      this.seamLines.push({ id, seamId, pairs: edgeSegments });
     }
     this.applySeamVisibility();
   }
@@ -356,8 +366,8 @@ export class SeamerOverlays {
       const selected = entry.seamId === this.selectedSeam;
       this.viewport.overlays.setVisible(entry.id, this.showSeams || selected);
       this.viewport.overlays.setStyle(entry.id, {
-        width: selected ? 4.5 : 2.5,
-        opacity: !this.selectedSeam || selected ? 0.95 : 0.5
+        width: selected ? 3.5 : 1.5,
+        opacity: !this.selectedSeam || selected ? 0.78 : 0.4
       });
     }
     this.updateSeamLines();

@@ -58,6 +58,7 @@
   import { rebakeArc, arcPathsCenteredOn, detachArcsTouchingAnchor } from '@seamer/pattern-model/utils/arcParametric';
   import { buildWarp, drawWarpedImage } from '$lib/utils/thinPlateSpline';
   import { explicitBoundaryMirrorAxis, pieceDisplayEdgePolylines, pieceDisplayOutline } from '$lib/utils/patternCanvasGeometry';
+  import { loadImageFromCandidates, textureUrlCandidates } from '$lib/scene/textureUrl';
 
   interface Props {
     currentPattern: Pattern;
@@ -365,13 +366,8 @@
     }
     const img = new Image();
     img.onload = () => render();
-    if (url.startsWith('data:') || url.startsWith('blob:')) {
-      img.src = url; // user-supplied image
-    } else {
-      // bundled media URLs are served from a local copy by basename
-      const file = url.split('/').pop()?.split('?')[0] ?? '';
-      img.src = `${pathsBase}/textures/${file}`;
-    }
+    img.crossOrigin = 'anonymous';
+    loadImageFromCandidates(img, textureUrlCandidates(url, pathsBase));
     texImages.set(url, img);
     return null;
   }
@@ -952,7 +948,7 @@
       // seam allowance — a dashed offset of the boundary (outward, or inward if the piece is set so),
       // honouring a per-piece override and per-edge corner joins (radius/byLength/intersection cap).
       const sa = piece.seamAllowance ?? currentPattern.seamAllowance ?? 0;
-      if (sa > 0.05 && outline.length >= 3) {
+      if (!piece.legacyGeometry?.boundary?.length && sa > 0.05 && outline.length >= 3) {
         const allow = explicitBoundaryMirrorAxis(piece, points)
           ? offsetPolygon(outline, piece.seamAllowanceInside ? -sa : sa)
           : pieceAllowancePolygon(currentPattern, piece, piece.seamAllowanceInside ? -sa : sa, paths, points);
@@ -963,6 +959,34 @@
         tracePoly(c, allow, true);
         c.stroke();
         c.setLineDash([]);
+        c.restore();
+      }
+
+      // SeamScape raw JSON carries its actual sampled cut boundary separately from the stitch
+      // outline. Draw that exact source geometry instead of manufacturing a uniform allowance.
+      // Keeping each source segment separate also preserves corners and shaped allowances.
+      if (piece.legacyGeometry?.boundary?.length) {
+        c.save();
+        c.strokeStyle = isSelected ? '#1d4ed8' : 'rgba(15,23,42,0.92)';
+        c.lineWidth = isSelected ? 1.8 : 1.25;
+        c.setLineDash([]);
+        const sourceBoundary = piece.legacyGeometry.cutBoundary?.length
+          ? [piece.legacyGeometry.cutBoundary]
+          : piece.legacyGeometry.boundary;
+        for (const segment of sourceBoundary) {
+          const world = segment.map(([x, y]) => tf({ x, y }));
+          if (world.length < 2) continue;
+          tracePoly(c, world, false);
+          c.stroke();
+        }
+        for (const notch of piece.legacyGeometry.notches ?? []) {
+          const world = notch.map(([x, y]) => tf({ x, y }));
+          if (world.length < 2) continue;
+          c.strokeStyle = '#dc2626';
+          c.lineWidth = 1.5;
+          tracePoly(c, world, false);
+          c.stroke();
+        }
         c.restore();
       }
 
@@ -1196,6 +1220,7 @@
     if (baseScale() > 0.12 || pointIds.size > 0 || hoveredPointId) {
       const selPieces = pieceIds;
       const allEditorPoints = editorPlacedPoints(currentPattern, points);
+      const piecesById = new Map(currentPattern.pieces.map((piece) => [piece.id, piece]));
       const idsWithDraftCopy = new Set(allEditorPoints.filter((point) => point.pieceId === '').map((point) => point.pointId));
       const basePointIds = new Set(currentPattern.paths.map((path) => path.basePoint).filter((id): id is string => !!id));
       const showDraftMarkers = baseScale() > 0.18;
@@ -1203,6 +1228,7 @@
       for (const pp of allEditorPoints) {
         if (!layerVisible(points.get(pp.pointId)?.layerId)) continue;
         if (!showConstruction && pp.pieceId === '') continue; // hide construction points
+        if (pp.pieceId && piecesById.get(pp.pieceId)?.hideEditorPoints && !pointIds.has(pp.pointId) && hoveredPointId !== pp.pointId) continue;
 
         const pt = pp.world;
         const cp = toCanvas(pt);

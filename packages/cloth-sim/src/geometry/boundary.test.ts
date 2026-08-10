@@ -23,14 +23,14 @@ import {
   type Vec2
 } from '@seamer/pattern-model/utils/patternGeometry';
 import pencilSkirt from '../../../../static/templates/pencil-skirt.json';
-import { buildPieceCloth, computeSeamEdgeIntervals } from './boundary';
+import { buildPieceCloth, computeSeamEdgeIntervals, reuseSavedSurface } from './boundary';
 import { buildSimData, type ArrangedPiece, type SimData } from '../build';
 import { fromArrangement, prepareCloth } from '../simulator';
 import { buildCylinders } from './cylinders';
 import { arrangeParticles } from './arrangement';
 
-/** Independent oracle port of seamer/src/lib/geometry/boundary.ts::computeSeamEdgeIntervals. */
-function legacySeamEdgeIntervals(pattern: Pattern): Map<string, number> {
+/** Independent oracle for SeamScape's 10 mm, ceil-based composite seam allocation. */
+function sourceSeamEdgeIntervals(pattern: Pattern): Map<string, number> {
   const paths = indexPaths(pattern);
   const points = indexPoints(pattern);
   const out = new Map<string, number>();
@@ -43,28 +43,53 @@ function legacySeamEdgeIntervals(pattern: Pattern): Map<string, number> {
   };
   const info = new Map<string, { len: number; pd: number }>();
   for (const piece of pattern.pieces) {
-    const pd = piece.settings3d.particleDistance ?? 14;
+    const pd = piece.settings3d.particleDistance ?? 10;
     for (const path of [...piece.mainPaths, ...piece.internalPaths]) {
       const poly = piecePathPolyline(path, paths, points, Math.min(4, pd / 2));
       if (poly.length >= 2) info.set(path.id, { len: length(poly), pd });
     }
   }
+  const seamCounts = new Map<string, number>();
+  const seamSides = new Map<string, { from: ReturnType<typeof side>; to: ReturnType<typeof side> }>();
+  function side(refs: { id: string }[]) {
+    const items = refs
+      .map((ref) => info.get(ref.id))
+      .filter((item): item is { len: number; pd: number } => !!item);
+    return { items, refs: refs.filter((ref) => info.has(ref.id)) };
+  }
   for (const seam of pattern.seams) {
-    const side = (refs: { id: string }[]) => {
-      const items = refs
-        .map((ref) => info.get(ref.id))
-        .filter((item): item is { len: number; pd: number } => !!item);
-      return {
-        items,
-        refs: refs.filter((ref) => info.has(ref.id)),
-        natural: items.reduce((sum, item) => sum + Math.max(1, Math.round(item.len / item.pd)), 0)
-      };
-    };
     const from = side(seam.fromPaths);
     const to = side(seam.toPaths);
     if (!from.items.length || !to.items.length) continue;
-    const count = Math.max(from.natural, to.natural);
-    const distribute = (value: typeof from) => {
+    seamSides.set(seam.id, { from, to });
+    const fromLength = from.items.reduce((sum, item) => sum + item.len, 0);
+    const toLength = to.items.reduce((sum, item) => sum + item.len, 0);
+    const pd = Math.min(...[...from.items, ...to.items].map((item) => item.pd));
+    seamCounts.set(seam.id, Math.ceil(Math.max(fromLength, toLength) / pd));
+  }
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const piece of pattern.pieces) {
+      for (const path of [...piece.mainPaths, ...piece.internalPaths]) {
+        const touching = pattern.seams.filter((seam) =>
+          [...seam.fromPaths, ...seam.toPaths].some((ref) => ref.id === path.id)
+        );
+        const maximum = Math.max(0, ...touching.map((seam) => seamCounts.get(seam.id) ?? 0));
+        for (const seam of touching) {
+          if ((seamCounts.get(seam.id) ?? 0) < maximum) {
+            seamCounts.set(seam.id, maximum);
+            changed = true;
+          }
+        }
+      }
+    }
+  }
+  for (const seam of pattern.seams) {
+    const sides = seamSides.get(seam.id);
+    const count = seamCounts.get(seam.id);
+    if (!sides || !count) continue;
+    const distribute = (value: ReturnType<typeof side>) => {
       const totalLength = value.items.reduce((sum, item) => sum + item.len, 0) || 1;
       const raw = value.items.map((item) => (count * item.len) / totalLength);
       const base = raw.map((item) => Math.max(1, Math.floor(item)));
@@ -79,8 +104,8 @@ function legacySeamEdgeIntervals(pattern: Pattern): Map<string, number> {
         out.set(ref.id, Math.max(out.get(ref.id) ?? 0, base[index]))
       );
     };
-    distribute(from);
-    distribute(to);
+    distribute(sides.from);
+    distribute(sides.to);
   }
   return out;
 }
@@ -285,12 +310,12 @@ describe('mirrored half-piece seam sampling', () => {
     expect(compared).toBeGreaterThan(0);
   });
 
-  it('matches legacy composite interval allocation and keeps its waistband ease pairs', () => {
+  it('matches source composite allocation and samples waistband ease without a mismatch fallback', () => {
     const pattern = structuredClone(pencilSkirt) as unknown as Pattern;
     const intervals = computeSeamEdgeIntervals(pattern);
-    expect([...intervals]).toEqual([...legacySeamEdgeIntervals(pattern)]);
-    expect(intervals.get('PiecePath_fbyxnjx0s')).toBe(5);
-    expect(intervals.get('PiecePath_hnhr6x036')).toBe(5);
+    expect([...intervals]).toEqual([...sourceSeamEdgeIntervals(pattern)]);
+    expect(intervals.get('PiecePath_fbyxnjx0s')).toBe(8);
+    expect(intervals.get('PiecePath_hnhr6x036')).toBe(8);
 
     const arranged = buildArrangedPieces(pattern, new Map(), intervals);
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
@@ -299,20 +324,13 @@ describe('mirrored half-piece seam sampling', () => {
       const mismatches = warn.mock.calls
         .map(([message]) => String(message))
         .filter((message) => /Seam (?:particle count|length) mismatch/.test(message));
-      expect(mismatches).toEqual([
-        'Seam particle count mismatch (Seam_uzave2eyv): 33 vs 35 — fallback proportional sampling applied',
-        'Seam particle count mismatch (Seam_sibuwpf53): 33 vs 35 — fallback proportional sampling applied'
-      ]);
+      expect(mismatches).toEqual([]);
 
       for (const seamId of ['Seam_uzave2eyv', 'Seam_sibuwpf53']) {
         const pairs = simData.seamPairsBySeam.find((candidate) => candidate.seamId === seamId)?.pairs;
         expect(pairs, `missing composite pairs for ${seamId}`).toBeDefined();
         if (!pairs) continue;
-        const repeatedConnectedSide: number[] = [];
-        for (let index = 2; index < pairs.length; index += 2) {
-          if (pairs[index] === pairs[index - 2]) repeatedConnectedSide.push(index / 2);
-        }
-        expect(repeatedConnectedSide).toEqual([9, 26]);
+        expect(pairs.length / 2).toBeGreaterThan(40);
       }
     } finally {
       warn.mockRestore();
@@ -399,7 +417,7 @@ describe('mirrored half-piece seam sampling', () => {
     const live = fromArrangement(prepared);
     const legacySimData = buildSimData(
       pattern,
-      buildArrangedPieces(pattern, avatar.cylinders, legacySeamEdgeIntervals(pattern))
+      buildArrangedPieces(pattern, avatar.cylinders, sourceSeamEdgeIntervals(pattern))
     );
 
     expect(live.simData.arrangedPositions).toEqual(legacySimData.arrangedPositions);
@@ -447,5 +465,37 @@ describe('mirrored half-piece seam sampling', () => {
     expect(backBand.settings3d.arrangement.uDegrees).toBe(180);
     expect(frontBand.settings3d.flipNormals).toBe(false);
     expect(backBand.settings3d.flipNormals).toBe(true);
+  });
+});
+
+describe('legacy saved-surface restoration', () => {
+  it('barycentrically transfers settled XYZ onto freshly triangulated particles', () => {
+    const faceBytes = Buffer.alloc(6);
+    faceBytes.writeUInt16LE(0, 0);
+    faceBytes.writeUInt16LE(1, 2);
+    faceBytes.writeUInt16LE(2, 4);
+    const savedPositions = [
+      0, 0, 0, 0, 0,
+      10, 0, 1, 0, 0,
+      0, 10, 0, 1, 1
+    ];
+    const result = reuseSavedSurface(
+      [{ x: 2.5, y: 2.5 }, { x: 10, y: 0 }],
+      savedPositions,
+      {
+        version: 2,
+        coordinateSpace: 'piece-local',
+        vertexCount: 3,
+        positions: '',
+        faces: faceBytes.toString('base64'),
+        faceIndexType: 'u16'
+      }
+    );
+
+    expect(result).not.toBeNull();
+    expect(result?.safeCoverage).toBe(1);
+    expect([...result!.positions3d]).toEqual([0.25, 0.25, 0.25, 1, 0, 0]);
+    expect(result?.exactCount).toBe(1);
+    expect(result?.interpolatedCount).toBe(1);
   });
 });

@@ -71,6 +71,29 @@ test.describe('Import samples', () => {
 		});
 	}
 
+	test('an import becomes the active unsaved document and survives save/reload', async ({ page }) => {
+		await page.goto('/studio', { waitUntil: 'domcontentloaded' });
+		const patternName = page.getByRole('textbox', { name: 'Pattern name...' });
+		await expect(patternName).toHaveValue('Pencil skirt - 3D');
+		await page.getByRole('button', { name: 'Import', exact: true }).click();
+		await page.getByRole('button', { name: 'Two pieces (SVG)', exact: true }).click();
+
+		await expect(page.getByText('Imported "two-pieces"')).toBeVisible();
+		await expect(patternName).toHaveValue('two-pieces');
+		expect(new URL(page.url()).pathname).toMatch(/\/studio\/[^/]+$/);
+		const importedUrl = page.url();
+
+		// The old bug left the stale "Saved" state in place even though no imported record existed.
+		// Observing the dirty state before saving makes that lifecycle regression deterministic.
+		await expect(page.getByRole('button', { name: 'Save', exact: true })).toBeVisible();
+		await page.getByRole('button', { name: 'Save', exact: true }).click();
+		await expect(page.getByRole('button', { name: 'Saved', exact: true })).toBeVisible();
+		await page.reload({ waitUntil: 'domcontentloaded' });
+		expect(page.url()).toBe(importedUrl);
+		await expect(page.getByRole('textbox', { name: 'Pattern name...' })).toHaveValue('two-pieces');
+		await expect(page.getByText('P:8 · Paths:8 · Pieces:2 · Seams:0')).toBeVisible();
+	});
+
 	test('object browser lists imported pieces', async ({ page }) => {
 		await openStudio(page);
 		await importSample(page, 'two-pieces.svg');

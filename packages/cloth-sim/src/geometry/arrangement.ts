@@ -61,7 +61,11 @@ export function arrangeParticles(
     const tangent = new THREE.Vector3().subVectors(uPlus, origin).normalize().multiplyScalar(frame.uSign);
     const axis = frame.axis.clone().multiplyScalar(-1);
     const normal = new THREE.Vector3().crossVectors(tangent, axis).normalize();
-    if (opts.flipNormals) normal.multiplyScalar(-1);
+    // SeamScape's resolveFlatFrameDirections keeps the cross-product normal for flipped pieces
+    // and negates it for ordinary pieces. This is intentionally the inverse of the rendered face
+    // normal: the 3 mm placement offset keeps the fabric on the cylinder's outside before the
+    // triangle winding/flip flag is applied.
+    if (!opts.flipNormals) normal.multiplyScalar(-1);
     for (let i = 0; i < pts.length; i++) {
       const p = (pts[i].x - center.x) / 1000;
       const m = (pts[i].y - center.y) / 1000;
@@ -72,12 +76,17 @@ export function arrangeParticles(
   }
 
   // curved: roll the piece around the cylinder
+  // The source reverses the circumferential direction for an ordinary (front-facing) piece and
+  // uses the cylinder direction for a flipNormals piece. Using +uSign for both put the two sides of
+  // a front/back pair on opposite body quadrants; their seam constraints then pulled straight
+  // through the avatar (most visibly the knotted waistband in Simple Pants in 3D).
+  const circumferentialSign = (opts.flipNormals ? 1 : -1) * frame.uSign;
   for (let i = 0; i < pts.length; i++) {
     const p = (pts[i].x - center.x) / 1000; // meters, tangential
     const m = (pts[i].y - center.y) / 1000; // meters, axial
     const v2 = eff.v - m / frame.axisLength;
     const rMid = Math.max(1e-4, (frame.radiusA(v2) + frame.radiusB(v2)) / 2);
-    const u2 = normalizeSignedDeg(eff.uDeg + frame.uSign * (p / rMid) * RAD);
+    const u2 = normalizeSignedDeg(eff.uDeg + circumferentialSign * (p / rMid) * RAD);
     frame.uvToWorld(u2, v2, radial, w);
     out[i * 3] = w.x; out[i * 3 + 1] = w.y; out[i * 3 + 2] = w.z;
   }

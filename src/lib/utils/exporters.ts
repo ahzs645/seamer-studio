@@ -296,10 +296,24 @@ export async function patternToSSP(pattern: Pattern): Promise<Blob> {
   return await new Response(stream).blob();
 }
 
-/** .ssp blob → Pattern (gzip-decompressed JSON). */
+/** .ssp blob → Pattern. Current Seamer projects use gzip; legacy SeamScape projects use a zlib
+ *  wrapper (`deflate`). Accept both so a project downloaded from the reference studio opens here. */
 export async function sspToPattern(blob: Blob): Promise<Pattern> {
-  const text = await new Response(blob.stream().pipeThrough(new DecompressionStream('gzip'))).text();
-  return JSON.parse(text) as Pattern;
+  const signature = new Uint8Array(await blob.slice(0, 2).arrayBuffer());
+  const format: CompressionFormat = signature[0] === 0x1f && signature[1] === 0x8b ? 'gzip' : 'deflate';
+  const text = await new Response(blob.stream().pipeThrough(new DecompressionStream(format))).text();
+  const pattern = JSON.parse(text) as Pattern;
+  // SeamScape v0.0.1 cached its settled mesh as `savedMeshSnapshot`; Seamer stores a remappable
+  // x2d/y2d + x3d/y3d/z3d array. Keep the source cache untouched and initialize the modern field
+  // so the arrangement and 22 explicit seams can be rebuilt safely even before cache conversion.
+  pattern.pieces = (pattern.pieces ?? []).map((piece) => ({
+    ...piece,
+    settings3d: {
+      ...piece.settings3d,
+      savedPositions: piece.settings3d?.savedPositions ?? []
+    }
+  }));
+  return pattern;
 }
 
 export function patternToCSV(pattern: Pattern): string {

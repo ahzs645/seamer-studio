@@ -8,7 +8,8 @@ import {
   bendScaleToCompliance,
   clampStretchAlpha,
   clampBendAlpha,
-  DISABLED_COMPLIANCE
+  DISABLED_COMPLIANCE,
+  SIM_CONFIG
 } from './config';
 import { createEmptyPattern, type Pattern, type Piece, type Material, type Seam } from '@seamer/pattern-model';
 import type { PieceCloth } from './geometry/boundary';
@@ -114,6 +115,22 @@ const QUAD_POS_A = [0, 0, 0, 0.01, 0, 0, 0.01, 0.01, 0, 0, 0.01, 0]; // meters, 
 const QUAD_POS_B_FORWARD = QUAD_POS_A.slice();
 // Piece B placed so its chain runs OPPOSITE A's: B0 ~ A2, B1 ~ A1, B2 ~ A0.
 const QUAD_POS_B_REVERSED = [0.01, 0.01, 0, 0.01, 0, 0, 0, 0, 0, 0, 0.01, 0];
+
+describe('SeamScape XPBD defaults', () => {
+  it('keeps the source frame, substep, gravity, velocity, and seam constants', () => {
+    expect(SIM_CONFIG).toMatchObject({
+      timeStep: 0.016,
+      subSteps: 40,
+      deltaT: 0.0004,
+      gravity: [0, -9.8, 0],
+      minVelocity: 0,
+      maxVelocity: 1,
+      seamStrength: 1,
+      handleSelfCollisions: true,
+      handleExternalCollisions: true
+    });
+  });
+});
 
 function seamOf(fromId: string, toId: string, opts: { fromRev?: boolean; toRev?: boolean } = {}): Seam {
   return {
@@ -271,6 +288,20 @@ describe('seam linking', () => {
     expect(seamPartners(sim, 0)).toEqual([6]);
     expect(seamPartners(sim, 1)).toEqual([5]);
     expect(seamPartners(sim, 2)).toEqual([4]);
+  });
+
+  it('uses cached drape coincidence to repair an explicit orientation invalidated by rebuilt edge order', () => {
+    const pattern = patternWith(
+      [makePiece('P1', ['eA']), makePiece('P2', ['eB'])],
+      [seamOf('eA', 'eB', { toRev: true })]
+    );
+    const sim = buildSimData(pattern, [
+      arrangedQuad(quadCloth('P1', 'eA'), QUAD_POS_A, { fromSaved: true }),
+      arrangedQuad(quadCloth('P2', 'eB'), QUAD_POS_B_FORWARD, { fromSaved: true })
+    ]);
+    expect(seamPartners(sim, 0)).toEqual([4]);
+    expect(seamPartners(sim, 1)).toEqual([5]);
+    expect(seamPartners(sim, 2)).toEqual([6]);
   });
 
   it('proximity sewing is OFF by default (source parity) and opt-in via options', () => {

@@ -258,11 +258,11 @@ export const interactionMode = persisted<'fast' | 'safe'>('seamer.interactionMod
 export const frozenSnapshotOpacity = persisted<number>('seamer.frozenSnapshotOpacity', 0.35);
 /** Show the live cursor / selection coordinate readout in the status bar. */
 export const showCoordinates = persisted<boolean>('seamer.showCoordinates', true);
-/** "Anchor to saved drape": OFF (default) is the source-parity free-run — while simulating, the
- *  garment is held together only by seams/stretch like the original, so dragging pulls the whole
- *  connected garment. ON softly holds the cached drape (anchor scale 0.08) for extra stability.
- *  Key is versioned: the old 'seamer.simAnchors' default (true) was already persisted in browsers. */
-export const simAnchors = persisted<boolean>('seamer.simAnchors.v2', false);
+/** "Anchor to saved drape": ON by default because the approximate local solver needs the gentle
+ *  0.08 hold to preserve a restored source equilibrium. Grabbed regions release the hold locally,
+ *  so the cloth remains interactive. OFF is available for intentionally free-running a garment.
+ *  The versioned key corrects browsers that persisted the short-lived v2=false default. */
+export const simAnchors = persisted<boolean>('seamer.simAnchors.v3', true);
 
 // --- Labeled engine history ---------------------------------------------------
 

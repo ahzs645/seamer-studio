@@ -3,7 +3,7 @@
 // to, for seam matching), incorporate internal lines, and triangulate.
 
 import Delaunator from 'delaunator';
-import { triangulate, type TriMesh as ClothMesh } from '@atelier/geometry';
+import { pointInPolygon, triangulate, type TriMesh as ClothMesh } from '@atelier/geometry';
 import type { Pattern, Piece } from '@seamer/pattern-model';
 import {
   indexPaths,
@@ -22,7 +22,8 @@ export interface PieceCloth {
   particleDistanceMm: number;
 }
 
-const DEFAULT_PARTICLE_DISTANCE = 14; // mm
+/** SeamScape ClothConfig.particleDistance default (millimetres). */
+export const DEFAULT_PARTICLE_DISTANCE = 10;
 
 function dist(a: Vec2, b: Vec2): number {
   return Math.hypot(a.x - b.x, a.y - b.y);
@@ -32,6 +33,109 @@ function polylineLength(poly: Vec2[]): number {
   let len = 0;
   for (let i = 1; i < poly.length; i++) len += dist(poly[i - 1], poly[i]);
   return len;
+}
+
+function pointSegmentDistance(point: Vec2, from: Vec2, to: Vec2): number {
+  const dx = to.x - from.x, dy = to.y - from.y;
+  const lengthSquared = dx * dx + dy * dy;
+  if (lengthSquared <= 1e-12) return dist(point, from);
+  const t = Math.max(0, Math.min(1,
+    ((point.x - from.x) * dx + (point.y - from.y) * dy) / lengthSquared
+  ));
+  return Math.hypot(point.x - (from.x + dx * t), point.y - (from.y + dy * t));
+}
+
+function properlyIntersects(a: Vec2, b: Vec2, c: Vec2, d: Vec2): boolean {
+  const same = (left: Vec2, right: Vec2) => dist(left, right) < 1e-7;
+  if (same(a, c) || same(a, d) || same(b, c) || same(b, d)) return false;
+  const orient = (p: Vec2, q: Vec2, r: Vec2) =>
+    (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+  const ac = orient(a, b, c), ad = orient(a, b, d);
+  const ca = orient(c, d, a), cb = orient(c, d, b);
+  return ((ac > 0 && ad < 0) || (ac < 0 && ad > 0))
+    && ((ca > 0 && cb < 0) || (ca < 0 && cb > 0));
+}
+
+/**
+ * Legacy sampled outlines can contain sub-millimetre wedges that make the strict constrained
+ * triangulator reject an otherwise usable mesh when its area check misses a few slivers. SeamScape
+ * accepted these public garments. This fallback keeps the same 10 mm interior density and rejects
+ * triangles outside/crossing the outline, but deliberately tolerates those boundary slivers.
+ */
+function triangulateLegacyOutline(outer: Vec2[], internalPoints: Vec2[], spacing: number): ClothMesh {
+  const minX = Math.min(...outer.map((point) => point.x));
+  const maxX = Math.max(...outer.map((point) => point.x));
+  const minY = Math.min(...outer.map((point) => point.y));
+  const maxY = Math.max(...outer.map((point) => point.y));
+  const boundarySegments = outer.map((point, index) => [point, outer[(index + 1) % outer.length]] as const);
+  const grid: Vec2[] = [];
+  const clearance = spacing * 0.35;
+  for (let y = Math.ceil(minY / spacing) * spacing; y < maxY; y += spacing) {
+    for (let x = Math.ceil(minX / spacing) * spacing; x < maxX; x += spacing) {
+      const point = { x, y };
+      if (!pointInPolygon(point, outer)) continue;
+      if (boundarySegments.some(([from, to]) => pointSegmentDistance(point, from, to) < clearance)) continue;
+      grid.push(point);
+    }
+  }
+  const all = [...outer, ...internalPoints, ...grid];
+  const coords = new Float64Array(all.length * 2);
+  all.forEach((point, index) => {
+    coords[index * 2] = point.x;
+    coords[index * 2 + 1] = point.y;
+  });
+  const delaunay = new Delaunator(coords);
+  const kept: number[] = [];
+  const crossesBoundary = (a: number, b: number) => boundarySegments.some(([from, to]) =>
+    properlyIntersects(all[a], all[b], from, to)
+  );
+  for (let index = 0; index < delaunay.triangles.length; index += 3) {
+    const a = delaunay.triangles[index];
+    const b = delaunay.triangles[index + 1];
+    const c = delaunay.triangles[index + 2];
+    const centroid = {
+      x: (all[a].x + all[b].x + all[c].x) / 3,
+      y: (all[a].y + all[b].y + all[c].y) / 3
+    };
+    if (!pointInPolygon(centroid, outer)) continue;
+    if (crossesBoundary(a, b) || crossesBoundary(b, c) || crossesBoundary(c, a)) continue;
+    const area = Math.abs(
+      (all[b].x - all[a].x) * (all[c].y - all[a].y)
+      - (all[b].y - all[a].y) * (all[c].x - all[a].x)
+    ) / 2;
+    if (area < spacing * spacing * 0.001) continue;
+    kept.push(a, b, c);
+  }
+  if (kept.length < 3) throw new Error('Legacy outline fallback produced no cloth triangles');
+
+  const originalToCompact = new Int32Array(all.length).fill(-1);
+  const points: Vec2[] = [];
+  const remap = (original: number) => {
+    if (originalToCompact[original] < 0) {
+      originalToCompact[original] = points.length;
+      points.push(all[original]);
+    }
+    return originalToCompact[original];
+  };
+  const triangles = kept.map(remap);
+  const edgeSet = new Map<number, [number, number]>();
+  const edgeKey = (a: number, b: number) => Math.min(a, b) * points.length + Math.max(a, b);
+  for (let index = 0; index < triangles.length; index += 3) {
+    for (const [a, b] of [
+      [triangles[index], triangles[index + 1]],
+      [triangles[index + 1], triangles[index + 2]],
+      [triangles[index + 2], triangles[index]]
+    ] as [number, number][]) edgeSet.set(edgeKey(a, b), [a, b]);
+  }
+  const boundary = outer.map((_point, index) => originalToCompact[index]);
+  return {
+    points,
+    triangles,
+    edges: [...edgeSet.values()],
+    boundary,
+    numBoundary: boundary.filter((index) => index >= 0).length,
+    internal: internalPoints.map((_point, index) => originalToCompact[outer.length + index])
+  };
 }
 
 /** Resample a polyline to evenly spaced points (~spacing apart), keeping both endpoints.
@@ -103,15 +207,11 @@ function stitchLoop(edges: LoopEdge[]): LoopEdge[] {
 }
 
 /**
- * Seam-matched boundary sub-segmentation (the original's buildSeamComposite/getSubSegmentPointCount):
- * compute a forced interval count per PiecePath so BOTH sides of every seam resample to the same
- * total interval count. Each seam's target N is the larger side's natural count; a side's N is
- * distributed over its edges by length (largest remainder, ≥1 each). Disconnected composite runs
- * intentionally retain their extra endpoint particles: buildSimData's proportional pairing then
- * repeats particles on the connected side to distribute dart/ease take-up, matching legacy.
- * An edge in several seams takes the max — exact pairing can then no longer be guaranteed for every
- * seam simultaneously; the sim builder warns and falls back to proportional sampling for the ones
- * that still mismatch.
+ * SeamScape-compatible seam density allocation. The source first gives a seam
+ * `ceil(max(sideLength) / minParticleDistance)` intervals, propagates the largest count across
+ * seams that share a path, and then applies the common count to both composite sides. We distribute
+ * that count over this schema's PiecePaths by arc length; buildSimData performs the source's fixed
+ * count composite sampling, including pinned path boundaries for darts and ease.
  */
 export function computeSeamEdgeIntervals(pattern: Pattern): Map<string, number> {
   const paths = indexPaths(pattern);
@@ -126,31 +226,71 @@ export function computeSeamEdgeIntervals(pattern: Pattern): Map<string, number> 
       if (poly.length >= 2) info.set(pp.id, { len: polylineLength(poly), pd });
     }
   }
-  for (const seam of pattern.seams) {
-    const side = (refs: { id: string }[]) => {
+  const sides = new Map<string, {
+    from: ReturnType<typeof side>;
+    to: ReturnType<typeof side>;
+  }>();
+  function side(refs: { id: string }[]) {
       const items = refs
         .map((ref) => info.get(ref.id))
         .filter((item): item is { len: number; pd: number } => !!item);
-      const natural = items.reduce((s, it) => s + Math.max(1, Math.round(it.len / it.pd)), 0);
-      return { items, refs: refs.filter((ref) => info.has(ref.id)), natural };
-    };
+      return { items, refs: refs.filter((ref) => info.has(ref.id)) };
+  }
+
+  // Source generateParticleCountForSeams().
+  const seamCounts = new Map<string, number>();
+  for (const seam of pattern.seams) {
     const from = side(seam.fromPaths);
     const to = side(seam.toPaths);
     if (from.items.length === 0 || to.items.length === 0) continue;
-    const intervalCount = Math.max(from.natural, to.natural);
+    sides.set(seam.id, { from, to });
+    const fromLength = from.items.reduce((sum, item) => sum + item.len, 0);
+    const toLength = to.items.reduce((sum, item) => sum + item.len, 0);
+    const distances = [...from.items, ...to.items].map((item) => item.pd).filter((pd) => pd > 0);
+    const particleDistance = distances.length ? Math.min(...distances) : DEFAULT_PARTICLE_DISTANCE;
+    seamCounts.set(seam.id, Math.max(1, Math.ceil(Math.max(fromLength, toLength) / particleDistance)));
+  }
+
+  // A path participating in several seams uses their largest count. Iterate to a fixed point so
+  // propagation is deterministic instead of depending on piece/path ordering.
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const piece of pattern.pieces) {
+      for (const path of [...piece.mainPaths, ...piece.internalPaths]) {
+        const touching = pattern.seams.filter((seam) =>
+          [...seam.fromPaths, ...seam.toPaths].some((ref) => ref.id === path.id)
+        );
+        const maximum = Math.max(0, ...touching.map((seam) => seamCounts.get(seam.id) ?? 0));
+        for (const seam of touching) {
+          if ((seamCounts.get(seam.id) ?? 0) < maximum) {
+            seamCounts.set(seam.id, maximum);
+            changed = true;
+          }
+        }
+      }
+    }
+  }
+
+  for (const seam of pattern.seams) {
+    const resolved = sides.get(seam.id);
+    const intervalCount = seamCounts.get(seam.id);
+    if (!resolved || !intervalCount) continue;
     // Distribute the common interval count over a side's edges by length share (largest remainder,
     // at least one interval per edge).
-    const distribute = (s: typeof from) => {
+    const distribute = (s: ReturnType<typeof side>) => {
       const totalLen = s.items.reduce((a, it) => a + it.len, 0) || 1;
       const raw = s.items.map((it) => (intervalCount * it.len) / totalLen);
       const base = raw.map((r) => Math.max(1, Math.floor(r)));
       let rem = intervalCount - base.reduce((a, b) => a + b, 0);
       const order = raw.map((r, i) => ({ i, frac: r - Math.floor(r) })).sort((a, b) => b.frac - a.frac);
       for (let k = 0; rem > 0 && k < order.length; k++, rem--) base[order[k].i]++;
+      // With more path entries than intervals the ≥1 rule can over-allocate; retain the source's
+      // safe minimum rather than attempting a negative redistribution.
       s.refs.forEach((r, i) => out.set(r.id, Math.max(out.get(r.id) ?? 0, base[i])));
     };
-    distribute(from);
-    distribute(to);
+    distribute(resolved.from);
+    distribute(resolved.to);
   }
   return out;
 }
@@ -257,12 +397,19 @@ export function buildPieceCloth(
     for (const p of rs) internalPoints.push(p);
   }
 
-  const mesh = triangulate({
-    outer,
-    internalPoints,
-    spacing: pd,
-    grid: piece.grainVector
-  });
+  let mesh: ClothMesh;
+  try {
+    mesh = triangulate({
+      outer,
+      internalPoints,
+      spacing: pd,
+      grid: piece.grainVector
+    });
+  } catch (error) {
+    if (piece.legacyGeometry?.format !== 'seamscape-json') throw error;
+    console.warn(`Piece "${piece.name}" used tolerant SeamScape outline triangulation`);
+    mesh = triangulateLegacyOutline(outer, internalPoints, pd);
+  }
 
   // Map outer-input indices -> compacted particle indices via mesh.boundary (aligned to outer order).
   const outerToParticle = mesh.boundary; // boundary[i] is the particle index of outer[i]
@@ -295,6 +442,231 @@ export interface SavedCloth {
   boundaryParticles: number[]; // indices of particles on the mesh boundary (for seam linking)
 }
 
+export interface SavedSurfaceReuse {
+  positions3d: Float32Array;
+  safeCoverage: number;
+  exactCount: number;
+  interpolatedCount: number;
+  extrapolatedCount: number;
+  fallbackCount: number;
+}
+
+type SavedMeshSnapshot = NonNullable<Piece['settings3d']['savedMeshSnapshot']>;
+
+function unpackSavedFaces(snapshot: SavedMeshSnapshot, vertexCount: number): number[] | null {
+  if (!snapshot.faces || (snapshot.vertexCount && snapshot.vertexCount !== vertexCount)) return null;
+  try {
+    const binary = atob(snapshot.faces);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const width = snapshot.faceIndexType === 'u32' ? 4 : 2;
+    if (bytes.byteLength % (width * 3) !== 0) return null;
+    const faces = new Array<number>(bytes.byteLength / width);
+    for (let index = 0; index < faces.length; index += 1) {
+      faces[index] = width === 4
+        ? view.getUint32(index * width, true)
+        : view.getUint16(index * width, true);
+    }
+    return faces.some((index) => index >= vertexCount) ? null : faces;
+  } catch {
+    return null;
+  }
+}
+
+interface SurfaceTriangle {
+  faceIndex: number;
+  a: number;
+  b: number;
+  c: number;
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+  maxEdgeLength: number;
+}
+
+function barycentricWeights(point: Vec2, a: Vec2, b: Vec2, c: Vec2): [number, number, number] | null {
+  const v0x = b.x - a.x, v0y = b.y - a.y;
+  const v1x = c.x - a.x, v1y = c.y - a.y;
+  const v2x = point.x - a.x, v2y = point.y - a.y;
+  const denominator = v0x * v1y - v1x * v0y;
+  if (Math.abs(denominator) < 1e-10) return null;
+  const v = (v2x * v1y - v1x * v2y) / denominator;
+  const w = (v0x * v2y - v2x * v0y) / denominator;
+  return [1 - v - w, v, w];
+}
+
+function distanceSquaredToSegment(point: Vec2, a: Vec2, b: Vec2): number {
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const lengthSquared = dx * dx + dy * dy;
+  if (lengthSquared < 1e-12) return (point.x - a.x) ** 2 + (point.y - a.y) ** 2;
+  const t = Math.max(0, Math.min(1, ((point.x - a.x) * dx + (point.y - a.y) * dy) / lengthSquared));
+  return (point.x - (a.x + t * dx)) ** 2 + (point.y - (a.y + t * dy)) ** 2;
+}
+
+/** Source-compatible legacy drape restoration. SeamScape maps the freshly triangulated piece onto
+ * the saved piece-local 2D triangle surface, then barycentrically interpolates settled XYZ. This is
+ * materially different from nearest-vertex reuse and from drawing the old indexed mesh directly. */
+export function reuseSavedSurface(
+  meshPoints: Vec2[],
+  savedPositions: number[] | undefined,
+  snapshot: SavedMeshSnapshot | undefined
+): SavedSurfaceReuse | null {
+  if (!snapshot || snapshot.coordinateSpace !== 'piece-local' || !savedPositions || savedPositions.length < 15) return null;
+  const vertexCount = Math.floor(savedPositions.length / 5);
+  const faces = unpackSavedFaces(snapshot, vertexCount);
+  if (!faces?.length || meshPoints.length === 0) return null;
+
+  const saved2d = new Array<Vec2>(vertexCount);
+  for (let index = 0; index < vertexCount; index += 1) {
+    saved2d[index] = { x: savedPositions[index * 5], y: savedPositions[index * 5 + 1] };
+  }
+
+  const triangles: SurfaceTriangle[] = [];
+  const edgeLengths: number[] = [];
+  for (let faceIndex = 0; faceIndex + 2 < faces.length; faceIndex += 3) {
+    const a = faces[faceIndex], b = faces[faceIndex + 1], c = faces[faceIndex + 2];
+    const pa = saved2d[a], pb = saved2d[b], pc = saved2d[c];
+    if (!barycentricWeights(pa, pa, pb, pc)) continue;
+    const ab = dist(pa, pb), bc = dist(pb, pc), ca = dist(pc, pa);
+    const maxEdgeLength = Math.max(ab, bc, ca);
+    edgeLengths.push(ab, bc, ca);
+    triangles.push({
+      faceIndex, a, b, c,
+      minX: Math.min(pa.x, pb.x, pc.x), maxX: Math.max(pa.x, pb.x, pc.x),
+      minY: Math.min(pa.y, pb.y, pc.y), maxY: Math.max(pa.y, pb.y, pc.y),
+      maxEdgeLength
+    });
+  }
+  if (!triangles.length) return null;
+
+  edgeLengths.sort((a, b) => a - b);
+  const cellSize = Math.max(5, edgeLengths[Math.floor(edgeLengths.length / 2)] || 14);
+  const grid = new Map<string, number[]>();
+  const cell = (value: number) => Math.floor(value / cellSize);
+  for (let index = 0; index < triangles.length; index += 1) {
+    const triangle = triangles[index];
+    for (let x = cell(triangle.minX); x <= cell(triangle.maxX); x += 1) {
+      for (let y = cell(triangle.minY); y <= cell(triangle.maxY); y += 1) {
+        const key = `${x}:${y}`;
+        const bucket = grid.get(key) ?? [];
+        bucket.push(index);
+        grid.set(key, bucket);
+      }
+    }
+  }
+
+  const positions3d = new Float32Array(meshPoints.length * 3);
+  const exactMap = new Map<string, number[]>();
+  for (let index = 0; index < vertexCount; index += 1) {
+    const key = `${saved2d[index].x.toFixed(6)}:${saved2d[index].y.toFixed(6)}`;
+    const entries = exactMap.get(key) ?? [];
+    entries.push(index);
+    exactMap.set(key, entries);
+  }
+  const exactUse = new Map<string, number>();
+  let exactCount = 0, interpolatedCount = 0, extrapolatedCount = 0, fallbackCount = 0;
+
+  const writeVertex = (targetIndex: number, sourceIndex: number) => {
+    positions3d[targetIndex * 3] = savedPositions[sourceIndex * 5 + 2];
+    positions3d[targetIndex * 3 + 1] = savedPositions[sourceIndex * 5 + 3];
+    positions3d[targetIndex * 3 + 2] = savedPositions[sourceIndex * 5 + 4];
+  };
+  const writeTriangle = (targetIndex: number, triangle: SurfaceTriangle, weights: [number, number, number]) => {
+    const vertices = [triangle.a, triangle.b, triangle.c];
+    for (let axis = 0; axis < 3; axis += 1) {
+      positions3d[targetIndex * 3 + axis] = vertices.reduce(
+        (sum, sourceIndex, weightIndex) => sum + weights[weightIndex] * savedPositions[sourceIndex * 5 + 2 + axis],
+        0
+      );
+    }
+  };
+
+  for (let targetIndex = 0; targetIndex < meshPoints.length; targetIndex += 1) {
+    const point = meshPoints[targetIndex];
+    const exactKey = `${point.x.toFixed(6)}:${point.y.toFixed(6)}`;
+    const exactEntries = exactMap.get(exactKey);
+    const used = exactUse.get(exactKey) ?? 0;
+    if (exactEntries?.[used] !== undefined) {
+      writeVertex(targetIndex, exactEntries[used]);
+      exactUse.set(exactKey, used + 1);
+      exactCount += 1;
+      continue;
+    }
+
+    const bucket = grid.get(`${cell(point.x)}:${cell(point.y)}`) ?? [];
+    let containing: { triangle: SurfaceTriangle; weights: [number, number, number] } | null = null;
+    for (const triangleIndex of bucket) {
+      const triangle = triangles[triangleIndex];
+      if (point.x < triangle.minX - 1e-7 || point.x > triangle.maxX + 1e-7 || point.y < triangle.minY - 1e-7 || point.y > triangle.maxY + 1e-7) continue;
+      const weights = barycentricWeights(point, saved2d[triangle.a], saved2d[triangle.b], saved2d[triangle.c]);
+      if (weights?.every((weight) => weight >= -1e-7)) { containing = { triangle, weights }; break; }
+    }
+    if (containing) {
+      writeTriangle(targetIndex, containing.triangle, containing.weights);
+      interpolatedCount += 1;
+      continue;
+    }
+
+    let nearest: { triangle: SurfaceTriangle; weights: [number, number, number]; distanceSquared: number } | null = null;
+    // Most misses are immediately outside a boundary, so inspect nearby grid cells first. Fall back
+    // to the complete surface only when the local neighbourhood has no candidate.
+    const nearby = new Set<number>();
+    for (let dx = -2; dx <= 2; dx += 1) for (let dy = -2; dy <= 2; dy += 1) {
+      for (const triangleIndex of grid.get(`${cell(point.x) + dx}:${cell(point.y) + dy}`) ?? []) nearby.add(triangleIndex);
+    }
+    const candidates = nearby.size ? [...nearby].map((index) => triangles[index]) : triangles;
+    for (const triangle of candidates) {
+      const pa = saved2d[triangle.a], pb = saved2d[triangle.b], pc = saved2d[triangle.c];
+      const weights = barycentricWeights(point, pa, pb, pc);
+      if (!weights) continue;
+      const distanceSquared = weights.every((weight) => weight >= 0) ? 0 : Math.min(
+        distanceSquaredToSegment(point, pa, pb),
+        distanceSquaredToSegment(point, pb, pc),
+        distanceSquaredToSegment(point, pc, pa)
+      );
+      if (!nearest || distanceSquared < nearest.distanceSquared - 1e-9 ||
+        (Math.abs(distanceSquared - nearest.distanceSquared) <= 1e-9 && triangle.faceIndex < nearest.triangle.faceIndex)) {
+        nearest = { triangle, weights, distanceSquared };
+      }
+    }
+    if (nearest && Math.sqrt(nearest.distanceSquared) <= Math.max(5, nearest.triangle.maxEdgeLength * 1.5) &&
+      nearest.weights.every((weight) => weight >= -2 && weight <= 3)) {
+      writeTriangle(targetIndex, nearest.triangle, nearest.weights);
+      extrapolatedCount += 1;
+      continue;
+    }
+
+    // Source uses an eight-neighbour smooth extrapolator here. Inverse-distance weighting is the
+    // deterministic last-resort equivalent; these points are excluded from safeCoverage.
+    const nearestVertices = saved2d.map((savedPoint, sourceIndex) => ({
+      sourceIndex,
+      distanceSquared: (point.x - savedPoint.x) ** 2 + (point.y - savedPoint.y) ** 2
+    })).sort((a, b) => a.distanceSquared - b.distanceSquared).slice(0, 8);
+    let weightSum = 0;
+    for (const entry of nearestVertices) {
+      const weight = 1 / (entry.distanceSquared + 1e-8);
+      weightSum += weight;
+      for (let axis = 0; axis < 3; axis += 1) {
+        positions3d[targetIndex * 3 + axis] += weight * savedPositions[entry.sourceIndex * 5 + 2 + axis];
+      }
+    }
+    if (weightSum > 0) for (let axis = 0; axis < 3; axis += 1) positions3d[targetIndex * 3 + axis] /= weightSum;
+    fallbackCount += 1;
+  }
+
+  const safeCount = exactCount + interpolatedCount + extrapolatedCount;
+  return {
+    positions3d,
+    safeCoverage: safeCount / meshPoints.length,
+    exactCount,
+    interpolatedCount,
+    extrapolatedCount,
+    fallbackCount
+  };
+}
+
 /**
  * Build a piece's cloth mesh directly from its cached `savedPositions` (stride 5: x2d,y2d, x3d,y3d,z3d).
  * Uses the saved particles as-is (their 2D for topology + UV, their 3D as the settled drape), so the
@@ -318,9 +690,13 @@ export function buildSavedCloth(piece: Piece): SavedCloth | null {
   }
   if (n < 3) return null;
 
-  const del = new Delaunator(Float64Array.from(coords));
-  const tri = del.triangles;
-  // median edge length -> prune triangles that bridge concavities / the convex hull
+  const snapshot = piece.settings3d.savedMeshSnapshot;
+  const sourceTriangles = snapshot ? unpackSavedFaces(snapshot, n) : null;
+
+  const del = sourceTriangles ? null : new Delaunator(Float64Array.from(coords));
+  const tri = sourceTriangles ?? [...del!.triangles];
+  // median edge length -> prune triangles that bridge concavities / the convex hull when there is
+  // no authoritative indexed topology. Legacy snapshots keep their source faces exactly.
   const edgeLens: number[] = [];
   const elen = (a: number, b: number) => Math.hypot(points[a].x - points[b].x, points[a].y - points[b].y);
   for (let t = 0; t < tri.length; t += 3) {
@@ -330,11 +706,13 @@ export function buildSavedCloth(piece: Piece): SavedCloth | null {
   const median = edgeLens[Math.floor(edgeLens.length / 2)] || 10;
   const maxEdge = median * 2.5;
 
-  const triangles: number[] = [];
-  for (let t = 0; t < tri.length; t += 3) {
-    const a = tri[t], b = tri[t + 1], c = tri[t + 2];
-    if (elen(a, b) > maxEdge || elen(b, c) > maxEdge || elen(c, a) > maxEdge) continue;
-    triangles.push(a, b, c);
+  const triangles: number[] = sourceTriangles ?? [];
+  if (!sourceTriangles) {
+    for (let t = 0; t < tri.length; t += 3) {
+      const a = tri[t], b = tri[t + 1], c = tri[t + 2];
+      if (elen(a, b) > maxEdge || elen(b, c) > maxEdge || elen(c, a) > maxEdge) continue;
+      triangles.push(a, b, c);
+    }
   }
 
   // unique edges + boundary detection (edges used by exactly one triangle)

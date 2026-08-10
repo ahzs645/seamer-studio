@@ -8,7 +8,7 @@ import {
   pieceTransform
 } from '@seamer/pattern-model/utils/patternGeometry';
 import type { CylinderFrame } from './geometry/cylinders';
-import { buildPieceCloth, buildSavedCloth, reuseSavedDrape, computeSeamEdgeIntervals } from './geometry/boundary';
+import { buildPieceCloth, buildSavedCloth, reuseSavedDrape, reuseSavedSurface, computeSeamEdgeIntervals } from './geometry/boundary';
 import { arrangeParticles } from './geometry/arrangement';
 import { buildSimData, type SimData, type ArrangedPiece } from './build';
 import { ClothEngine, type BodyMesh } from './webgpu/engine';
@@ -116,18 +116,32 @@ export function prepareCloth(
       flipNormals: piece.settings3d.flipNormals
     });
 
-    // A piece with a cached drape: reuse it via the source's 3-way seed — exact-reuse where the
-    // shape is unchanged, KNN-from-drape for added area (so it follows the drape, not flat-on-body),
-    // and a null return (handled below) when too much of the shape is new.
-    // Template/save blobs key their settled 3D samples by the piece's placed plan coordinates,
-    // while the rebuilt cloth mesh remains in shared drafting coordinates. Compare like-for-like.
+    // Current Seamer caches key by placed-plan coordinates. SeamScape v0.0.1 instead stored a
+    // piece-local indexed 2D surface and restored onto newly-triangulated topology by barycentric
+    // projection. Keep those paths separate: treating the legacy surface as nearest-neighbour data
+    // is what caused torn/bridged panels in converted projects.
     const toPlan = pieceTransform(piece, points);
     const reusePoints = cloth.mesh.points.map(toPlan);
-    const reuse = opts.fromArrangement
-      ? null
-      : reuseSavedDrape(reusePoints, piece.settings3d.savedPositions, cloth.particleDistanceMm)
+    let reuse: { positions3d: Float32Array } | null = null;
+    if (!opts.fromArrangement && piece.settings3d.savedMeshSnapshot?.coordinateSpace === 'piece-local') {
+      const radians = -((piece.rotation ?? 0) * Math.PI) / 180;
+      const cos = Math.cos(radians), sin = Math.sin(radians);
+      const originX = piece.position?.x ?? 0, originY = piece.position?.y ?? 0;
+      const localPoints = reusePoints.map((point) => {
+        const dx = point.x - originX, dy = point.y - originY;
+        let x = dx * cos - dy * sin;
+        let y = dx * sin + dy * cos;
+        if (piece.mirrorX) x = -x;
+        if (piece.mirrorY) y = -y;
+        return { x, y };
+      });
+      const surface = reuseSavedSurface(localPoints, piece.settings3d.savedPositions, piece.settings3d.savedMeshSnapshot);
+      if (surface && surface.safeCoverage >= 0.5) reuse = surface;
+    } else if (!opts.fromArrangement) {
+      reuse = reuseSavedDrape(reusePoints, piece.settings3d.savedPositions, cloth.particleDistanceMm)
         // Compatibility with drapes saved by earlier studio builds, which wrote drafting coordinates.
         ?? reuseSavedDrape(cloth.mesh.points, piece.settings3d.savedPositions, cloth.particleDistanceMm);
+    }
     if (reuse) {
       arranged.push({
         cloth,

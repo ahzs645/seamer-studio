@@ -145,9 +145,9 @@ export class PatternRenderer {
   // closer to the source's free feel, while staying comfortably on the held side of the cliff.
   private static readonly LIVE_ANCHOR = 0.08;
   private liveAnchorScale = 0; // restored after an interactive grab
-  // "Anchor to saved drape" toggle: OFF (default) = source-parity free-run — the garment hangs by
-  // its seams/stretch alone like the original, so a drag pulls the whole connected garment; ON =
-  // the gentle LIVE_ANCHOR hold above for extra cached-drape stability.
+  // "Anchor to saved drape" toggle: ON by default because the gentle LIVE_ANCHOR hold is required
+  // to preserve a restored source equilibrium in our approximate solver. It releases locally while
+  // grabbing, and can still be disabled explicitly for a fully free-running experiment.
   private anchorsEnabled = false;
 
   /** The live hold strength honouring the "Anchor to saved drape" toggle. */
@@ -1400,10 +1400,10 @@ export class PatternRenderer {
   async simulate(): Promise<void> {
     if (this.simulating) return;
     try {
-      // The saved drape is the correct static display, but it is sampled onto rebuilt topology and
-      // can contain large rest-length error. Legacy's first live drape starts from the coherent
-      // cylinder arrangement; retain an existing sim state on subsequent starts and body re-fits.
-      const sim = await this.ensureSim(!this.bodyDirty);
+      // Continue from the displayed saved drape, as the reference Studio does. Arrangement reset is
+      // an explicit separate action; silently jumping there on the first Play made an imported
+      // garment change interpretation the moment simulation started.
+      const sim = await this.ensureSim(false);
       if (!sim) return;
       if (this.bodyDirty && this.baseCylinders && this.pattern) {
         // Body changed: re-fit the cached drape onto the new body via CYLINDER COORDINATES — decompose
@@ -1794,7 +1794,6 @@ export class PatternRenderer {
 
   setShowTriangles(v: boolean) {
     this.showTriangles = v;
-    this.invalidate();
     for (const m of this.triangleOverlays) {
       this.clothGroup.remove(m);
       (m.material as THREE.Material).dispose();
@@ -1807,7 +1806,17 @@ export class PatternRenderer {
         if (e.backMesh) e.backMesh.visible = false;
         if (e.sideMesh) e.sideMesh.visible = false;
         if (!e.baseVisible) continue;
-        const overlay = new THREE.Mesh(e.geometry, new THREE.MeshBasicMaterial({ color: 0xffeeaa, wireframe: true, transparent: true, opacity: 0.9, depthTest: true }));
+        // The prepared cloth faces wind inward, so the camera normally sees their back side.
+        // MeshBasicMaterial defaults to FrontSide; without DoubleSide the wireframe was fully
+        // culled, leaving only the avatar visible and making the toggle appear to do nothing.
+        const overlay = new THREE.Mesh(e.geometry, new THREE.MeshBasicMaterial({
+          color: 0xffeeaa,
+          side: THREE.DoubleSide,
+          wireframe: true,
+          transparent: true,
+          opacity: 0.9,
+          depthTest: true
+        }));
         overlay.frustumCulled = false;
         overlay.renderOrder = 5;
         overlay.visible = true;
@@ -1821,6 +1830,7 @@ export class PatternRenderer {
       }
     }
     if (!v) this.applyLabelVisibility();
+    this.invalidate();
   }
 
   /** Live snapshot of the solver config (the panel reads this to seed its controls). */
