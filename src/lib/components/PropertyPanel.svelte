@@ -32,6 +32,7 @@
   } from '$lib/stores/materialLibrary';
   import { MATERIAL_PRESETS, getPreset } from '$lib/data/materialPresets';
   import { rebakeArc, arcCenter } from '@seamer/pattern-model/utils/arcParametric';
+  import TextureMapSource from '$lib/components/TextureMapSource.svelte';
 
   interface Props {
     currentPattern: Pattern;
@@ -408,18 +409,6 @@
   function setBackTexture(id: string, partial: Partial<NonNullable<Mat['backTexture']>>) {
     updateMaterial(id, (m) => ({ ...m, backTexture: { ...(m.backTexture ?? DEFAULT_SLOT()), ...partial } }));
   }
-  /** Read a picked image file as a data URL and hand it to `apply` (base/normal/opacity, front/back). */
-  function readImage(e: Event, apply: (dataUrl: string) => void) {
-    const file = (e.target as HTMLInputElement).files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => apply(String(reader.result));
-    reader.readAsDataURL(file);
-  }
-  function onPickImage(id: string, e: Event) {
-    readImage(e, (url) => setFrontTexture(id, { url, mediaId: null }));
-  }
-
   // ---- Material library (offline-first stand-in for the cloud library) -----------------------
   const STATUS_META: Record<LibraryStatus, { label: string; cls: string; dot: string }> = {
     local: { label: 'Local material', cls: 'opacity-60', dot: 'bg-base-300' },
@@ -583,35 +572,12 @@
 {#snippet textureMaps(m: Pattern['materials'][number], back: boolean)}
   {@const slot = back ? m.backTexture : m.frontTexture}
   {@const set = back ? (p: Partial<NonNullable<Mat['frontTexture']>>) => setBackTexture(m.id, p) : (p: Partial<NonNullable<Mat['frontTexture']>>) => setFrontTexture(m.id, p)}
-  <div class="flex items-center gap-2">
-    <div class="w-12 h-12 rounded border border-base-300 shrink-0"
-      style={slot?.url ? `background-color:${slot.color};background-image:url('${slot.url}');background-size:cover;background-position:center` : `background-color:${slot?.color ?? '#bbbbbb'}`}></div>
-    <div class="flex flex-col gap-1 flex-1">
-      <label class="flex items-center gap-2">Color
-        <input type="color" class="w-8 h-6 rounded border" value={slot?.color ?? '#bbbbbb'} oninput={(e) => set({ color: e.currentTarget.value })} /></label>
-      <div class="flex gap-1">
-        <label class="btn btn-xs btn-outline cursor-pointer"><span class="material-symbols-rounded text-base">image</span> Image
-          <input type="file" accept="image/*" class="hidden" onchange={(e) => readImage(e, (url) => set({ url, mediaId: null }))} /></label>
-        {#if slot?.url}<button class="btn btn-xs btn-ghost" onclick={() => set({ url: '', mediaId: null })}><span class="material-symbols-rounded text-base">clear</span> Clear</button>{/if}
-      </div>
-    </div>
-  </div>
-  <label class="flex flex-col gap-0.5">Tile size (mm)
-    <input type="number" step="1" class="input input-bordered input-xs" value={slot?.scale ?? 100} oninput={(e) => set({ scale: parseFloat(e.currentTarget.value) || 100 })} /></label>
-  <!-- Normal map -->
-  <div class="flex items-center gap-1">
-    <span class="flex-1 text-xs opacity-70">Normal map{slot?.normalUrl ? ' ✓' : ''}</span>
-    <label class="btn btn-xs btn-ghost cursor-pointer"><span class="material-symbols-rounded text-base">landscape</span>
-      <input type="file" accept="image/*" class="hidden" onchange={(e) => readImage(e, (url) => set({ normalUrl: url, normalMediaId: null }))} /></label>
-    {#if slot?.normalUrl}<button class="material-symbols-rounded text-base opacity-60 hover:text-error" title="Clear normal map" aria-label="Clear normal map" onclick={() => set({ normalUrl: '', normalMediaId: null })}>clear</button>{/if}
-  </div>
-  <!-- Opacity / cutwork map -->
-  <div class="flex items-center gap-1">
-    <span class="flex-1 text-xs opacity-70">Opacity map{slot?.opacityUrl ? ' ✓' : ''}</span>
-    <label class="btn btn-xs btn-ghost cursor-pointer"><span class="material-symbols-rounded text-base">opacity</span>
-      <input type="file" accept="image/*" class="hidden" onchange={(e) => readImage(e, (url) => set({ opacityUrl: url, opacityMediaId: null }))} /></label>
-    {#if slot?.opacityUrl}<button class="material-symbols-rounded text-base opacity-60 hover:text-error" title="Clear opacity map" aria-label="Clear opacity map" onclick={() => set({ opacityUrl: '', opacityMediaId: null })}>clear</button>{/if}
-  </div>
+  {@const activeSlot = slot ?? DEFAULT_SLOT()}
+  <label class="flex items-center gap-2">Color
+    <input type="color" class="w-8 h-6 rounded border" value={activeSlot.color} oninput={(e) => set({ color: e.currentTarget.value })} /></label>
+  <TextureMapSource textureSlot={activeSlot} kind="base" label="Texture" onchange={set} />
+  <TextureMapSource textureSlot={activeSlot} kind="normal" label="Normal" onchange={set} />
+  <TextureMapSource textureSlot={activeSlot} kind="opacity" label="Opacity" onchange={set} />
 {/snippet}
 
 {#snippet libraryBlock(m: Pattern['materials'][number])}

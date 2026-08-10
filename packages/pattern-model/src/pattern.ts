@@ -315,16 +315,26 @@ export interface Piece {
 
 export interface TextureSlot {
   url: string;
+  /** How the base-colour map is stored. Undefined is the legacy auto-embed-on-SSP behavior. */
+  sourceMode?: TextureAssetSourceMode;
+  /** Original external URL retained after a map is downloaded into the project. */
+  sourceUrl?: string;
   mediaId: string | null;
   color: string; // hex tint; used as base color when there is no map
   scale: number; // physical tile size in mm (texture repeats every `scale` mm)
   normalUrl: string;
+  normalSourceMode?: TextureAssetSourceMode;
+  normalSourceUrl?: string;
   normalMediaId: string | null;
   normalMapScale: number;
   opacityUrl: string;
+  opacitySourceMode?: TextureAssetSourceMode;
+  opacitySourceUrl?: string;
   opacityMediaId: string | null;
   opacityMapScale: number;
 }
+
+export type TextureAssetSourceMode = 'linked' | 'uploaded' | 'downloaded';
 
 export interface Material {
   id: string;

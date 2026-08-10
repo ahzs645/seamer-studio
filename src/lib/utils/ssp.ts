@@ -233,9 +233,9 @@ export async function createSSPArchive(pattern: Pattern, options: SSPExportOptio
 
   const embedSlot = async (slot: TextureSlot | null): Promise<TextureSlot | null> => slot && ({
     ...slot,
-    url: await embed(slot.url),
-    normalUrl: await embed(slot.normalUrl),
-    opacityUrl: await embed(slot.opacityUrl)
+    url: slot.sourceMode === 'linked' ? slot.url : await embed(slot.url),
+    normalUrl: slot.normalSourceMode === 'linked' ? slot.normalUrl : await embed(slot.normalUrl),
+    opacityUrl: slot.opacitySourceMode === 'linked' ? slot.opacityUrl : await embed(slot.opacityUrl)
   });
   for (const material of archived.materials ?? []) {
     material.frontTexture = await embedSlot(material.frontTexture);

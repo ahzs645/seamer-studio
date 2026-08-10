@@ -102,6 +102,43 @@ describe('legacy SSP avatar compatibility', () => {
     expect(manifest.unresolvedAssets).toEqual(['https://example.com/missing.png']);
   });
 
+  it('keeps URL-only material maps linked while embedding downloaded material maps', async () => {
+    const pattern = createEmptyPattern();
+    pattern.materials = [{
+      id: 'fabric', name: 'Mixed storage', useSeparateBackSide: false,
+      frontTexture: {
+        url: 'https://cdn.example.com/linked.png', sourceMode: 'linked', sourceUrl: 'https://cdn.example.com/linked.png',
+        mediaId: null, color: '#ffffff', scale: 100,
+        normalUrl: 'https://cdn.example.com/normal.png', normalSourceMode: 'downloaded', normalSourceUrl: 'https://cdn.example.com/normal.png',
+        normalMediaId: null, normalMapScale: 100,
+        opacityUrl: '', opacityMediaId: null, opacityMapScale: 100
+      },
+      backTexture: null,
+      stretchWarpValue: 10, stretchWeftValue: 10, bendValue: 10, thickness: 0.5, weight: 150,
+      roughness: 0.8, metalness: 0, specularIntensity: 0.5, opacity: 1, normalScale: 1, alphaCutoff: 0,
+      libraryItemId: null, libraryVersion: null, libraryUpdatedAt: null
+    }];
+    const fetcher = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/normal.png')) {
+        return new Response(new Uint8Array([4, 5, 6]), { status: 200, headers: { 'content-type': 'image/png' } });
+      }
+      throw new Error(`URL-only map must not be fetched: ${url}`);
+    }) as typeof fetch;
+
+    const { blob, manifest } = await createSSPArchive(pattern, { fetcher });
+    const envelope = await readSSPEnvelope(blob);
+    const restored = await sspToPattern(blob);
+
+    expect(manifest.assetCount).toBe(1);
+    expect(envelope?.pattern.materials[0].frontTexture?.url).toBe('https://cdn.example.com/linked.png');
+    expect(envelope?.pattern.materials[0].frontTexture?.normalUrl).toMatch(/^ssp-asset:\/\//);
+    expect(restored.materials[0].frontTexture?.url).toBe('https://cdn.example.com/linked.png');
+    expect(restored.materials[0].frontTexture?.normalUrl).toBe('data:image/png;base64,BAUG');
+    expect(restored.materials[0].frontTexture?.sourceMode).toBe('linked');
+    expect(restored.materials[0].frontTexture?.normalSourceMode).toBe('downloaded');
+  });
+
   it('still opens the old gzip Pattern-root format', async () => {
     const pattern = createEmptyPattern();
     pattern.name = 'SSP v1 project';

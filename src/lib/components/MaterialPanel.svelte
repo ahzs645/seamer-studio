@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { Pattern, Material, TextureSlot } from '@seamer/pattern-model';
   import MaterialPreview3D from '$lib/components/MaterialPreview3D.svelte';
+  import TextureMapSource from '$lib/components/TextureMapSource.svelte';
 
   interface Props {
     currentPattern: Pattern;
@@ -71,28 +72,13 @@
   // --- texture maps (diffuse / normal / opacity per slot; repeats every `scale` mm) ---------------
   type Side = 'frontTexture' | 'backTexture';
   const MAPS = [
-    { label: 'Texture', url: 'url', scale: 'scale' },
-    { label: 'Normal', url: 'normalUrl', scale: 'normalMapScale' },
-    { label: 'Opacity', url: 'opacityUrl', scale: 'opacityMapScale' }
+    { label: 'Texture', kind: 'base' },
+    { label: 'Normal', kind: 'normal' },
+    { label: 'Opacity', kind: 'opacity' }
   ] as const;
 
   function patchSlot(id: string, side: Side, upd: Partial<TextureSlot>) {
     patch(id, (m) => ({ ...m, [side]: { ...(m[side] ?? defaultSlot(swatch(m))), ...upd } }));
-  }
-
-  /** Pick an image file and store it on the slot as a data URL (local-first, travels with the pattern). */
-  function chooseMap(id: string, side: Side, urlKey: 'url' | 'normalUrl' | 'opacityUrl') {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = 'image/*';
-    input.onchange = () => {
-      const file = input.files?.[0];
-      if (!file) return;
-      const reader = new FileReader();
-      reader.onload = () => patchSlot(id, side, { [urlKey]: String(reader.result) } as Partial<TextureSlot>);
-      reader.readAsDataURL(file);
-    };
-    input.click();
   }
 
   function setSeparateBack(id: string, on: boolean) {
@@ -158,25 +144,12 @@
             {@const slot = (side === 'backTexture' ? mat.backTexture : mat.frontTexture) ?? defaultSlot(swatch(mat))}
             {#if sideLabel}<div class="opacity-60 mt-0.5">{sideLabel}</div>{/if}
             {#each MAPS as map}
-              {@const url = slot[map.url]}
-              <div class="flex items-center gap-1">
-                <span class="w-12 shrink-0 opacity-70">{map.label}</span>
-                {#if url}
-                  <img src={url} alt="{map.label} map" class="w-5 h-5 rounded border border-base-300 object-cover shrink-0" />
-                {/if}
-                <button class="btn btn-xs btn-ghost px-1 flex-1 justify-start truncate" onclick={() => chooseMap(mat.id, side as Side, map.url)}>
-                  {url ? 'Replace…' : 'Choose image…'}
-                </button>
-                <label class="flex items-center gap-0.5 shrink-0" title="Repeat size — the image tiles every N mm of fabric">
-                  <input type="number" min="1" step="5" class="input input-bordered input-xs w-14" value={slot[map.scale]}
-                    onchange={(e) => patchSlot(mat.id, side as Side, { [map.scale]: Math.max(1, +e.currentTarget.value || 100) })} />
-                  <span class="opacity-50">mm</span>
-                </label>
-                {#if url}
-                  <button class="btn btn-xs btn-ghost px-0.5 text-error shrink-0" title="Clear {map.label.toLowerCase()} map"
-                    onclick={() => patchSlot(mat.id, side as Side, { [map.url]: '' } as Partial<TextureSlot>)}>&times;</button>
-                {/if}
-              </div>
+              <TextureMapSource
+                textureSlot={slot}
+                kind={map.kind}
+                label={map.label}
+                onchange={(update) => patchSlot(mat.id, side as Side, update)}
+              />
             {/each}
           {/each}
 
