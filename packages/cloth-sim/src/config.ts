@@ -111,6 +111,23 @@ export function clampStretchAlpha(a: number): number {
   return clamp(a, 0.01, 100);
 }
 
+/**
+ * Axial compliance of a wire sewn into a seam channel. A wire does not stretch, so this sits far
+ * below the fabric floor (`clampStretchAlpha` bottoms out at 0.01, which is only ~90% stiff at our
+ * substep) — at 1e-7 the alphaTilde term is negligible against the particle weights and the
+ * constraint resolves as effectively rigid.
+ */
+export const WIRE_AXIAL_COMPLIANCE = 1e-7;
+
+/**
+ * UI wire stiffness (0..100) -> compliance of the curvature constraint spanning alternate particles.
+ * 100 holds the flat pattern's curvature rigidly; 0 lets the wire behave like a soft cord that keeps
+ * its length but not its shape.
+ */
+export function wireStiffnessToCompliance(stiffness: number): number {
+  return interpolateLog(1 - clamp(stiffness, 0, 100) / 100, 1e-6, 1);
+}
+
 export function clampBendAlpha(a: number): number {
   return clamp(a, 0.001, 10);
 }

@@ -11,6 +11,7 @@
     type SeamPick
   } from '@seamer/pattern-model';
   import { PatternRenderer, type DrapeDebugState, type RendererStatus, type SceneMode } from '$lib/scene/scene3d';
+  import AssemblyTimeline from '$lib/components/AssemblyTimeline.svelte';
   import { createSeamerAoPass } from '$lib/scene/n8aoPost';
   import type { SimConfig } from '@seamer/cloth-sim';
   import { isDarkTheme, toggleTheme, applyStoredTheme, onThemeChange } from '$lib/utils/theme';
@@ -39,6 +40,7 @@
     selectedPieceId?: string | null;
     onpieceselect?: (id: string | null) => void;
     labelDisplay?: 'off' | 'billboard' | 'flat';
+    onlabeldisplaychange?: (value: 'off' | 'billboard' | 'flat') => void;
     /** Fired when a user-run drape settles, with per-piece settled savedPositions to persist. */
     ondrapesettled?: (savedByPiece: Record<string, number[]>) => void;
     /** Undo-aware pattern update (arrangement-point snaps, freeze toggle). */
@@ -47,7 +49,7 @@
     oncamerachange?: (pos: [number, number, number], target: [number, number, number], fov: number) => void;
   }
 
-  let { currentPattern, selectedPieceId = null, onpieceselect, labelDisplay = 'flat', ondrapesettled, onpatternupdate, oncamerachange }: Props = $props();
+  let { currentPattern, selectedPieceId = null, onpieceselect, labelDisplay = 'flat', onlabeldisplaychange, ondrapesettled, onpatternupdate, oncamerachange }: Props = $props();
 
   const docMmToWorld = (mm: number): number => docToWorld({ x: mm, y: 0 }).x;
   const worldToDocMm = (metres: number): number =>
@@ -456,7 +458,46 @@
       }, next ? 'Show triangles' : 'Hide triangles');
     }
   }
+  /**
+   * Whether this pattern is drafted on a body at all. A lantern, a bag, a lampshade — anything that
+   * is not worn — has no person in it, and the avatar, its poses and the body chip are all noise.
+   * This is a document setting, not a view toggle: it persists, and it undoes.
+   */
+  const bodyEnabled = $derived(currentPattern.settings3d.avatarEnabled !== false);
+
+  function togglePerson() {
+    const enabling = !bodyEnabled;
+    onpatternupdate?.({
+      ...currentPattern,
+      settings3d: { ...currentPattern.settings3d, avatarEnabled: enabling, showAvatar: enabling },
+      hasChanged: true
+    }, enabling ? 'Draft on a body' : 'Remove the body');
+  }
+
   function toggleAvatar() { showAvatar = !showAvatar; renderer?.setAvatarVisible(showAvatar); }
+
+  /**
+   * One button, three states: every badge, outside only, none. Inside a closed form the reverse-side
+   * badges are visible through the openings and read as litter on the far wall, so "outside only" is
+   * the state that actually gets used on a lantern — and it is not reachable by a plain on/off.
+   */
+  let showInnerLabels = $state(true);
+  const labelState = $derived(
+    labelDisplay === 'off' ? 'none' : showInnerLabels ? 'all' : 'outside'
+  );
+  function cycleLabels() {
+    if (labelState === 'all') {
+      showInnerLabels = false;
+      renderer?.setShowInnerLabels(false);
+    } else if (labelState === 'outside') {
+      onlabeldisplaychange?.('off');
+    } else {
+      showInnerLabels = true;
+      renderer?.setShowInnerLabels(true);
+      onlabeldisplaychange?.('flat');
+    }
+  }
+  $effect(() => { void labelDisplay; renderer?.setShowInnerLabels(showInnerLabels); });
 
   // apply the piece-label display setting (driven from the Properties panel)
   function applyLabelDisplay() {
@@ -512,6 +553,18 @@
 
   // Simulation controls: expose the solver parameters (matches the source's "Simulation controls").
   let showSimPanel = $state(false);
+  let showTimeline = $state(false);
+  let showWires = $state(true);
+
+  function toggleTimeline() {
+    showTimeline = !showTimeline;
+    // A recording drives the mesh directly; leaving the solver running would fight it for the buffer.
+    if (showTimeline && status === 'simulating') renderer?.pauseSimulation();
+  }
+  function toggleWires() {
+    showWires = !showWires;
+    renderer?.setShowWires(showWires);
+  }
   let stretchError = $state<number | null>(null);
   let simCfg = $state<SimConfig | null>(null);
   let cameraFov = $state(54);
@@ -553,11 +606,20 @@
     { label: status === 'simulating' ? 'Pause simulation' : 'Start simulation', icon: status === 'simulating' ? 'pause' : 'play_arrow', onClick: toggleSimulate, active: () => status === 'simulating', disabled: () => status !== 'ready' && status !== 'simulating' },
     { label: 'Reset simulation', icon: 'refresh', onClick: () => void reset(), disabled: () => status !== 'ready' && status !== 'simulating' },
     { label: 'Show triangles', icon: 'change_history', onClick: toggleTriangles, active: () => showTriangles, sep: true },
-    { label: 'Show avatar', icon: 'person', onClick: toggleAvatar, active: () => showAvatar },
+    { label: bodyEnabled ? 'Hide avatar' : 'Draft on a body', icon: 'person', onClick: bodyEnabled ? toggleAvatar : togglePerson, active: () => bodyEnabled && showAvatar },
+    { label: bodyEnabled ? 'Remove the body' : 'No body — lantern, bag, shade', icon: bodyEnabled ? 'person_off' : 'deployed_code', onClick: togglePerson, active: () => !bodyEnabled },
+    {
+      label: labelState === 'all' ? 'Piece labels: everywhere' : labelState === 'outside' ? 'Piece labels: outside only' : 'Piece labels: off',
+      icon: labelState === 'none' ? 'label_off' : 'label',
+      onClick: cycleLabels,
+      active: () => labelState !== 'none'
+    },
     { label: sceneMode === 'arrange' && arrangeKind === 'arrange' ? 'Exit arrange mode' : 'Arrange (A)', icon: 'scatter_plot', onClick: toggleArrangeMode, active: () => sceneMode === 'arrange' && arrangeKind === 'arrange', shortcut: 'A' },
     { label: sceneMode === 'arrange' && arrangeKind === 'manipulate' ? 'Exit move mode' : 'Move pieces (M)', icon: 'open_with', onClick: toggleManipulateMode, active: () => sceneMode === 'arrange' && arrangeKind === 'manipulate', shortcut: 'M' },
     { label: frozenSelected ? 'Unfreeze piece' : 'Freeze piece', icon: frozenSelected ? 'lock_open' : 'lock', onClick: toggleFreezeSelected, active: () => frozenSelected },
     { label: 'Simulation controls', icon: 'tune', onClick: toggleSimPanel, active: () => showSimPanel },
+    { label: 'Assembly timeline', icon: 'linear_scale', onClick: toggleTimeline, active: () => showTimeline, sep: true },
+    { label: showWires ? 'Hide wires' : 'Show wires', icon: 'cable', onClick: toggleWires, active: () => showWires },
     { label: dark ? 'Light mode' : 'Dark mode', icon: dark ? 'light_mode' : 'dark_mode', onClick: toggleDark, active: () => dark, sep: true },
     { label: 'Download as OBJ', icon: 'download', onClick: downloadOBJ },
     { label: 'Download as STL', icon: 'deployed_code', onClick: () => void downloadSTL() },
@@ -646,6 +708,19 @@
       {#if arrangeKind === 'manipulate'}
         <span class="text-[10px] opacity-60 bg-base-200/70 rounded px-2 py-0.5">Drag a piece off the body — Settle eases it back into place</span>
       {/if}
+    </div>
+  {/if}
+
+  <!-- Assembly timeline: record the garment sewing itself, then scrub the recording -->
+  {#if showTimeline}
+    <!-- clears the pose and lighting bars that already own the bottom centre -->
+    <div class="absolute bottom-28 left-1/2 -translate-x-1/2 z-20">
+      <AssemblyTimeline
+        disabled={status !== 'ready' && status !== 'simulating'}
+        record={(options) => renderer?.recordAssemblyTimeline(options) ?? Promise.resolve(null)}
+        showFrame={(positions) => renderer?.showAssemblyFrame(positions)}
+        onclose={() => (showTimeline = false)}
+      />
     </div>
   {/if}
 
@@ -743,8 +818,8 @@
     </button>
   </div>
 
-  <!-- Pose selector -->
-  {#if poses.length}
+  <!-- Pose selector — only meaningful when the pattern is drafted on a body -->
+  {#if poses.length && bodyEnabled}
     <div class="absolute bottom-11 left-1/2 -translate-x-1/2 z-10">
       <div class="join join-horizontal bg-base-200/85 backdrop-blur rounded-lg shadow">
         {#each poses as p}
@@ -755,6 +830,6 @@
   {/if}
 
   <div class="absolute top-2 left-2 z-10 text-xs opacity-60 bg-base-200/80 rounded px-2 py-1">
-    {currentPattern.body.gender} · {currentPattern.pieces.length} pieces
+    {#if bodyEnabled}{currentPattern.body.gender} · {/if}{currentPattern.pieces.length} pieces
   </div>
 </div>

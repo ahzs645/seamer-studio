@@ -9,7 +9,8 @@
 // is a distance constraint between opposite corners. Edges are greedily colored so each color group
 // has no shared vertex (conflict-free Gauss-Seidel).
 
-import type { Pattern, Material, SeamRef } from '@seamer/pattern-model';
+import type { Pattern, Material, SeamRef, PiecePath } from '@seamer/pattern-model';
+import { resolveAssembly } from '@seamer/pattern-model/utils/assembly';
 import type { PieceCloth } from './geometry/boundary';
 import type { Vec2 } from '@seamer/pattern-model/utils/patternGeometry';
 import {
@@ -17,6 +18,8 @@ import {
   bendScaleToCompliance,
   clampStretchAlpha,
   clampBendAlpha,
+  wireStiffnessToCompliance,
+  WIRE_AXIAL_COMPLIANCE,
   DISABLED_COMPLIANCE
 } from './config';
 
@@ -60,6 +63,20 @@ export interface SimData {
   edgeRuns: Map<string, number[]>;
   // Per-seam particle pairs (flat [a0,b0,a1,b1,...]) for per-seam colored 3D seam display.
   seamPairsBySeam: { seamId: string; index: number; pairs: number[] }[];
+  /**
+   * Parallel to `seams`: the stitch index of each link, or -1 for an empty slot or a link that is
+   * never gated (proximity repairs). The solver closes a link once the sewn-up-to threshold passes
+   * its index, which is what makes a seam zip shut rather than snap.
+   */
+  seamOrder: Int32Array;
+  /** Total gated stitches. The assembly timeline runs from 0 to this. */
+  stitchCount: number;
+  /** Stitch span of each seam, in assembly order — lets the UI name what is being sewn. */
+  seamStitchRanges: { seamId: string; start: number; end: number }[];
+  /** Stitch span of each resolved assembly step, in order. */
+  assemblySteps: { id: string; label: string; start: number; end: number; settleFrames: number }[];
+  /** Ordered particle runs carrying a wire, for rendering the ribs. */
+  wireRuns: { pieceId: string; piecePathId: string; particles: number[]; diameter: number; closed: boolean; threaded: boolean }[];
 }
 
 export interface ArrangedPiece {
@@ -207,6 +224,19 @@ export function buildSimData(pattern: Pattern, arranged: ArrangedPiece[], option
   const bendComplianceBeyond: number[] = []; // stretch alpha for the same material/edge direction (shader slot .y)
   const bendTargetAngle: number[] = [];
 
+  // Wire (boning / hoop / lantern rib) constraints. Kept OUT of `allStretchEdges` on purpose: that
+  // list also seeds near-damping neighbours and is the input to the cross-seam softening pass, and a
+  // wire is neither a mesh neighbour relationship nor something a seam may soften — the wire in a
+  // lantern rib runs along the seam edge itself, so softening would disable exactly the constraints
+  // that hold the form. They are merged in at colour-grouping time instead.
+  const wireEdges: [number, number][] = [];
+  const wireRest: number[] = [];
+  const wireCompliance: number[] = [];
+  /** 1 = one-sided (resists stretch only), which is how a threaded casing gathers. */
+  const wireLongRange: number[] = [];
+  const wireAddedMass = new Map<number, number>(); // global particle -> kg of wire hung on it
+  const wireRuns: SimData['wireRuns'] = [];
+
   // `${pieceId}::${edgeKey}` -> global particle indices (for seams). edgeKey is a PiecePath id,
   // optionally suffixed `#M` for the reflected (mirrored) copy of that edge.
   const edgeParticlesGlobal = new Map<string, number[]>();
@@ -336,6 +366,60 @@ export function buildSimData(pattern: Pattern, arranged: ArrangedPiece[], option
       bendTargetAngle.push(foldByHinge.get(k) ?? 0); // dihedral target along fold lines, else distance-mode
     }
 
+    // Wire channels. A wire is a rod: near-inextensible along its length, and resisting any change
+    // to the curvature it already has. Both rest states come from the FLAT pattern, which is the
+    // whole point of the construction — the cut edge already carries the correct in-plane curve, so
+    // holding it means the wire only ever bends out of the plane of the cloth.
+    for (const pp of [...piece.mainPaths, ...piece.internalPaths] as PiecePath[]) {
+      const wire = pp.wire;
+      if (!wire) continue;
+      const locals = ap.cloth.edgeParticles.get(pp.id);
+      if (!locals || locals.length < 2) continue;
+      const globals = locals.map((li) => offset + li);
+      const curveAlpha = wireStiffnessToCompliance(wire.stiffness);
+      const kgPerMm = (wire.linearMass ?? 0) / 1e6; // g/m -> kg/mm
+      // Threaded through a finished casing, the cloth can GATHER along the wire but not stretch out
+      // past it — so its axial links are one-sided, acting only once the fabric is pulled longer
+      // than the wire beneath it. Stitched in, cloth and wire are fixed to each other and the link
+      // is two-sided. Same constraint, same kernel; the flag is the whole difference.
+      const gathers = wire.mode === 'threaded';
+      const seg = (x: number, y: number) => Math.hypot(
+        mesh.points[y].x - mesh.points[x].x, mesh.points[y].y - mesh.points[x].y
+      );
+      const link = (x: number, y: number, alpha: number, oneSided = false) => {
+        const len = seg(x, y);
+        if (len < 1e-6) return;
+        wireEdges.push([offset + x, offset + y]);
+        wireRest.push(len / 1000);
+        wireCompliance.push(alpha);
+        wireLongRange.push(oneSided ? 1 : 0);
+      };
+      const last = locals.length - 1;
+      for (let i = 1; i <= last; i++) {
+        link(locals[i - 1], locals[i], WIRE_AXIAL_COMPLIANCE, gathers);
+        // half a segment of wire mass onto each end
+        const half = (seg(locals[i - 1], locals[i]) / 2) * kgPerMm;
+        wireAddedMass.set(globals[i - 1], (wireAddedMass.get(globals[i - 1]) ?? 0) + half);
+        wireAddedMass.set(globals[i], (wireAddedMass.get(globals[i]) ?? 0) + half);
+      }
+      // Curvature: the chord across alternate particles pins the bend angle without pinning the
+      // plane it bends in, so the rib keeps its flat-pattern curve and still wraps onto the form.
+      for (let i = 1; i < last; i++) link(locals[i - 1], locals[i + 1], curveAlpha, gathers);
+      if (wire.closed && locals.length > 2) {
+        link(locals[last], locals[0], WIRE_AXIAL_COMPLIANCE, gathers);
+        link(locals[last - 1], locals[0], curveAlpha, gathers);
+        link(locals[last], locals[1], curveAlpha, gathers);
+      }
+      wireRuns.push({
+        pieceId: inst.mirror ? ap.cloth.pieceId + '#M' : ap.cloth.pieceId,
+        piecePathId: inst.mirror ? `${pp.id}#M` : pp.id,
+        particles: globals,
+        diameter: wire.diameter,
+        closed: !!wire.closed,
+        threaded: gathers
+      });
+    }
+
     // Base instance registers edgeKey as-is; the mirror instance registers `${edgeKey}#M`, which is
     // exactly what chain() looks up for a seam ref with `mirrored:true`. Same base pieceId, distinct
     // key suffix → the mirror's edges never overwrite the base instance's registration.
@@ -362,13 +446,38 @@ export function buildSimData(pattern: Pattern, arranged: ArrangedPiece[], option
 
   for (let i = 0; i < total; i++) { positions[i * 4 + 3] = invMass[i]; arrangedPositions[i * 4 + 3] = invMass[i]; }
 
+  // Hang the wire's own mass on the particles carrying it. Frozen particles (invMass 0) stay pinned.
+  for (const [g, kg] of wireAddedMass) {
+    const w = invMass[g];
+    if (w <= 0 || kg <= 0) continue;
+    const combined = 1 / (1 / w + kg);
+    positions[g * 4 + 3] = combined;
+    arrangedPositions[g * 4 + 3] = combined;
+  }
+
   // Seams.
   const seams = new Int32Array(total * 4).fill(-1);
+  // Stitch index per link slot; -1 = empty slot, or a link that is never gated by the timeline.
+  const seamOrder = new Int32Array(total * 4).fill(-1);
   const addSeamLink = (a: number, b: number) => {
     if (a === b) return;
     for (let j = 0; j < 4; j++) {
       if (seams[a * 4 + j] === b) return;
       if (seams[a * 4 + j] === -1) { seams[a * 4 + j] = b; return; }
+    }
+  };
+  /**
+   * Stamp an existing link's stitch index (both directions are stamped by the caller). First stamp
+   * wins: stitches are assigned in increasing order, and a particle repeated across pairs — which
+   * the equal-interval resampling does on the shorter side of an eased seam — should close at the
+   * earliest stitch that reaches it, not be pushed back to the last.
+   */
+  const setLinkOrder = (a: number, b: number, stitch: number) => {
+    for (let j = 0; j < 4; j++) {
+      if (seams[a * 4 + j] === b) {
+        if (seamOrder[a * 4 + j] === -1) seamOrder[a * 4 + j] = stitch;
+        return;
+      }
     }
   };
   const dist3 = (a: number, b: number) => Math.hypot(
@@ -539,6 +648,35 @@ export function buildSimData(pattern: Pattern, arranged: ArrangedPiece[], option
     }
   }
 
+  // Assembly order -> per-link stitch index. The timeline's unit is the stitch, not the seam: each
+  // seam's pair list is already ordered along the edge, so walking it in order zips the seam shut
+  // from one end instead of snapping it closed everywhere at once. It also means a single long
+  // continuous seam — a helical lantern rib, say — is a timeline in its own right.
+  const pairsBySeamId = new Map(seamPairsBySeam.map((entry) => [entry.seamId, entry.pairs]));
+  const seamStitchRanges: SimData['seamStitchRanges'] = [];
+  const assemblySteps: SimData['assemblySteps'] = [];
+  let stitch = 0;
+  for (const step of resolveAssembly(pattern)) {
+    const stepStart = stitch;
+    for (const seamId of step.seamIds) {
+      const pairs = pairsBySeamId.get(seamId);
+      if (!pairs || pairs.length === 0) continue;
+      const seamStart = stitch;
+      for (let k = 0; k + 1 < pairs.length; k += 2) {
+        setLinkOrder(pairs[k], pairs[k + 1], stitch);
+        setLinkOrder(pairs[k + 1], pairs[k], stitch);
+        stitch++;
+      }
+      seamStitchRanges.push({ seamId, start: seamStart, end: stitch });
+    }
+    if (stitch > stepStart) {
+      assemblySteps.push({
+        id: step.id, label: step.label, start: stepStart, end: stitch, settleFrames: step.settleFrames
+      });
+    }
+  }
+  const stitchCount = stitch;
+
   // Soften BOTH stretch and bend across seams (matching the original's setupStretchingEdges +
   // setupBendingEdges): a stiff spring/fold spanning a seam fights the seam solver pulling the two
   // edges together, so disable compliance for edges whose endpoints are both seam particles.
@@ -561,7 +699,15 @@ export function buildSimData(pattern: Pattern, arranged: ArrangedPiece[], option
     }
   }
 
-  const stretchColors = buildColorGroups(allStretchEdges, stretchRest, stretchCompliance, stretchLong);
+  // Wires join the distance-constraint pass here, after cross-seam softening has run on the fabric
+  // edges only. Same kernel, same colouring — a wire is a distance constraint that happens to be
+  // orders of magnitude stiffer than cloth.
+  const stretchColors = buildColorGroups(
+    allStretchEdges.concat(wireEdges),
+    stretchRest.concat(wireRest),
+    stretchCompliance.concat(wireCompliance),
+    stretchLong.concat(wireLongRange)
+  );
   const bendColors = buildBendColorGroups(allBendEdges, bendHinge, bendRest, bendCompliance, bendComplianceBeyond, bendTargetAngle);
 
   // Per-piece collision layer + flip flag (matches the original: layered garments self-collide in
@@ -637,6 +783,7 @@ export function buildSimData(pattern: Pattern, arranged: ArrangedPiece[], option
     triangles, triangleCount: triCount, particleLayers, neighborIndices,
     incidentTriangles, maxIncidentTrianglesPerParticle: MAX_INCIDENT,
     edgeRuns: edgeParticlesGlobal,
-    seamPairsBySeam
+    seamPairsBySeam,
+    seamOrder, stitchCount, seamStitchRanges, assemblySteps, wireRuns
   };
 }

@@ -23,6 +23,11 @@ import { cylinderRefit } from '@seamer/cloth-sim';
 import { toOBJ, toSTL } from '@atelier/io/three';
 import { SolverRunner, requestDevice, isWebGPUAvailable } from '@atelier/sim';
 import {
+  recordAssembly,
+  type AssemblyRecording,
+  type RecordOptions
+} from '$lib/timeline/assemblyRecording';
+import {
   docToWorld,
   worldToDoc,
   type Viewport
@@ -124,6 +129,8 @@ export class PatternRenderer {
     aspect: number;
   }[] = [];
   private showLabels = true;
+  /** Badges on the inward face. Off is right for a closed form, where they show through openings. */
+  private showInnerLabels = true;
   private labelMode: 'billboard' | 'flat' = 'flat';
 
   private device: GPUDevice | null = null;
@@ -1205,6 +1212,12 @@ export class PatternRenderer {
     this.applyLabelVisibility();
   }
 
+  /** Show or hide the badges on the INWARD face — the ones you see through a lantern's openings. */
+  setShowInnerLabels(on: boolean): void {
+    this.showInnerLabels = on;
+    this.applyLabelVisibility();
+  }
+
   /** Switch label style between camera-facing (billboard) and baked-into-fabric (flat). */
   setLabelMode(mode: 'billboard' | 'flat'): void {
     if (mode === this.labelMode) return;
@@ -1220,10 +1233,21 @@ export class PatternRenderer {
     const flat = this.labelMode === 'flat';
     for (const e of this.clothMeshes) {
       const opacity = this.showLabels && e.mesh.visible && flat ? 1 : 0;
-      for (const m of [e.mesh.material, e.backMesh?.material]) {
-        const u = (m as THREE.Material | undefined)?.userData?.labelUniforms as { uLabelOpacity: { value: number } } | undefined;
-        if (u) u.uLabelOpacity.value = opacity;
-      }
+      const inner = this.showInnerLabels ? opacity : 0;
+      const set = (m: THREE.Material | THREE.Material[] | undefined, out: number, back: number) => {
+        const u = (m as THREE.Material | undefined)?.userData?.labelUniforms as {
+          uLabelOpacity: { value: number };
+          uLabelOpacityBack?: { value: number };
+        } | undefined;
+        if (!u) return;
+        u.uLabelOpacity.value = out;
+        if (u.uLabelOpacityBack) u.uLabelOpacityBack.value = back;
+      };
+      // The main mesh shows the fabric face outward and its own reverse inward. The back shell,
+      // when a separate back side is in play, exists ONLY to draw the inward surface — so both of
+      // its slots count as inner, whichever way its winding happens to resolve.
+      set(e.mesh.material, opacity, inner);
+      set(e.backMesh?.material, inner, inner);
     }
     for (const l of this.pieceLabels) {
       const mesh = this.clothMeshes.find((e) => e.pieceId === l.pieceId)?.mesh;
@@ -1453,6 +1477,65 @@ export class PatternRenderer {
       this.releaseSimulationLease = this.viewport.acquireRenderLease('cloth-solver');
     }
     this.simRunner?.start();
+  }
+
+  /** Show the wire sewn into each channel (lantern ribs, boning, hoops). */
+  setShowWires(show: boolean) {
+    this.overlays.setShowWires(show);
+    this.invalidate();
+  }
+
+  /**
+   * Record the garment sewing itself together.
+   *
+   * The live solver is paused first: it writes into the same particle buffer, and a recording that
+   * shared it would capture frames from two different clocks. `from` picks the starting state —
+   * 'saved' holds pieces where they already belong and only opens the seams (right for a generated
+   * lantern, whose drape is known exactly), 'arranged' starts from the pre-drape layout, which is a
+   * true assembly for a garment arranged on a body.
+   */
+  async recordAssemblyTimeline(
+    options: RecordOptions & { from?: 'saved' | 'arranged' } = {}
+  ): Promise<AssemblyRecording | null> {
+    const prepared = this.prepared;
+    if (!prepared) return null;
+    const sim = await this.ensureSim(false);
+    if (!sim) return null;
+    this.pauseSimulation();
+
+    const from = options.from ?? (this.patternHasSavedDrape() ? 'saved' : 'arranged');
+    const recording = await recordAssembly(
+      {
+        stitchCount: sim.stitchCount,
+        setSewnUpTo: (count) => sim.setSewnUpTo(count),
+        step: () => sim.step(),
+        reset: () => (from === 'saved' ? sim.resetToSaved() : sim.resetToArranged())
+      },
+      prepared.simData.assemblySteps,
+      prepared.simData.particleCount,
+      options
+    );
+
+    // Leave the solver fully sewn again, or the next Play would continue from a half-open garment.
+    sim.setSewnUpTo(sim.stitchCount);
+    return recording;
+  }
+
+  /** True when the pattern ships its own drape, so a recording can start from the finished form. */
+  private patternHasSavedDrape(): boolean {
+    return !!this.pattern?.pieces.some(
+      (piece) => (piece.settings3d.savedPositions?.length ?? 0) >= 15
+    );
+  }
+
+  /** Paint a recorded frame. Pass null to hand the view back to the live/settled positions. */
+  showAssemblyFrame(positions: Float32Array | null) {
+    const fallback = this.sim?.positions ?? this.prepared?.simData.positions;
+    const next = positions ?? fallback;
+    if (!next) return;
+    this.applyClothPositions(next);
+    this.overlays.updatePositions(next);
+    this.invalidate();
   }
 
   /** Freeze the live solver exactly where it is without welding seams or writing a new saved drape. */

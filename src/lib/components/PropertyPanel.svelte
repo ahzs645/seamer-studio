@@ -204,6 +204,49 @@
     { id: 'firstEdgeRightAngle', icon: 'square', title: 'First edge right angle (square cut to the first edge)' },
     { id: 'secondEdgeRightAngle', icon: 'crop_square', title: 'Second edge right angle (square cut to the second edge)' }
   ];
+  const DEFAULT_WIRE = {
+    mode: 'stitched' as const,
+    channelWidth: 8,
+    diameter: 1.5,
+    stiffness: 85,
+    linearMass: 4.8,
+    closed: false
+  };
+  /** The allowance this edge would cut at with no wire in it. */
+  function baseAllowanceMm(): number {
+    return editingPiece?.seamAllowance ?? currentPattern.seamAllowance ?? 0;
+  }
+  /**
+   * A wire needs the cloth folded back around it, so its channel is extra CUT width — the finished
+   * edge does not move. That is exactly the per-edge allowance override, so keep the two in step the
+   * way the generators write them (`base + channelWidth`). We only touch the override while it is
+   * still tracking the wire; once someone sets their own number we leave it alone, and on removal we
+   * only put the base back if the override was ours.
+   */
+  function wireAllowancePatch(pp: PiecePath, nextChannel: number | null): Partial<PiecePath> {
+    if (pp.seamAllowanceFormula) return {}; // a formula owns this edge; never overwrite it
+    const base = baseAllowanceMm();
+    const tracking = pp.wire
+      ? pp.seamAllowance === undefined || Math.abs(pp.seamAllowance - (base + pp.wire.channelWidth)) < 1e-6
+      : pp.seamAllowance === undefined;
+    if (!tracking) return {};
+    if (nextChannel === null) return { seamAllowance: undefined };
+    return { seamAllowance: base + nextChannel };
+  }
+  function setWire(pp: PiecePath, partial: Partial<NonNullable<PiecePath['wire']>>) {
+    const wire = { ...DEFAULT_WIRE, ...pp.wire, ...partial };
+    updateMainPath(pp.id, { wire, ...wireAllowancePatch(pp, wire.channelWidth) }, 'Edit wire');
+  }
+  function toggleWire(pp: PiecePath, on: boolean) {
+    updateMainPath(
+      pp.id,
+      on
+        ? { wire: { ...DEFAULT_WIRE }, ...wireAllowancePatch(pp, DEFAULT_WIRE.channelWidth) }
+        : { wire: undefined, ...wireAllowancePatch(pp, null) },
+      on ? 'Add wire' : 'Remove wire'
+    );
+  }
+
   function updateMainPath(ppId: string, partial: Partial<PiecePath>, label = 'Edit corner join') {
     updatePiece((p) => ({ ...p, mainPaths: p.mainPaths.map((x) => (x.id === ppId ? { ...x, ...partial } : x)) }), label);
   }
@@ -1003,6 +1046,59 @@
                               <input type="text" class="input input-bordered input-xs w-full font-mono" placeholder="formula (mm) — empty clears" value={pp.seamAllowanceFormula?.formula ?? ''}
                                 onchange={(e) => setPathFormula(pp.id, 'seamAllowance', e.currentTarget.value)} />
                             {/if}
+                          {/if}
+                        </div>
+
+                        <!-- Wire / stiffener carried by this edge -->
+                        <div class="space-y-1 border-t border-base-200 pt-2">
+                          <label class="flex items-center gap-2 text-[11px] font-semibold opacity-70">
+                            <input type="checkbox" class="checkbox checkbox-xs" checked={!!pp.wire}
+                              onchange={(e) => toggleWire(pp, e.currentTarget.checked)} />
+                            <span class="material-symbols-rounded text-sm">cable</span>Wire in this edge
+                          </label>
+                          {#if pp.wire}
+                            {@const wire = pp.wire}
+                            <div class="join w-full">
+                              <button class="join-item btn btn-xs flex-1" class:btn-active={(wire.mode ?? 'stitched') === 'stitched'}
+                                title="Sewn in as you make the seam — cloth and wire are fixed to each other"
+                                onclick={() => setWire(pp, { mode: 'stitched' })}>Stitched in</button>
+                              <button class="join-item btn btn-xs flex-1" class:btn-active={wire.mode === 'threaded'}
+                                title="Fed through a finished casing afterwards — the cloth can gather along it"
+                                onclick={() => setWire(pp, { mode: 'threaded' })}>Threaded</button>
+                            </div>
+                            <p class="text-[10px] opacity-50">
+                              {wire.mode === 'threaded'
+                                ? 'Fed in after the casing is sewn. The cloth may gather along the wire but cannot stretch past it.'
+                                : 'Sewn into the seam as you go. Cloth and wire hold each other along their whole length.'}
+                            </p>
+                            <label class="flex items-center justify-between gap-2 text-[11px]"
+                              title="Extra CUT width for the fold-back that houses the wire. The finished edge does not move — this is added to the edge's seam allowance.">Channel ({unitLabel})
+                              <input type="number" min="0" step="0.5" class="input input-bordered input-xs w-20"
+                                value={toUnit(wire.channelWidth).toFixed(2)}
+                                oninput={(e) => setWire(pp, { channelWidth: fromUnit(parseFloat(e.currentTarget.value) || 0) })} /></label>
+                            {#if pp.seamAllowance !== undefined && Math.abs(pp.seamAllowance - (baseAllowanceMm() + wire.channelWidth)) < 1e-6}
+                              <p class="text-[10px] opacity-50">Cuts at {toUnit(baseAllowanceMm()).toFixed(2)} + {toUnit(wire.channelWidth).toFixed(2)} = {toUnit(pp.seamAllowance).toFixed(2)} {unitLabel} on this edge.</p>
+                            {:else}
+                              <p class="text-[10px] opacity-50">This edge has its own allowance ({toUnit(pp.seamAllowance ?? baseAllowanceMm()).toFixed(2)} {unitLabel}), so the channel is not added to it.</p>
+                            {/if}
+                            <label class="flex items-center justify-between gap-2 text-[11px]">Diameter ({unitLabel})
+                              <input type="number" min="0.1" step="0.1" class="input input-bordered input-xs w-20"
+                                value={toUnit(wire.diameter).toFixed(2)}
+                                oninput={(e) => setWire(pp, { diameter: fromUnit(parseFloat(e.currentTarget.value) || 0.1) })} /></label>
+                            <label class="flex items-center justify-between gap-2 text-[11px]" title="How hard the wire resists being bent away from the curve the flat pattern gives it">
+                              Stiffness
+                              <span class="flex items-center gap-1">
+                                <input type="range" min="0" max="100" step="5" class="range range-xs w-24" value={wire.stiffness}
+                                  oninput={(e) => setWire(pp, { stiffness: parseInt(e.currentTarget.value, 10) })} />
+                                <span class="tabular-nums w-6 text-right">{wire.stiffness}</span>
+                              </span></label>
+                            <label class="flex items-center justify-between gap-2 text-[11px]" title="Annealed aluminium at 1.5 mm is about 4.8 g/m">Weight (g/m)
+                              <input type="number" min="0" step="0.1" class="input input-bordered input-xs w-20"
+                                value={wire.linearMass ?? 0}
+                                oninput={(e) => setWire(pp, { linearMass: parseFloat(e.currentTarget.value) || 0 })} /></label>
+                            <label class="flex items-center gap-2 text-[11px]" title="Join the wire end to end — a closed hoop rather than an open rib">
+                              <input type="checkbox" class="checkbox checkbox-xs" checked={!!wire.closed}
+                                onchange={(e) => setWire(pp, { closed: e.currentTarget.checked })} /> Closed hoop</label>
                           {/if}
                         </div>
 

@@ -206,6 +206,17 @@ export function seamWGSL(cfg: SimConfig, maxDisplacementSq: number): string {
 @group(0) @binding(0) var<storage, read> positions: array<vec4f>;
 @group(0) @binding(1) var<storage, read> seams: array<i32>;
 @group(0) @binding(2) var<storage, read_write> positionCorrection: array<vec4f>;
+@group(0) @binding(3) var<storage, read> seamOrder: array<i32>;
+@group(0) @binding(4) var<uniform> gate: SeamGate;
+
+struct SeamGate {
+  // Links whose stitch index is below this are sewn; the rest are still loose. Held at the total
+  // stitch count unless an assembly recording is driving it, so ungated behaviour is the default.
+  sewnUpTo: i32,
+  pad0: i32,
+  pad1: i32,
+  pad2: i32,
+};
 
 const stiffness = ${cfg.seamStrength}f;
 const maxDisplacementSq = ${maxDisplacementSq}f;
@@ -220,7 +231,9 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   if (invMass1 > 0.0) {
     for (var j = 0u; j < 4u; j = j + 1u) {
       let connected = seams[index * 4u + j];
-      if (connected < 0 || u32(connected) == index) { break; }
+      // continue, not break: a gated-out link must not hide the links in later slots.
+      if (connected < 0 || u32(connected) == index) { continue; }
+      if (seamOrder[index * 4u + j] >= gate.sewnUpTo) { continue; }
       let ci = u32(connected);
       let invMass2 = positions[ci].w;
       let totalInvMass = invMass1 + invMass2;
@@ -614,6 +627,15 @@ const minDistance2d = ${cfg.minDistance2d}f;
 const minDistance2d2 = minDistance2d * minDistance2d;
 const numCollisionConstraintsPerParticle = ${cfg.numInternalCollisionConstraintsPerParticle}u;
 
+// A seam particle is coincident with its partner and would self-collide against the adjoining panel
+// every substep, so it is excluded from the gather.
+//
+// This deliberately does NOT gate on the assembly threshold, even though an unsewn edge is
+// physically a free edge that ought to collide. Reading the per-link stitch order here would make a
+// ninth storage buffer in this stage, and WebGPU only guarantees eight per stage
+// (maxStorageBuffersPerShaderStage) — the pipeline then fails outright on any baseline adapter.
+// Leaving it ungated means not-yet-sewn edges can pass through nearby cloth during a recording;
+// that band is thin and the panels are near their final positions, so it is the cheaper wrong.
 fn hasSeam(particleIndex: u32) -> bool {
   for (var j: u32 = 0u; j < 4u; j = j + 1u) {
     if (seams[particleIndex * 4u + j] > -1i) { return true; }

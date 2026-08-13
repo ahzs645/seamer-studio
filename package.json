@@ -16,6 +16,7 @@
     "test:unit": "vitest run",
     "test:unit:watch": "vitest",
     "audit:simulator": "node scripts/audit-simulator-parity.mjs",
+    "check:wgsl": "node scripts/check-wgsl.mjs",
     "lint": "eslint .",
     "dev:link": "pnpm -r --parallel typecheck --watch"
   },

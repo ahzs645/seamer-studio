@@ -40,6 +40,13 @@ interface SeamLineEntry {
   pairs: number[];
 }
 
+interface WireLineEntry {
+  id: string;
+  /** Consecutive particle pairs along the wire, ready for the line overlay. */
+  segments: number[];
+  diameter: number;
+}
+
 interface MeasureEntry {
   lineId: string;
   labelId: string;
@@ -84,6 +91,8 @@ export class SeamerOverlays {
   private seamLines: SeamLineEntry[] = [];
   private showSeams = false;
   private selectedSeam: string | null = null;
+  private wireLines: WireLineEntry[] = [];
+  private showWires = true;
   private readonly seamToolGroup = new THREE.Group();
   private seamToolEntries: SeamToolEntry[] = [];
   private seamToolState: SeamToolState | null = null;
@@ -121,6 +130,7 @@ export class SeamerOverlays {
     this.positions = positions;
     if (!prepared || !positions) return;
     this.rebuildSeamLines();
+    this.rebuildWireLines();
     this.rebuildSeamTool();
     this.rebuildSelectionOutline();
     this.rebuildMeasurements();
@@ -128,6 +138,7 @@ export class SeamerOverlays {
 
   clearPrepared(): void {
     this.clearSeamLines();
+    this.clearWireLines();
     this.clearSeamTool();
     this.viewport.overlays.remove(OUTLINE_ID);
     this.outlinePairs = [];
@@ -139,9 +150,18 @@ export class SeamerOverlays {
   updatePositions(positions: Float32Array): void {
     this.positions = positions;
     this.updateSeamLines();
+    this.updateWireLines();
     this.updateSeamToolPositions();
     this.updateSelectionOutline();
     this.updateMeasurements();
+  }
+
+  /** Show the stiffener sewn into each channel — the ribs that make a lantern hold its shape. */
+  setShowWires(show: boolean): void {
+    this.showWires = show;
+    if (show && this.wireLines.length === 0) this.rebuildWireLines();
+    for (const entry of this.wireLines) this.viewport.overlays.setVisible(entry.id, show);
+    this.updateWireLines();
   }
 
   setHighlightedPiece(pieceId: string | null): void {
@@ -386,6 +406,39 @@ export class SeamerOverlays {
   private clearSeamLines(): void {
     for (const entry of this.seamLines) this.viewport.overlays.remove(entry.id);
     this.seamLines = [];
+  }
+
+  /** One polyline per wire run. Drawn heavier than a seam line and in a metal tone, because a rib
+   *  reads as structure rather than stitching. */
+  private rebuildWireLines(): void {
+    this.clearWireLines();
+    if (!this.prepared || !this.showWires) return;
+    for (const run of this.prepared.simData.wireRuns) {
+      if (run.particles.length < 2) continue;
+      const segments: number[] = [];
+      for (let i = 1; i < run.particles.length; i++) segments.push(run.particles[i - 1], run.particles[i]);
+      if (run.closed) segments.push(run.particles[run.particles.length - 1], run.particles[0]);
+      const id = `seamer-wire-${run.pieceId}-${run.piecePathId}`;
+      this.viewport.overlays.addLines(
+        id,
+        this.positionsForIndices(segments),
+        { color: '#B8862B', width: Math.max(2, Math.min(6, run.diameter * 1.6)), opacity: 0.95 },
+        { parent: this.clothGroup, depthTest: true, renderOrder: 6 }
+      );
+      this.wireLines.push({ id, segments, diameter: run.diameter });
+    }
+  }
+
+  private updateWireLines(): void {
+    if (!this.showWires) return;
+    for (const entry of this.wireLines) {
+      this.viewport.overlays.updateLines(entry.id, this.positionsForIndices(entry.segments));
+    }
+  }
+
+  private clearWireLines(): void {
+    for (const entry of this.wireLines) this.viewport.overlays.remove(entry.id);
+    this.wireLines = [];
   }
 
   private seamRunFor(pick: { id: string; mirrored: boolean }): number[] | null {

@@ -59,6 +59,10 @@ export class ClothEngine {
   private positions2d!: GPUBuffer;
   private dynamicConfig!: GPUBuffer;
   private seams!: GPUBuffer;
+  private seamOrder!: GPUBuffer;
+  private seamGate!: GPUBuffer;
+  /** Total gated stitches; the ungated state is `sewnUpTo === stitchCount`. */
+  stitchCount = 0;
   private readback!: GPUBuffer;
 
   // External (body) collision: GPU spatial hash over avatar triangles, rebuilt only when the body
@@ -189,6 +193,11 @@ export class ClothEngine {
     this.dynamicConfig = d.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | COPY_DST });
     d.queue.writeBuffer(this.dynamicConfig, 0, new Float32Array(8));
     this.seams = this.buf(sim.seams, STORAGE | COPY_DST);
+    this.seamOrder = this.buf(sim.seamOrder, STORAGE | COPY_DST);
+    this.stitchCount = sim.stitchCount;
+    this.seamGate = d.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | COPY_DST });
+    // Everything sewn until an assembly recording says otherwise, so an ungated drape is unchanged.
+    this.setSewnUpTo(sim.stitchCount);
     this.readback = d.createBuffer({ size: this.particleCount * 16, usage: GPUBufferUsage.MAP_READ | COPY_DST });
 
     this.bodyPositions = this.buf(body.positions, STORAGE | COPY_DST);
@@ -313,7 +322,9 @@ export class ClothEngine {
       entries: [
         { binding: 0, resource: e(this.positions) },
         { binding: 1, resource: e(this.seams) },
-        { binding: 2, resource: e(this.correction) }
+        { binding: 2, resource: e(this.correction) },
+        { binding: 3, resource: e(this.seamOrder) },
+        { binding: 4, resource: e(this.seamGate) }
       ]
     });
     if (this.externalCollision) this.createExternalBindGroups();
@@ -552,6 +563,15 @@ export class ClothEngine {
     );
   }
 
+  /**
+   * Close every stitch below `count` and leave the rest loose. `count >= stitchCount` is the
+   * fully-sewn garment; 0 leaves every seam open with the panels hanging free.
+   */
+  setSewnUpTo(count: number) {
+    const clamped = Math.max(0, Math.min(this.stitchCount, Math.round(count)));
+    this.device.queue.writeBuffer(this.seamGate, 0, new Int32Array([clamped, 0, 0, 0]));
+  }
+
   /** Re-seed particle positions (vec4: x,y,z,invMass) and zero velocities — for Arrange/Reset. */
   resetPositions(positions: Float32Array) {
     this.device.queue.writeBuffer(this.positions, 0, positions.buffer as ArrayBuffer, positions.byteOffset, positions.byteLength);
@@ -737,7 +757,7 @@ export class ClothEngine {
   }
 
   dispose() {
-    for (const b of [this.positions, this.velocities, this.lastPositions, this.correction, this.anchors, this.simParams, this.positions2d, this.dynamicConfig, this.seams,
+    for (const b of [this.positions, this.velocities, this.lastPositions, this.correction, this.anchors, this.simParams, this.positions2d, this.dynamicConfig, this.seams, this.seamOrder, this.seamGate,
       this.readback, this.bodyPositions, this.bodyTriangles,
       this.externalTriangleCenters, this.externalHashTable, this.externalHashPositions, this.externalNearTriangles, this.dampingState,
       this.clothTriangles, this.triangleCenters, this.particleLayers, this.hashTable, this.hashPositions, this.nearTriangles, this.neighborIndices, this.incidentTriangles]) {

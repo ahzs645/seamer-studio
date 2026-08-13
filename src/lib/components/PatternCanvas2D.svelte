@@ -94,6 +94,8 @@
   let currentPanX = $state(0);
   let currentPanY = $state(0);
   let hoveredPointId: string | null = $state(null);
+  /** Piece under the cursor. Its name is always shown, even where the layout had to drop it. */
+  let hoveredPieceId: string | null = $state(null);
   let cursorPos = $state({ x: 0, y: 0 });
   let measureFrom: string | null = $state(null);
   let showSeams = $state(false); // manual "pin seams on" override; otherwise seams show with the seam tool
@@ -432,8 +434,148 @@
     return s;
   }
 
+  interface LabelPlacement {
+    id: string;
+    text: string;
+    /** Where the piece actually is — the leader line points back here. */
+    anchorX: number;
+    anchorY: number;
+    /** Where the chip ended up after collision resolution. */
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+  }
+
+  /**
+   * Place piece name chips so they can be read.
+   *
+   * Drawing each chip at its own piece's centroid works for a garment, where pieces are laid out
+   * apart. It falls apart on anything whose pieces genuinely overlap in the plan — the tight coils
+   * at the poles of a coiled lantern stack four or five near-concentric arcs within a few
+   * millimetres, and every chip lands on the same spot in an unreadable pile.
+   *
+   * So: lay them out first, draw second. Each chip starts at its piece's centroid and, if that
+   * collides with one already placed, walks outward along a widening spiral until it finds clear
+   * space. A chip that travels far enough to lose its association gets a leader line back to the
+   * piece; one that cannot be placed at all inside the search radius is dropped rather than
+   * contributing to a pile — at that zoom it could not have been read anyway.
+   */
+  function layoutPieceLabels(
+    c: CanvasRenderingContext2D,
+    entries: { id: string; text: string; x: number; y: number }[]
+  ): LabelPlacement[] {
+    c.font = '600 12px "Noto Sans", sans-serif';
+    const H = 19;
+    const PAD = 3;
+    const MAX_TRAVEL = 90; // px; beyond this the chip is too far from its piece to mean anything
+    const placed: LabelPlacement[] = [];
+    const hits = (x: number, y: number, w: number) =>
+      placed.some((q) =>
+        Math.abs(x - q.x) * 2 < w + q.w + PAD * 2 && Math.abs(y - q.y) * 2 < H + q.h + PAD * 2
+      );
+
+    // Nearest the top-left first, so the layout is stable frame to frame rather than depending on
+    // which piece happened to be drawn first.
+    const ordered = entries
+      .map((e, i) => ({ ...e, i }))
+      .sort((a, b) => a.y - b.y || a.x - b.x || a.i - b.i);
+
+    for (const entry of ordered) {
+      const w = c.measureText(entry.text).width + 16;
+      let put: { x: number; y: number } | null = null;
+      if (!hits(entry.x, entry.y, w)) {
+        put = { x: entry.x, y: entry.y };
+      } else {
+        // widening spiral: step out in rings, trying a handful of directions in each
+        search: for (let radius = H; radius <= MAX_TRAVEL; radius += H * 0.8) {
+          const steps = Math.max(8, Math.round((radius / H) * 8));
+          for (let k = 0; k < steps; k++) {
+            const angle = (k / steps) * Math.PI * 2;
+            const x = entry.x + Math.cos(angle) * radius * 1.6; // wider than tall, like the chips
+            const y = entry.y + Math.sin(angle) * radius;
+            if (!hits(x, y, w)) { put = { x, y }; break search; }
+          }
+        }
+      }
+      if (!put) continue; // no room at this zoom — better absent than piled; hover still reveals it
+      placed.push({ id: entry.id, text: entry.text, anchorX: entry.x, anchorY: entry.y, x: put.x, y: put.y, w, h: H });
+    }
+    return placed;
+  }
+
+  /**
+   * Draw the whole set of piece-name chips: laid out so they cannot pile up, and with the hovered
+   * piece's chip guaranteed — reserved before anything else and drawn last, on top, emphasised.
+   *
+   * That guarantee is what makes dropping a chip acceptable. Where pieces genuinely overlap in the
+   * plan there is not room for every name at once, and inventing room by pushing chips far away
+   * would only make them lie about which piece they belong to. Hover answers the question instead:
+   * point at a piece and its name is always there, wherever it is and however tight the coil.
+   *
+   * Hovering also clears the piece itself. Naming a piece you still cannot see is only half an
+   * answer, so every OTHER chip resting on the hovered outline is hidden for as long as the cursor
+   * is on it — in a tight coil that is the difference between reading the name and reading the
+   * shape it belongs to.
+   */
+  function drawPieceLabels(
+    c: CanvasRenderingContext2D,
+    entries: { id: string; text: string; x: number; y: number }[],
+    hoveredOutline: Vec2[] | null
+  ): void {
+    if (!entries.length) return;
+    const hovered = entries.find((e) => e.id === hoveredPieceId) ?? null;
+    // The layout does NOT depend on what is hovered: reserving a slot for the hovered chip would
+    // reflow every other chip on each mouse move, which reads as the plan twitching under the
+    // cursor. The set stays put and the hovered chip is simply drawn over it.
+    const placements = layoutPieceLabels(c, entries);
+
+    /**
+     * Does this chip sit on the hovered piece? A thin coil's bounding box is mostly empty, so test
+     * the outline itself: any sampled point of it landing inside the chip means the chip is
+     * covering part of the shape.
+     */
+    const coversHovered = (l: LabelPlacement): boolean => {
+      if (!hoveredOutline) return false;
+      const x0 = l.x - l.w / 2 - 2, x1 = l.x + l.w / 2 + 2;
+      const y0 = l.y - l.h / 2 - 2, y1 = l.y + l.h / 2 + 2;
+      return hoveredOutline.some((q) => q.x >= x0 && q.x <= x1 && q.y >= y0 && q.y <= y1);
+    };
+
+    for (const label of placements) {
+      const isHovered = label.id === hoveredPieceId;
+      if (!isHovered && coversHovered(label)) continue; // get out of the way of what is being read
+      const moved = Math.hypot(label.x - label.anchorX, label.y - label.anchorY) > label.h;
+      // a chip that had to move draws a leader back to its piece, so it still reads as a label for
+      // that piece and not a stray tag floating over the plan
+      if (moved) {
+        c.save();
+        c.strokeStyle = isHovered ? 'rgba(29,78,216,0.9)' : 'rgba(100,116,139,0.55)';
+        c.lineWidth = 1;
+        c.setLineDash([2, 2]);
+        c.beginPath();
+        c.moveTo(label.anchorX, label.anchorY);
+        c.lineTo(label.x, label.y);
+        c.stroke();
+        c.setLineDash([]);
+        c.fillStyle = isHovered ? 'rgba(29,78,216,0.9)' : 'rgba(100,116,139,0.75)';
+        c.beginPath();
+        c.arc(label.anchorX, label.anchorY, isHovered ? 2.6 : 1.8, 0, Math.PI * 2);
+        c.fill();
+        c.restore();
+      }
+      if (!isHovered) pieceNameChip(c, label.text, label.x, label.y);
+    }
+    // Last, over everything: the hovered piece's own chip, at its own centroid. Drawn even when the
+    // layout dropped it, which is the whole point — point at a piece and you get its name.
+    if (hovered) {
+      const placed = placements.find((l) => l.id === hovered.id);
+      pieceNameChip(c, hovered.text, placed?.x ?? hovered.x, placed?.y ?? hovered.y, true);
+    }
+  }
+
   /** Rounded pill name tag for a piece (matches the source's centred badge). */
-  function pieceNameChip(c: CanvasRenderingContext2D, text: string, x: number, y: number) {
+  function pieceNameChip(c: CanvasRenderingContext2D, text: string, x: number, y: number, emphasis = false) {
     c.font = '600 12px "Noto Sans", sans-serif';
     c.textAlign = 'center';
     c.textBaseline = 'middle';
@@ -447,12 +589,12 @@
     c.arcTo(rx, ry + h, rx, ry, r);
     c.arcTo(rx, ry, rx + w, ry, r);
     c.closePath();
-    c.fillStyle = 'rgba(248,250,252,0.92)';
+    c.fillStyle = emphasis ? '#1d4ed8' : '#f8fafc';
     c.fill();
-    c.strokeStyle = 'rgba(100,116,139,0.35)';
+    c.strokeStyle = emphasis ? '#1d4ed8' : 'rgba(100,116,139,0.45)';
     c.lineWidth = 1;
     c.stroke();
-    c.fillStyle = '#334155';
+    c.fillStyle = emphasis ? '#ffffff' : '#334155';
     c.fillText(text, x, y + 0.5);
     c.textAlign = 'start';
     c.textBaseline = 'alphabetic';
@@ -538,8 +680,12 @@
     }
   }
 
+  /** Whether this pattern is drafted on a body at all — a lantern or a bag is not. */
+  const bodyEnabled = $derived(currentPattern.settings3d?.avatarEnabled !== false);
+
   /** (Re)build the real avatar silhouette raster when the body changes. */
   async function ensureSilhouette() {
+    if (!bodyEnabled) { silhouette = null; return; }
     const b = currentPattern.body;
     const key = JSON.stringify({ g: b.gender, u: b.unitType, f: b.fields });
     if (key === silhouetteKey) return;
@@ -727,9 +873,16 @@
     const pts = indexPoints(currentPattern);
     let best: PlacedPoint | null = null;
     let bestDist = Infinity;
+    const byPiece = new Map(currentPattern.pieces.map((piece) => [piece.id, piece]));
     for (const pp of editorPlacedPoints(currentPattern, pts)) {
       const lid = pts.get(pp.pointId)?.layerId;
       if (!layerVisible(lid) || layerLocked(lid)) continue; // can't pick hidden/locked-layer points
+      // An anchor that is not drawn must not be pickable either: a piece with `hideEditorPoints`
+      // has thousands of them, and clicking to select the PIECE would otherwise land on an
+      // invisible point instead. Selecting the piece first brings its anchors back, drawn and
+      // pickable together.
+      if (pp.pieceId && byPiece.get(pp.pieceId)?.hideEditorPoints
+        && !pointIds.has(pp.pointId) && !pieceIds.has(pp.pieceId)) continue;
       const d = Math.hypot(pt.x - pp.world.x, pt.y - pp.world.y);
       if (d < t && d < bestDist) { bestDist = d; best = pp; }
     }
@@ -887,9 +1040,12 @@
     if (showBody && placed.length > 0) {
       let minY = Infinity, maxY = -Infinity;
       for (const pp of placed) { minY = Math.min(minY, pp.world.y); maxY = Math.max(maxY, pp.world.y); }
-      drawSilhouette(c, minY, maxY);
+      if (bodyEnabled) drawSilhouette(c, minY, maxY);
     }
 
+    const pendingLabels: { id: string; text: string; x: number; y: number }[] = [];
+    /** The hovered piece's outline in canvas space — chips sitting on it are hidden while hovering. */
+    let hoveredOutline: Vec2[] | null = null;
     for (const piece of currentPattern.pieces) {
       if (piece.hidden || !layerVisible(piece.layerId)) continue; // hidden piece or hidden layer
       const isSelected = pieceIds.has(piece.id);
@@ -991,6 +1147,7 @@
       }
 
       // grain line through centroid (magenta, like the source)
+      if (piece.id === hoveredPieceId) hoveredOutline = outline.map(toCanvas);
       const cen = polygonCentroid(outline);
       const o0 = tf({ x: 0, y: 0 });
       const gv = piece.grainVector;
@@ -1047,9 +1204,17 @@
       if (currentPattern.showPieceNames) {
         const mid = toCanvas(cen);
         const cuts = pieceCutCounts(piece);
-        pieceNameChip(c, cuts.total > 1 ? `${piece.name}  ×${cuts.total}` : piece.name, mid.x, mid.y);
+        // collected, not drawn: the chips are laid out together below so they cannot pile up
+        pendingLabels.push({
+          id: piece.id,
+          text: cuts.total > 1 ? `${piece.name}  ×${cuts.total}` : piece.name,
+          x: mid.x,
+          y: mid.y
+        });
       }
     }
+
+
 
     // notches — short perpendicular ticks at their position along each main edge
     for (const piece of currentPattern.pieces) {
@@ -1228,7 +1393,15 @@
       for (const pp of allEditorPoints) {
         if (!layerVisible(points.get(pp.pointId)?.layerId)) continue;
         if (!showConstruction && pp.pieceId === '') continue; // hide construction points
-        if (pp.pieceId && piecesById.get(pp.pieceId)?.hideEditorPoints && !pointIds.has(pp.pointId) && hoveredPointId !== pp.pointId) continue;
+        // A piece with `hideEditorPoints` carries thousands of sampled anchors — an imported
+        // outline, or a generated spiral — and drawing them all buries the plan. They stay hidden
+        // unless selected, or hovered WHILE THEIR PIECE IS SELECTED. That last condition is the
+        // point: the lone dot trailing the cursor over a piece nobody is editing says nothing the
+        // cursor does not already say, while selecting the piece first is what makes its anchors
+        // grabbable again.
+        if (pp.pieceId && piecesById.get(pp.pieceId)?.hideEditorPoints
+          && !pointIds.has(pp.pointId)
+          && !(selPieces.has(pp.pieceId) && hoveredPointId === pp.pointId)) continue;
 
         const pt = pp.world;
         const cp = toCanvas(pt);
@@ -1379,6 +1552,10 @@
       c.strokeRect(x, y, w, h);
       c.setLineDash([]);
     }
+
+    // Piece names last of all, so nothing — pieces, notches, markers, seam overlays — can cover
+    // the one thing you read to tell the pieces apart.
+    drawPieceLabels(c, pendingLabels, hoveredOutline);
 
     // compass — a small orientation widget in the top-right corner showing the canvas axes
     // (pattern +y is up = N, +x is right = E)
@@ -3178,6 +3355,7 @@
       seamHover = null;
     }
     hoveredPointId = hitTestPoint(pos.x, pos.y);
+    hoveredPieceId = pieceAt(pos)?.id ?? null;
     render();
   }
 
