@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import { generateGlobeLantern, globeLanternNotes, DEFAULT_GLOBE_LANTERN } from './globeLantern';
 import { resolveAssembly } from '@seamer/pattern-model';
-import { buildPieceCloth, buildSimData, computeSeamEdgeIntervals } from '@seamer/cloth-sim';
+import { buildPieceCloth, buildSimData, computeSeamEdgeIntervals, reuseSavedDrape } from '@seamer/cloth-sim';
 import { arrangeParticles } from '@seamer/cloth-sim';
+import { indexPoints, pieceTransform } from '@seamer/pattern-model/utils/patternGeometry';
 
 /** Run the generated pattern through the real sim assembly, as prepareCloth does. */
 function buildSim(pattern: ReturnType<typeof generateGlobeLantern>['pattern']) {
@@ -109,4 +110,49 @@ describe('globe lantern generator', () => {
   it('refuses a strip too wide to wind twice around the body', () => {
     expect(() => generateGlobeLantern({ strip: 220 })).toThrow(/two coils/);
   });
+});
+
+describe('which way the cloth faces', () => {
+  // The renderer picks a piece's outward texture, name badge and shading from its triangle facing,
+  // and `flipNormals` is how a piece declares the reverse. The 2D boundary winding has no say — the
+  // triangulator normalises it — so the facing comes purely from the handedness of the flat-to-globe
+  // map, which for stacked rings flips at the equator. Get it wrong and you are looking at the
+  // lantern from the inside, which nothing else here would catch.
+  for (const mode of ['rings', 'helix'] as const) {
+    it(`${mode}: flipNormals matches how each piece actually lands on the globe`, () => {
+      const { pattern } = generateGlobeLantern({ mode });
+      const intervals = computeSeamEdgeIntervals(pattern);
+      const points = indexPoints(pattern);
+      for (const piece of pattern.pieces) {
+        const cloth = buildPieceCloth(pattern, piece, undefined, intervals)!;
+        const reuse = reuseSavedDrape(
+          cloth.mesh.points.map(pieceTransform(piece, points)),
+          piece.settings3d.savedPositions,
+          cloth.particleDistanceMm
+        )!;
+        expect(reuse, `${piece.name} has no 3D map`).toBeTruthy();
+
+        const P = reuse.positions3d;
+        const saved = piece.settings3d.savedPositions!;
+        let axisY = 0;
+        for (let i = 0; i < saved.length; i += 5) axisY += saved[i + 3];
+        axisY /= saved.length / 5;
+
+        let outward = 0;
+        let inward = 0;
+        const tris = cloth.mesh.triangles;
+        for (let i = 0; i < tris.length; i += 3) {
+          const [a, b, c] = [tris[i], tris[i + 1], tris[i + 2]];
+          const ax = P[a * 3], ay = P[a * 3 + 1], az = P[a * 3 + 2];
+          const ux = P[b * 3] - ax, uy = P[b * 3 + 1] - ay, uz = P[b * 3 + 2] - az;
+          const vx = P[c * 3] - ax, vy = P[c * 3 + 1] - ay, vz = P[c * 3 + 2] - az;
+          const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+          if (nx * ax + ny * (ay - axisY) + nz * az > 0) outward++; else inward++;
+        }
+        // front-outward is the un-flipped case
+        expect(outward > inward, `${piece.name} declares the wrong facing`)
+          .toBe(!piece.settings3d.flipNormals);
+      }
+    });
+  }
 });

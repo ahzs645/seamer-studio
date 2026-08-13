@@ -124,6 +124,8 @@ interface GenEdge {
 interface GenPiece {
   key: string;
   name: string;
+  /** True when this piece's triangles end up facing inward; see `mapsFrontInward`. */
+  flipNormals?: boolean;
   edges: GenEdge[];
   /** stride 5: x2d(mm), y2d(mm), x3d(m), y3d(m), z3d(m) */
   samples: number[];
@@ -175,14 +177,91 @@ function translate(piece: GenPiece, dx: number, dy: number): void {
   for (let i = 0; i < piece.samples.length; i += 5) { piece.samples[i] += dx; piece.samples[i + 1] += dy; }
 }
 
-/** Stack the pieces down the plan so nothing overlaps and the layout reads in sewing order. */
-function layOut(pieces: GenPiece[]): void {
+/**
+ * Does this piece's flat-to-globe map leave its triangles facing INWARD?
+ *
+ * The renderer picks a piece's outward texture, name badge and shading from the triangle facing, and
+ * `flipNormals` is how a piece declares that its facing is the reverse of the usual. The 2D boundary
+ * winding has no say — the triangulator normalises it — so the facing comes entirely from the
+ * handedness of the flat-to-globe map. For stacked rings that handedness genuinely flips at the
+ * equator: above it the band tapers inward so the upper edge develops as the INNER arc of the
+ * sector, below it as the outer. The answer is therefore per piece, not per pattern, and getting it
+ * wrong means looking at the lantern from the inside.
+ *
+ * The sign is pinned against the actual render rather than derived: a piece whose front points
+ * outward is the un-flipped case.
+ */
+function mapsFrontInward(piece: GenPiece, sampleStride: number): boolean {
+  const s = piece.samples;
+  const count = s.length / 5;
+  if (count < sampleStride + 2) return false;
+  const at = (i: number) => ({
+    x2: s[i * 5], y2: s[i * 5 + 1],
+    x3: s[i * 5 + 2], y3: s[i * 5 + 3], z3: s[i * 5 + 4]
+  });
+  // centre of the globe, from the piece's own samples — only the axis matters for the radial test
+  let cy = 0;
+  for (let i = 0; i < count; i++) cy += s[i * 5 + 3];
+  cy /= count;
+
+  const o = at(0);
+  const a = at(1);              // along one grid direction
+  const b = at(sampleStride);   // along the other
+  const cross2 = (a.x2 - o.x2) * (b.y2 - o.y2) - (a.y2 - o.y2) * (b.x2 - o.x2);
+  const ux = a.x3 - o.x3, uy = a.y3 - o.y3, uz = a.z3 - o.z3;
+  const vx = b.x3 - o.x3, vy = b.y3 - o.y3, vz = b.z3 - o.z3;
+  const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+  const radial = nx * o.x3 + ny * (o.y3 - cy) + nz * o.z3;
+  // Sign convention established against the actual render, not from first principles: the shader
+  // treats a piece as normally-oriented when its geometric front points OUTWARD, and `flipNormals`
+  // is how a piece says otherwise. A positive product is the front-outward case, so it needs no
+  // flip; a negative one does.
+  return cross2 * radial > 0;
+}
+
+/**
+ * Lay the pieces out in reading order, wrapping into rows at the mat width.
+ *
+ * A single column would be technically fine and useless to look at: forty-odd ring arcs stacked
+ * vertically make a plan tens of metres tall that never fits on screen at a legible zoom. Wrapping
+ * at the mat width also means the rows correspond to something real, so the plan reads as sheets.
+ * True-shape nesting is still the app's job — this is a sane starting arrangement, not a nest.
+ */
+function layOut(pieces: GenPiece[], rowWidth: number): void {
+  const gap = 12;
+  let cursorX = 0;
   let cursorY = 0;
+  let rowHeight = 0;
   for (const piece of pieces) {
     const box = bbox(piece.edges.flatMap((e) => e.poly));
-    translate(piece, -box.minX, -box.minY + cursorY);
-    cursorY += box.h + 20;
+    if (cursorX > 0 && cursorX + box.w > rowWidth) {
+      cursorX = 0;
+      cursorY += rowHeight + gap;
+      rowHeight = 0;
+    }
+    translate(piece, cursorX - box.minX, cursorY - box.minY);
+    cursorX += box.w + gap;
+    rowHeight = Math.max(rowHeight, box.h);
   }
+}
+
+/**
+ * The meridian is centred on y = 0, but y = 0 in the scene is the floor the avatar stands on. A
+ * lantern centred there is half sunk into the ground and far below where the camera looks for a
+ * garment, which reads as an empty viewport. Lift it so it hangs clear of the floor instead.
+ */
+function standOffset(params: GlobeLanternParams): number {
+  return params.height / 2 + params.height * 0.25;
+}
+
+/** Frame the lantern head on, far enough back that the whole globe fits with room around it. */
+function cameraForLantern(params: GlobeLanternParams): {
+  position: [number, number, number];
+  target: [number, number, number];
+} {
+  const centre = standOffset(params) / 1000;
+  const reach = (Math.max(params.width, params.height) / 1000) * 2.6;
+  return { position: [reach * 0.35, centre + reach * 0.25, reach], target: [0, centre, 0] };
 }
 
 /* ------------------------------------------------------------------ *
@@ -191,6 +270,7 @@ function layOut(pieces: GenPiece[]): void {
 
 function buildRings(params: GlobeLanternParams, M: Meridian, mS: number, mE: number): GenModel {
   const w = params.strip;
+  const standHeight = standOffset(params);
   const warnings: string[] = [];
   const pieces: GenPiece[] = [];
   const seams: GenSeam[] = [];
@@ -300,17 +380,19 @@ function buildRings(params: GlobeLanternParams, M: Meridian, mS: number, mE: num
           const psi = psi0 + ((psi1 - psi0) * i) / steps;
           const flat = ringFlatPoint(dev, m, psi);
           const p3 = surfacePoint(M, m, psi);
-          samples.push(flat.x, flat.y, p3.x / 1000, p3.y / 1000, p3.z / 1000);
+          samples.push(flat.x, flat.y, p3.x / 1000, (p3.y + standHeight) / 1000, p3.z / 1000);
         }
       }
 
-      pieces.push({
+      const ringPiece: GenPiece = {
         key,
         name: label,
         edges,
         samples,
         particleDistance: Math.max(4, Math.min(10, bandArc / 3))
-      });
+      };
+      ringPiece.flipNormals = mapsFrontInward(ringPiece, steps + 1);
+      pieces.push(ringPiece);
 
       stripLength += polylineLength(upper);
       fabricArea += (polylineLength(upper) * (bandArc + 2 * params.seamAllowance + params.channelWidth)) / 1e6;
@@ -355,7 +437,8 @@ function buildRings(params: GlobeLanternParams, M: Meridian, mS: number, mE: num
     );
   }
 
-  layOut(pieces);
+  // four sheets across keeps the plan roughly square without pretending to be a nest
+  layOut(pieces, params.matLength * 4);
 
   const topR = sampleMeridian(M, mS).r;
   const botR = sampleMeridian(M, mE).r;
@@ -479,6 +562,7 @@ function helixSplits(curve: HelixCurve, params: GlobeLanternParams): { splits: n
 
 function buildHelix(params: GlobeLanternParams, M: Meridian, mS: number, mE: number): GenModel | null {
   const w = params.strip;
+  const standHeight = standOffset(params);
   const curve = integrateHelix(M, w, mS, mE);
   if (!curve) return null;
 
@@ -564,17 +648,19 @@ function buildHelix(params: GlobeLanternParams, M: Meridian, mS: number, mE: num
         const u = -w / 2 + (w * ri) / rows;
         const flat = helixOffset(st, u);
         const p3 = surfacePoint(M, st.m + u, st.psi);
-        samples.push(flat.x, flat.y, p3.x / 1000, p3.y / 1000, p3.z / 1000);
+        samples.push(flat.x, flat.y, p3.x / 1000, (p3.y + standHeight) / 1000, p3.z / 1000);
       }
     }
 
-    pieces.push({
+    const stripPiece: GenPiece = {
       key,
       name: `Piece ${pi + 1}`,
       edges,
       samples,
       particleDistance: Math.max(4, Math.min(10, w / 3))
-    });
+    };
+    stripPiece.flipNormals = mapsFrontInward(stripPiece, rows + 1);
+    pieces.push(stripPiece);
   }
 
   // The spiral seam: upper span [c, d] meets the lower span one coil along. Split closure
@@ -608,7 +694,8 @@ function buildHelix(params: GlobeLanternParams, M: Meridian, mS: number, mE: num
     });
   }
 
-  layOut(pieces);
+  // four sheets across keeps the plan roughly square without pretending to be a nest
+  layOut(pieces, params.matLength * 4);
 
   if (pieces.length > 40) {
     warnings.push(`${pieces.length} pieces. A wider strip or a bigger mat cuts that down sharply.`);
@@ -652,6 +739,9 @@ function toPattern(model: GenModel, params: GlobeLanternParams): Pattern {
   pattern.settings3d.showSeams = true;
   pattern.settings3d.avatarEnabled = false;
   pattern.settings3d.showAvatar = false;
+  const camera = cameraForLantern(params);
+  pattern.settings3d.cameraPosition = camera.position;
+  pattern.settings3d.controlsTarget = camera.target;
 
   const points: ConstrainablePoint[] = [];
   const paths: ConstrainablePath[] = [];
@@ -765,7 +855,7 @@ function toPattern(model: GenModel, params: GlobeLanternParams): Pattern {
         },
         enable3d: true,
         frozen: false,
-        flipNormals: false,
+        flipNormals: !!gp.flipNormals,
         filterExternalCollisionsByClothNormal: false,
         collisionLayer: 0,
         particleDistance: gp.particleDistance,
