@@ -55,8 +55,8 @@
   const fields: { key: keyof GlobeLanternParams; label: string; unit: string; step?: number; min?: number }[] = [
     { key: 'width', label: 'Width (diameter)', unit: 'mm', step: 5, min: 40 },
     { key: 'height', label: 'Height', unit: 'mm', step: 5, min: 40 },
-    { key: 'topOpen', label: 'Top opening', unit: 'mm', step: 2, min: 4 },
-    { key: 'botOpen', label: 'Bottom opening', unit: 'mm', step: 2, min: 4 },
+    { key: 'topOpen', label: 'Top hole ⌀', unit: 'mm', step: 2, min: 4 },
+    { key: 'botOpen', label: 'Bottom hole ⌀', unit: 'mm', step: 2, min: 4 },
     { key: 'strip', label: 'Finished strip width', unit: 'mm', step: 1, min: 4 },
     { key: 'seamAllowance', label: 'Seam allowance', unit: 'mm', step: 1, min: 0 },
     { key: 'channelWidth', label: 'Wire channel', unit: 'mm', step: 1, min: 0 },
@@ -73,8 +73,9 @@
     <div class="modal-box max-w-3xl">
       <h3 class="font-bold text-lg mb-1">Globe lantern</h3>
       <p class="text-xs opacity-70 mb-3">
-        A strip of cloth with wire sewn into its seam, coiled into a sphere with an opening top and
-        bottom.
+        A strip of cloth with wire sewn into its seam, coiled into a sphere. The top and bottom holes
+        are set below — the coiling starts and stops at them, and each is finished with a closed wire
+        hoop of the length shown.
       </p>
 
       <div class="mb-4">

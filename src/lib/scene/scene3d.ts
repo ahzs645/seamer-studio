@@ -129,6 +129,8 @@ export class PatternRenderer {
     aspect: number;
   }[] = [];
   private showLabels = true;
+  /** Badges on the inward face. Off is right for a closed form, where they show through openings. */
+  private showInnerLabels = true;
   private labelMode: 'billboard' | 'flat' = 'flat';
 
   private device: GPUDevice | null = null;
@@ -1210,6 +1212,12 @@ export class PatternRenderer {
     this.applyLabelVisibility();
   }
 
+  /** Show or hide the badges on the INWARD face — the ones you see through a lantern's openings. */
+  setShowInnerLabels(on: boolean): void {
+    this.showInnerLabels = on;
+    this.applyLabelVisibility();
+  }
+
   /** Switch label style between camera-facing (billboard) and baked-into-fabric (flat). */
   setLabelMode(mode: 'billboard' | 'flat'): void {
     if (mode === this.labelMode) return;
@@ -1225,10 +1233,21 @@ export class PatternRenderer {
     const flat = this.labelMode === 'flat';
     for (const e of this.clothMeshes) {
       const opacity = this.showLabels && e.mesh.visible && flat ? 1 : 0;
-      for (const m of [e.mesh.material, e.backMesh?.material]) {
-        const u = (m as THREE.Material | undefined)?.userData?.labelUniforms as { uLabelOpacity: { value: number } } | undefined;
-        if (u) u.uLabelOpacity.value = opacity;
-      }
+      const inner = this.showInnerLabels ? opacity : 0;
+      const set = (m: THREE.Material | THREE.Material[] | undefined, out: number, back: number) => {
+        const u = (m as THREE.Material | undefined)?.userData?.labelUniforms as {
+          uLabelOpacity: { value: number };
+          uLabelOpacityBack?: { value: number };
+        } | undefined;
+        if (!u) return;
+        u.uLabelOpacity.value = out;
+        if (u.uLabelOpacityBack) u.uLabelOpacityBack.value = back;
+      };
+      // The main mesh shows the fabric face outward and its own reverse inward. The back shell,
+      // when a separate back side is in play, exists ONLY to draw the inward surface — so both of
+      // its slots count as inner, whichever way its winding happens to resolve.
+      set(e.mesh.material, opacity, inner);
+      set(e.backMesh?.material, inner, inner);
     }
     for (const l of this.pieceLabels) {
       const mesh = this.clothMeshes.find((e) => e.pieceId === l.pieceId)?.mesh;

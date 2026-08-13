@@ -475,7 +475,29 @@
   }
 
   function toggleAvatar() { showAvatar = !showAvatar; renderer?.setAvatarVisible(showAvatar); }
-  function toggleLabels() { onlabeldisplaychange?.(labelDisplay === 'off' ? 'flat' : 'off'); }
+
+  /**
+   * One button, three states: every badge, outside only, none. Inside a closed form the reverse-side
+   * badges are visible through the openings and read as litter on the far wall, so "outside only" is
+   * the state that actually gets used on a lantern — and it is not reachable by a plain on/off.
+   */
+  let showInnerLabels = $state(true);
+  const labelState = $derived(
+    labelDisplay === 'off' ? 'none' : showInnerLabels ? 'all' : 'outside'
+  );
+  function cycleLabels() {
+    if (labelState === 'all') {
+      showInnerLabels = false;
+      renderer?.setShowInnerLabels(false);
+    } else if (labelState === 'outside') {
+      onlabeldisplaychange?.('off');
+    } else {
+      showInnerLabels = true;
+      renderer?.setShowInnerLabels(true);
+      onlabeldisplaychange?.('flat');
+    }
+  }
+  $effect(() => { void labelDisplay; renderer?.setShowInnerLabels(showInnerLabels); });
 
   // apply the piece-label display setting (driven from the Properties panel)
   function applyLabelDisplay() {
@@ -586,7 +608,12 @@
     { label: 'Show triangles', icon: 'change_history', onClick: toggleTriangles, active: () => showTriangles, sep: true },
     { label: bodyEnabled ? 'Hide avatar' : 'Draft on a body', icon: 'person', onClick: bodyEnabled ? toggleAvatar : togglePerson, active: () => bodyEnabled && showAvatar },
     { label: bodyEnabled ? 'Remove the body' : 'No body — lantern, bag, shade', icon: bodyEnabled ? 'person_off' : 'deployed_code', onClick: togglePerson, active: () => !bodyEnabled },
-    { label: labelDisplay === 'off' ? 'Show piece labels' : 'Hide piece labels', icon: labelDisplay === 'off' ? 'label_off' : 'label', onClick: toggleLabels, active: () => labelDisplay !== 'off' },
+    {
+      label: labelState === 'all' ? 'Piece labels: everywhere' : labelState === 'outside' ? 'Piece labels: outside only' : 'Piece labels: off',
+      icon: labelState === 'none' ? 'label_off' : 'label',
+      onClick: cycleLabels,
+      active: () => labelState !== 'none'
+    },
     { label: sceneMode === 'arrange' && arrangeKind === 'arrange' ? 'Exit arrange mode' : 'Arrange (A)', icon: 'scatter_plot', onClick: toggleArrangeMode, active: () => sceneMode === 'arrange' && arrangeKind === 'arrange', shortcut: 'A' },
     { label: sceneMode === 'arrange' && arrangeKind === 'manipulate' ? 'Exit move mode' : 'Move pieces (M)', icon: 'open_with', onClick: toggleManipulateMode, active: () => sceneMode === 'arrange' && arrangeKind === 'manipulate', shortcut: 'M' },
     { label: frozenSelected ? 'Unfreeze piece' : 'Freeze piece', icon: frozenSelected ? 'lock_open' : 'lock', onClick: toggleFreezeSelected, active: () => frozenSelected },

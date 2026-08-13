@@ -432,6 +432,75 @@
     return s;
   }
 
+  interface LabelPlacement {
+    text: string;
+    /** Where the piece actually is — the leader line points back here. */
+    anchorX: number;
+    anchorY: number;
+    /** Where the chip ended up after collision resolution. */
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+  }
+
+  /**
+   * Place piece name chips so they can be read.
+   *
+   * Drawing each chip at its own piece's centroid works for a garment, where pieces are laid out
+   * apart. It falls apart on anything whose pieces genuinely overlap in the plan — the tight coils
+   * at the poles of a coiled lantern stack four or five near-concentric arcs within a few
+   * millimetres, and every chip lands on the same spot in an unreadable pile.
+   *
+   * So: lay them out first, draw second. Each chip starts at its piece's centroid and, if that
+   * collides with one already placed, walks outward along a widening spiral until it finds clear
+   * space. A chip that travels far enough to lose its association gets a leader line back to the
+   * piece; one that cannot be placed at all inside the search radius is dropped rather than
+   * contributing to a pile — at that zoom it could not have been read anyway.
+   */
+  function layoutPieceLabels(
+    c: CanvasRenderingContext2D,
+    entries: { text: string; x: number; y: number }[]
+  ): LabelPlacement[] {
+    c.font = '600 12px "Noto Sans", sans-serif';
+    const H = 19;
+    const PAD = 3;
+    const MAX_TRAVEL = 90; // px; beyond this the chip is too far from its piece to mean anything
+    const placed: LabelPlacement[] = [];
+    const hits = (x: number, y: number, w: number) =>
+      placed.some((q) =>
+        Math.abs(x - q.x) * 2 < w + q.w + PAD * 2 && Math.abs(y - q.y) * 2 < H + q.h + PAD * 2
+      );
+
+    // Nearest-the-top-left first, so the order is stable frame to frame rather than depending on
+    // whichever piece happened to be drawn first.
+    const ordered = entries
+      .map((e, i) => ({ ...e, i }))
+      .sort((a, b) => a.y - b.y || a.x - b.x || a.i - b.i);
+
+    for (const entry of ordered) {
+      const w = c.measureText(entry.text).width + 16;
+      let put: { x: number; y: number } | null = null;
+      if (!hits(entry.x, entry.y, w)) {
+        put = { x: entry.x, y: entry.y };
+      } else {
+        // widening spiral: step out in rings, trying a handful of directions in each
+        search: for (let radius = H; radius <= MAX_TRAVEL; radius += H * 0.8) {
+          const steps = Math.max(8, Math.round((radius / H) * 8));
+          for (let k = 0; k < steps; k++) {
+            const angle = (k / steps) * Math.PI * 2;
+            const x = entry.x + Math.cos(angle) * radius * 1.6; // wider than tall, like the chips
+            const y = entry.y + Math.sin(angle) * radius;
+            if (!hits(x, y, w)) { put = { x, y }; break search; }
+          }
+        }
+      }
+      if (!put) continue; // no room at this zoom — better absent than piled
+      placed.push({ text: entry.text, anchorX: entry.x, anchorY: entry.y, x: put.x, y: put.y, w, h: H });
+    }
+    return placed;
+  }
+
   /** Rounded pill name tag for a piece (matches the source's centred badge). */
   function pieceNameChip(c: CanvasRenderingContext2D, text: string, x: number, y: number) {
     c.font = '600 12px "Noto Sans", sans-serif';
@@ -894,6 +963,7 @@
       if (bodyEnabled) drawSilhouette(c, minY, maxY);
     }
 
+    const pendingLabels: { text: string; x: number; y: number }[] = [];
     for (const piece of currentPattern.pieces) {
       if (piece.hidden || !layerVisible(piece.layerId)) continue; // hidden piece or hidden layer
       const isSelected = pieceIds.has(piece.id);
@@ -1051,7 +1121,39 @@
       if (currentPattern.showPieceNames) {
         const mid = toCanvas(cen);
         const cuts = pieceCutCounts(piece);
-        pieceNameChip(c, cuts.total > 1 ? `${piece.name}  ×${cuts.total}` : piece.name, mid.x, mid.y);
+        // collected, not drawn: the chips are laid out together below so they cannot pile up
+        pendingLabels.push({
+          text: cuts.total > 1 ? `${piece.name}  ×${cuts.total}` : piece.name,
+          x: mid.x,
+          y: mid.y
+        });
+      }
+    }
+
+    // Piece names, laid out as a set and drawn above every piece.
+    if (pendingLabels.length) {
+      for (const label of layoutPieceLabels(c, pendingLabels)) {
+        const dx = label.x - label.anchorX;
+        const dy = label.y - label.anchorY;
+        // a chip that had to move draws a leader back to its piece, so it still reads as a label
+        // for that piece and not a stray tag floating over the plan
+        if (Math.hypot(dx, dy) > label.h) {
+          c.save();
+          c.strokeStyle = 'rgba(100,116,139,0.55)';
+          c.lineWidth = 1;
+          c.setLineDash([2, 2]);
+          c.beginPath();
+          c.moveTo(label.anchorX, label.anchorY);
+          c.lineTo(label.x, label.y);
+          c.stroke();
+          c.setLineDash([]);
+          c.fillStyle = 'rgba(100,116,139,0.75)';
+          c.beginPath();
+          c.arc(label.anchorX, label.anchorY, 1.8, 0, Math.PI * 2);
+          c.fill();
+          c.restore();
+        }
+        pieceNameChip(c, label.text, label.x, label.y);
       }
     }
 
