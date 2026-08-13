@@ -282,3 +282,41 @@ export function ringFlatPoint(dev: RingDevelopment, m: number, psi: number): Vec
   const phi = (psi / TAU) * dev.sweep - dev.sweep / 2 + Math.PI / 2;
   return { x: rho * Math.cos(phi), y: rho * Math.sin(phi) };
 }
+
+/* ------------------------------------------------------------------ *
+ *  COIL CLEARANCE
+ * ------------------------------------------------------------------ */
+
+/**
+ * How close neighbouring coils sit in the FLAT layout.
+ *
+ * The developed radius is rho(m) = r / |r'|, so consecutive coils lie |rho(m+w) - rho(m)| apart. On
+ * a sphere that is w*sec^2(phi): never less than the finished width, but near the poles barely more
+ * than it — so the CUT outlines, which are wider than the finished strip by their allowances,
+ * overlap each other on the page. Those coils cannot be nested; they have to be cut as separate
+ * pieces. Reporting the number is the difference between "the layout looks wrong" and "the layout is
+ * telling you something true about the geometry".
+ *
+ * Returns clearance in mm: cut width subtracted, so negative means the outlines overlap.
+ */
+export function coilClearance(M: Meridian, curve: HelixCurve, w: number, cutWidth: number): number {
+  const BIG = 1e6;
+  const rho = (mv: number) => {
+    const q = sampleMeridian(M, Math.min(Math.max(mv, 0), M.total));
+    // |r'| -> 0 at the equator: the coil is locally a cylinder and the developed radius is unbounded
+    return Math.abs(q.drdm) < 1e-3
+      ? { v: BIG, s: 0 }
+      : { v: q.r / Math.abs(q.drdm), s: Math.sign(q.drdm) };
+  };
+  let minGap = Infinity;
+  for (const station of curve.stations) {
+    const here = rho(station.m);
+    const pairGap = (other: { v: number; s: number }) =>
+      // unbounded radius, or a sign flip across the equator: those coils cannot crowd each other
+      here.v >= BIG || other.v >= BIG || here.s * other.s < 0 ? BIG : Math.abs(other.v - here.v);
+    const gap = Math.min(pairGap(rho(station.m + w)), pairGap(rho(station.m - w)));
+    if (Number.isFinite(gap) && gap < minGap) minGap = gap;
+  }
+  if (!Number.isFinite(minGap)) minGap = BIG;
+  return minGap - cutWidth;
+}

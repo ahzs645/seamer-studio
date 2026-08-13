@@ -62,6 +62,12 @@ solved at any scrub position; XPBD is path-dependent and cannot. `recordAssembly
 forward once and snapshots as it goes; `AssemblyPlayback` scrubs the result. Transport lives in the
 3D panel behind the timeline button.
 
+**Patterns without a person.** Not everything drafted here is worn. `settings3d.avatarEnabled: false`
+means the pattern has no body at all — no avatar, no pose bar, no body chip, and no silhouette behind
+the 2D pieces. It is a document setting, so it persists and undoes; the 3D rail toggles it. Piece
+name labels have their own toggle in the same rail, and a pattern that sets `showPieceNames: false`
+starts with them off in 3D as well as 2D.
+
 **Globe lantern generator.** Templates → Generators → Globe lantern. Produces a full `Pattern` from
 parameters in two constructions: stacked rings (each an annular sector, closed form) or a helix (one
 ribbon whose flat shape is the double spiral you get by integrating geodesic curvature). Both carry
@@ -69,6 +75,13 @@ wire channels per coil and a complete assembly order; both split to fit a cuttin
 also ships each piece's exact 2D→3D map as `savedPositions`, so the studio shows the finished lantern
 immediately rather than asking the solver to fold a sphere out of a flat spiral — which nothing in
 the physics would drive it to do.
+
+Helix pieces stay on the developed spiral by default, so the plan reads as the one continuous ribbon
+the construction actually is; untick that and they pack into rows for cutting. Near the openings the
+coils crowd so tightly that neighbouring CUT outlines overlap on the page — the generator reports
+that clearance rather than letting the layout look broken, and trimming the seam allowance or wire
+channel is what raises it. Every piece join carries a balance notch, and the lantern's material has
+a dark inner face so the top and bottom openings read as holes instead of a solid dome.
 
 ## Checking the WGSL
 

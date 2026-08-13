@@ -538,8 +538,12 @@
     }
   }
 
+  /** Whether this pattern is drafted on a body at all — a lantern or a bag is not. */
+  const bodyEnabled = $derived(currentPattern.settings3d?.avatarEnabled !== false);
+
   /** (Re)build the real avatar silhouette raster when the body changes. */
   async function ensureSilhouette() {
+    if (!bodyEnabled) { silhouette = null; return; }
     const b = currentPattern.body;
     const key = JSON.stringify({ g: b.gender, u: b.unitType, f: b.fields });
     if (key === silhouetteKey) return;
@@ -887,7 +891,7 @@
     if (showBody && placed.length > 0) {
       let minY = Infinity, maxY = -Infinity;
       for (const pp of placed) { minY = Math.min(minY, pp.world.y); maxY = Math.max(maxY, pp.world.y); }
-      drawSilhouette(c, minY, maxY);
+      if (bodyEnabled) drawSilhouette(c, minY, maxY);
     }
 
     for (const piece of currentPattern.pieces) {

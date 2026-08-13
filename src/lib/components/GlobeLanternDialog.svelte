@@ -90,6 +90,18 @@
             onclick={() => (params.mode = 'helix')}
           >Helix</button>
         </div>
+        {#if params.mode === 'helix'}
+          <label class="flex items-center gap-2 mt-3 text-xs cursor-pointer">
+            <input
+              type="checkbox"
+              class="checkbox checkbox-xs"
+              checked={params.layout === 'spiral'}
+              onchange={(e) => (params.layout = e.currentTarget.checked ? 'spiral' : 'sheets')}
+            />
+            <span>Lay the pieces out on the spiral</span>
+            <span class="opacity-60">— shows the continuous ribbon; untick to pack them into rows for cutting</span>
+          </label>
+        {/if}
         <p class="text-xs opacity-70 mt-2">
           {#if params.mode === 'rings'}
             Separate closed bands, each an annular sector, joined ring to ring. Much less fiddly to
@@ -146,6 +158,16 @@
               <div class="stat-title text-xs">Seam ease</div>
               <div class="stat-value text-base tabular-nums">{(preview.stats.ease * 100).toFixed(2)}%</div>
               <div class="stat-desc text-xs">per coil, taken up by the cloth</div>
+            </div>
+            <div class="stat py-2 px-3">
+              <div class="stat-title text-xs">Coil clearance</div>
+              <div
+                class="stat-value text-base tabular-nums"
+                class:text-warning={preview.stats.coilClearance < 0}
+              >{preview.stats.coilClearance >= 0 ? '+' : ''}{preview.stats.coilClearance.toFixed(0)} mm</div>
+              <div class="stat-desc text-xs">
+                {preview.stats.coilClearance < 0 ? 'cut outlines overlap near the poles' : 'between coils on the page'}
+              </div>
             </div>
           {/if}
         </div>

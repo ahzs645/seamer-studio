@@ -145,6 +145,9 @@
 
   function restoreWorkspace(patternData: Pattern) {
     viewMode = patternData.viewMode ?? 'both';
+    // A pattern that turns piece names off means it in 3D too — names baked across the cloth are
+    // an aid on a garment and clutter on a lantern.
+    labelDisplay = patternData.showPieceNames === false ? 'off' : 'flat';
     if (viewMode === '3d') {
       showLeftPanel = false;
       showRightPanel = false;
@@ -1031,11 +1034,11 @@
     <div class="flex-1 min-w-0 flex overflow-hidden">
       {#if viewMode === 'both'}
         <div class="w-1/2 min-w-0 border-r relative" data-tour-id="tour-canvas-2d">{#key $patternEditor}<PatternCanvas2D {currentPattern} editor={$patternEditor} onchange={handlePatternUpdate} />{/key}</div>
-        <div class="w-1/2 min-w-0 relative" data-tour-id="tour-canvas-3d"><PatternScene3D bind:this={scene3d} {currentPattern} selectedPieceId={[...pieceIds][0] ?? null} onpieceselect={handlePieceSelect} ondrapesettled={handleDrapeSettled} onpatternupdate={handlePatternUpdate} oncamerachange={handleCameraChange} {labelDisplay} /></div>
+        <div class="w-1/2 min-w-0 relative" data-tour-id="tour-canvas-3d"><PatternScene3D bind:this={scene3d} {currentPattern} selectedPieceId={[...pieceIds][0] ?? null} onpieceselect={handlePieceSelect} ondrapesettled={handleDrapeSettled} onpatternupdate={handlePatternUpdate} oncamerachange={handleCameraChange} {labelDisplay} onlabeldisplaychange={(v) => (labelDisplay = v)} /></div>
       {:else if viewMode === '2d'}
         <div class="flex-1 min-w-0 relative" data-tour-id="tour-canvas-2d">{#key $patternEditor}<PatternCanvas2D {currentPattern} editor={$patternEditor} onchange={handlePatternUpdate} />{/key}</div>
       {:else}
-        <div class="flex-1 min-w-0 relative" data-tour-id="tour-canvas-3d"><PatternScene3D bind:this={scene3d} {currentPattern} selectedPieceId={[...pieceIds][0] ?? null} onpieceselect={handlePieceSelect} ondrapesettled={handleDrapeSettled} onpatternupdate={handlePatternUpdate} oncamerachange={handleCameraChange} {labelDisplay} /></div>
+        <div class="flex-1 min-w-0 relative" data-tour-id="tour-canvas-3d"><PatternScene3D bind:this={scene3d} {currentPattern} selectedPieceId={[...pieceIds][0] ?? null} onpieceselect={handlePieceSelect} ondrapesettled={handleDrapeSettled} onpatternupdate={handlePatternUpdate} oncamerachange={handleCameraChange} {labelDisplay} onlabeldisplaychange={(v) => (labelDisplay = v)} /></div>
       {/if}
     </div>
 

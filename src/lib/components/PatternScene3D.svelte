@@ -40,6 +40,7 @@
     selectedPieceId?: string | null;
     onpieceselect?: (id: string | null) => void;
     labelDisplay?: 'off' | 'billboard' | 'flat';
+    onlabeldisplaychange?: (value: 'off' | 'billboard' | 'flat') => void;
     /** Fired when a user-run drape settles, with per-piece settled savedPositions to persist. */
     ondrapesettled?: (savedByPiece: Record<string, number[]>) => void;
     /** Undo-aware pattern update (arrangement-point snaps, freeze toggle). */
@@ -48,7 +49,7 @@
     oncamerachange?: (pos: [number, number, number], target: [number, number, number], fov: number) => void;
   }
 
-  let { currentPattern, selectedPieceId = null, onpieceselect, labelDisplay = 'flat', ondrapesettled, onpatternupdate, oncamerachange }: Props = $props();
+  let { currentPattern, selectedPieceId = null, onpieceselect, labelDisplay = 'flat', onlabeldisplaychange, ondrapesettled, onpatternupdate, oncamerachange }: Props = $props();
 
   const docMmToWorld = (mm: number): number => docToWorld({ x: mm, y: 0 }).x;
   const worldToDocMm = (metres: number): number =>
@@ -457,7 +458,24 @@
       }, next ? 'Show triangles' : 'Hide triangles');
     }
   }
+  /**
+   * Whether this pattern is drafted on a body at all. A lantern, a bag, a lampshade — anything that
+   * is not worn — has no person in it, and the avatar, its poses and the body chip are all noise.
+   * This is a document setting, not a view toggle: it persists, and it undoes.
+   */
+  const bodyEnabled = $derived(currentPattern.settings3d.avatarEnabled !== false);
+
+  function togglePerson() {
+    const enabling = !bodyEnabled;
+    onpatternupdate?.({
+      ...currentPattern,
+      settings3d: { ...currentPattern.settings3d, avatarEnabled: enabling, showAvatar: enabling },
+      hasChanged: true
+    }, enabling ? 'Draft on a body' : 'Remove the body');
+  }
+
   function toggleAvatar() { showAvatar = !showAvatar; renderer?.setAvatarVisible(showAvatar); }
+  function toggleLabels() { onlabeldisplaychange?.(labelDisplay === 'off' ? 'flat' : 'off'); }
 
   // apply the piece-label display setting (driven from the Properties panel)
   function applyLabelDisplay() {
@@ -566,7 +584,9 @@
     { label: status === 'simulating' ? 'Pause simulation' : 'Start simulation', icon: status === 'simulating' ? 'pause' : 'play_arrow', onClick: toggleSimulate, active: () => status === 'simulating', disabled: () => status !== 'ready' && status !== 'simulating' },
     { label: 'Reset simulation', icon: 'refresh', onClick: () => void reset(), disabled: () => status !== 'ready' && status !== 'simulating' },
     { label: 'Show triangles', icon: 'change_history', onClick: toggleTriangles, active: () => showTriangles, sep: true },
-    { label: 'Show avatar', icon: 'person', onClick: toggleAvatar, active: () => showAvatar },
+    { label: bodyEnabled ? 'Hide avatar' : 'Draft on a body', icon: 'person', onClick: bodyEnabled ? toggleAvatar : togglePerson, active: () => bodyEnabled && showAvatar },
+    { label: bodyEnabled ? 'Remove the body' : 'No body — lantern, bag, shade', icon: bodyEnabled ? 'person_off' : 'deployed_code', onClick: togglePerson, active: () => !bodyEnabled },
+    { label: labelDisplay === 'off' ? 'Show piece labels' : 'Hide piece labels', icon: labelDisplay === 'off' ? 'label_off' : 'label', onClick: toggleLabels, active: () => labelDisplay !== 'off' },
     { label: sceneMode === 'arrange' && arrangeKind === 'arrange' ? 'Exit arrange mode' : 'Arrange (A)', icon: 'scatter_plot', onClick: toggleArrangeMode, active: () => sceneMode === 'arrange' && arrangeKind === 'arrange', shortcut: 'A' },
     { label: sceneMode === 'arrange' && arrangeKind === 'manipulate' ? 'Exit move mode' : 'Move pieces (M)', icon: 'open_with', onClick: toggleManipulateMode, active: () => sceneMode === 'arrange' && arrangeKind === 'manipulate', shortcut: 'M' },
     { label: frozenSelected ? 'Unfreeze piece' : 'Freeze piece', icon: frozenSelected ? 'lock_open' : 'lock', onClick: toggleFreezeSelected, active: () => frozenSelected },
@@ -771,8 +791,8 @@
     </button>
   </div>
 
-  <!-- Pose selector -->
-  {#if poses.length}
+  <!-- Pose selector — only meaningful when the pattern is drafted on a body -->
+  {#if poses.length && bodyEnabled}
     <div class="absolute bottom-11 left-1/2 -translate-x-1/2 z-10">
       <div class="join join-horizontal bg-base-200/85 backdrop-blur rounded-lg shadow">
         {#each poses as p}
@@ -783,6 +803,6 @@
   {/if}
 
   <div class="absolute top-2 left-2 z-10 text-xs opacity-60 bg-base-200/80 rounded px-2 py-1">
-    {currentPattern.body.gender} · {currentPattern.pieces.length} pieces
+    {#if bodyEnabled}{currentPattern.body.gender} · {/if}{currentPattern.pieces.length} pieces
   </div>
 </div>

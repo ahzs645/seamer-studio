@@ -22,9 +22,11 @@ import {
   type Piece,
   type PiecePath,
   type Seam,
+  type TextureSlot,
   type WireChannel
 } from '@seamer/pattern-model';
 import {
+  coilClearance,
   developRing,
   helixAtCoil,
   helixOffset,
@@ -68,6 +70,13 @@ export interface GlobeLanternParams {
   matLength: number;
   /** Overlap at piece joins (mm) — carried into the join seam allowance. */
   join: number;
+  /**
+   * How the pieces sit on the plan. 'spiral' leaves each helix piece where it falls on the developed
+   * double spiral, so the plan shows the continuous ribbon the construction actually is — which is
+   * the whole point of the helix, and what makes the shape legible. 'sheets' packs them into rows
+   * for cutting. Rings are always sheets: their arcs have no spiral to sit on.
+   */
+  layout: 'spiral' | 'sheets';
 }
 
 export const DEFAULT_GLOBE_LANTERN: GlobeLanternParams = {
@@ -84,7 +93,8 @@ export const DEFAULT_GLOBE_LANTERN: GlobeLanternParams = {
   wireLinearMass: 4.8,
   matWidth: 292,
   matLength: 597,
-  join: 20
+  join: 20,
+  layout: 'spiral'
 };
 
 export interface GlobeLanternStats {
@@ -100,6 +110,8 @@ export interface GlobeLanternStats {
   seamCount: number;
   /** Worst per-coil seam ease the fabric has to take up (fraction). Helix only. */
   ease: number;
+  /** Gap between neighbouring coils on the page, cut width already subtracted (mm). Helix only. */
+  coilClearance: number;
   oversizePieces: number;
 }
 
@@ -457,6 +469,7 @@ function buildRings(params: GlobeLanternParams, M: Meridian, mS: number, mE: num
       pieceCount: pieces.length,
       seamCount: seams.length,
       ease: 0,
+      coilClearance: 0,
       oversizePieces: oversize * segments
     }
   };
@@ -695,7 +708,18 @@ function buildHelix(params: GlobeLanternParams, M: Meridian, mS: number, mE: num
   }
 
   // four sheets across keeps the plan roughly square without pretending to be a nest
-  layOut(pieces, params.matLength * 4);
+  // 'spiral' keeps every piece where it falls on the developed double spiral, so the plan reads as
+  // the one continuous ribbon it is. That is the whole point of the helix and the thing a row-packed
+  // layout destroys. Near the poles the CUT outlines of neighbouring coils overlap on the page (see
+  // the clearance below) — that is the geometry telling the truth, not a layout fault.
+  if (params.layout === 'sheets') layOut(pieces, params.matLength * 4);
+
+  const clearance = coilClearance(M, curve, w, w + 2 * params.seamAllowance + params.channelWidth);
+  if (clearance < 0) {
+    warnings.push(
+      `Near the openings, neighbouring coils sit ${Math.abs(clearance).toFixed(0)} mm closer than their cut widths, so those outlines overlap on the page. They are issued as separate pieces and cannot be merged. Trimming the seam allowance or the wire channel is what raises the clearance.`
+    );
+  }
 
   if (pieces.length > 40) {
     warnings.push(`${pieces.length} pieces. A wider strip or a bigger mat cuts that down sharply.`);
@@ -722,6 +746,7 @@ function buildHelix(params: GlobeLanternParams, M: Meridian, mS: number, mE: num
       pieceCount: pieces.length,
       seamCount: seams.length,
       ease: curve.ease,
+      coilClearance: clearance,
       oversizePieces: 0
     }
   };
@@ -759,13 +784,22 @@ function toPattern(model: GenModel, params: GlobeLanternParams): Pattern {
     return id;
   };
 
+  // A lantern is hollow, and with one material on both faces the far inner surface seen through the
+  // top opening shades exactly like the near outer one — so the globe reads as a solid dome and the
+  // openings vanish. Giving the inside its own much darker colour is what makes a hole look like a
+  // hole, and it happens to be true: the inside of a lit lantern is in shadow.
+  const slot = (color: string): TextureSlot => ({
+    url: '', mediaId: null, color, scale: 200,
+    normalUrl: '', normalMediaId: null, normalMapScale: 1,
+    opacityUrl: '', opacityMediaId: null, opacityMapScale: 1
+  });
   const material: Material = {
     ...(pattern.materials[0] ?? ({} as Material)),
     id: 'GLMaterial',
     name: 'Lantern cloth',
-    frontTexture: null,
-    backTexture: null,
-    useSeparateBackSide: false,
+    frontTexture: slot('#E8E2D2'),
+    backTexture: slot('#2A2620'),
+    useSeparateBackSide: true,
     stretchWarpValue: 18,
     stretchWeftValue: 18,
     bendValue: 6,
@@ -804,6 +838,13 @@ function toPattern(model: GenModel, params: GlobeLanternParams): Pattern {
       });
       const ppId = `GLPP_${edge.key}`;
       edgeToPiecePath.set(edge.key, ppId);
+      // A balance notch mid-cap on every piece join: the strip is cut into pieces only because the
+      // mat is small, and without a mark there is nothing to say which end meets which, or which
+      // way up. Cheap to cut, and the difference between a strip that reassembles and one that does
+      // not.
+      const notches = edge.key.endsWith('-end') || edge.key.endsWith('-start')
+        ? [{ id: `GLNotch_${edge.key}`, position: 0.5, size: 4, type: 'single' as const }]
+        : [];
       mainPaths.push({
         id: ppId,
         name: edge.name,
@@ -811,7 +852,7 @@ function toPattern(model: GenModel, params: GlobeLanternParams): Pattern {
         from: pathPoints[0].id,
         to: pathPoints[pathPoints.length - 1].id,
         reversed: false,
-        notches: [],
+        notches,
         ...(edge.seamAllowance !== undefined ? { seamAllowance: edge.seamAllowance } : {}),
         ...(edge.wire ? { wire: edge.wire } : {})
       });
@@ -947,6 +988,9 @@ export function globeLanternNotes(params: GlobeLanternParams, stats: GlobeLanter
     `Fabric              ${stats.fabricArea.toFixed(2)} m² of cut strip`,
     `Pieces              ${stats.pieceCount}      Seams ${stats.seamCount}`,
     ...(stats.ease > 0 ? [`Worst seam ease     ${(stats.ease * 100).toFixed(2)} % per coil (the fabric takes this up)`] : []),
+    ...(stats.mode === 'helix'
+      ? [`Coil clearance      ${stats.coilClearance >= 0 ? '+' : ''}${stats.coilClearance.toFixed(0)} mm${stats.coilClearance < 0 ? ' — tight coils are cut as separate pieces' : ''}`]
+      : []),
     '',
     'Order of work',
     ' 1. Cut every piece. Keep them in order — they are not interchangeable.',

@@ -156,3 +156,55 @@ describe('which way the cloth faces', () => {
     });
   }
 });
+
+describe('the continuous strip', () => {
+  it('keeps the helix pieces on the spiral by default', () => {
+    const spiral = generateGlobeLantern({ mode: 'helix', layout: 'spiral' });
+    const sheets = generateGlobeLantern({ mode: 'helix', layout: 'sheets' });
+    const spread = (p: typeof spiral.pattern) => {
+      const xs = p.points.map((q) => q.x);
+      const ys = p.points.map((q) => q.y);
+      return { w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
+    };
+    // the spiral is a broad, roughly square figure; the packed sheets are a different footprint
+    const a = spread(spiral.pattern);
+    const b = spread(sheets.pattern);
+    expect(a.w).toBeGreaterThan(200);
+    expect(a.h).toBeGreaterThan(200);
+    expect(Math.abs(a.w - b.w) + Math.abs(a.h - b.h)).toBeGreaterThan(50);
+  });
+
+  it('reports the coil clearance the poles force on it', () => {
+    const { stats } = generateGlobeLantern({ mode: 'helix' });
+    // a 28 mm strip carrying 6 mm allowances and an 8 mm casing cannot clear its own neighbours
+    // near the openings — the number should say so rather than the layout silently overlapping
+    expect(Number.isFinite(stats.coilClearance)).toBe(true);
+    expect(stats.coilClearance).toBeLessThan(0);
+
+    // Clearance is (gap between developed coils) minus (cut width). The gap depends only on the
+    // strip width and the surface, so trimming the allowances at a FIXED strip width raises it —
+    // that much follows from the formula. Widening the strip does not reliably help, because the
+    // minimum is taken wherever the coils crowd worst and that station moves.
+    const trimmed = generateGlobeLantern({ mode: 'helix', seamAllowance: 2, channelWidth: 3 });
+    expect(trimmed.stats.coilClearance).toBeGreaterThan(stats.coilClearance);
+  });
+
+  it('notches every piece join so the strip can be put back in order', () => {
+    const { pattern } = generateGlobeLantern({ mode: 'helix' });
+    const caps = pattern.pieces.flatMap((p) => p.mainPaths).filter((e) => /-(end|start)$/.test(e.id));
+    expect(caps.length).toBeGreaterThan(0);
+    for (const cap of caps) expect(cap.notches).toHaveLength(1);
+    // ordinary edges stay unnotched
+    const longEdges = pattern.pieces.flatMap((p) => p.mainPaths).filter((e) => /-[ul]\d+$/.test(e.id));
+    expect(longEdges.length).toBeGreaterThan(0);
+    for (const edge of longEdges) expect(edge.notches).toHaveLength(0);
+  });
+
+  it('gives the lantern a dark interior so the openings read as holes', () => {
+    const { pattern } = generateGlobeLantern({});
+    const material = pattern.materials[0];
+    expect(material.useSeparateBackSide).toBe(true);
+    const luminance = (hex: string) => parseInt(hex.slice(1, 3), 16) + parseInt(hex.slice(3, 5), 16) + parseInt(hex.slice(5, 7), 16);
+    expect(luminance(material.backTexture!.color)).toBeLessThan(luminance(material.frontTexture!.color) / 2);
+  });
+});
