@@ -421,9 +421,7 @@ export class ClothEngine {
           { binding: 4, resource: e(this.clothTriangles) },
           { binding: 5, resource: e(this.positions2d) },
           { binding: 6, resource: e(this.triangleCenters) },
-          { binding: 7, resource: e(this.seams) },
-          { binding: 8, resource: e(this.seamOrder) },
-          { binding: 9, resource: e(this.seamGate) }
+          { binding: 7, resource: e(this.seams) }
         ]
       });
       this.solveSelfBG = d.createBindGroup({

@@ -70,6 +70,19 @@ also ships each piece's exact 2D→3D map as `savedPositions`, so the studio sho
 immediately rather than asking the solver to fold a sphere out of a flat spiral — which nothing in
 the physics would drive it to do.
 
+## Checking the WGSL
+
+```sh
+pnpm check:wgsl
+```
+
+Compiles every compute kernel and builds its pipeline against Chromium's software WebGPU adapter —
+no GPU needed. Unit tests never touch the GPU, so this covers the one failure mode that takes the
+whole drape down: a shader that typechecks and then fails at runtime. Pipelines are built with
+WebGPU's *baseline* limits rather than the adapter's, because the guaranteed
+`maxStorageBuffersPerShaderStage` is 8 and the software adapter allows 10 — a ninth storage buffer
+compiles fine here and fails on real hardware.
+
 ## Development
 
 Use pnpm from this directory:

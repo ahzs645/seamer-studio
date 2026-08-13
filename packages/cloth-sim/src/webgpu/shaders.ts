@@ -620,10 +620,6 @@ export function initSelfCollisionWGSL(cfg: SimConfig, hashTableSize: number): st
 @group(0) @binding(5) var<storage, read> positions2d: array<vec4f>;
 @group(0) @binding(6) var<storage, read> triangleCenters: array<vec4f>;
 @group(0) @binding(7) var<storage, read> seams: array<i32>;
-@group(0) @binding(8) var<storage, read> seamOrder: array<i32>;
-@group(0) @binding(9) var<uniform> gate: SeamGate;
-
-struct SeamGate { sewnUpTo: i32, pad0: i32, pad1: i32, pad2: i32 };
 ${hashFunctions(hashTableSize, cfg.clothSpacing)}
 const maxDist = ${cfg.staticCollisionRadius}f;
 const maxDist2 = maxDist * maxDist;
@@ -631,14 +627,18 @@ const minDistance2d = ${cfg.minDistance2d}f;
 const minDistance2d2 = minDistance2d * minDistance2d;
 const numCollisionConstraintsPerParticle = ${cfg.numInternalCollisionConstraintsPerParticle}u;
 
-/** A SEWN seam particle is coincident with its partner and would self-collide against the adjoining
- *  panel every substep, so it is excluded from the gather. An unsewn one is a free edge like any
- *  other and must collide — otherwise loose panels pass through each other while the garment is
- *  being assembled. Gating here keeps that consistent with the seam solver. */
+// A seam particle is coincident with its partner and would self-collide against the adjoining panel
+// every substep, so it is excluded from the gather.
+//
+// This deliberately does NOT gate on the assembly threshold, even though an unsewn edge is
+// physically a free edge that ought to collide. Reading the per-link stitch order here would make a
+// ninth storage buffer in this stage, and WebGPU only guarantees eight per stage
+// (maxStorageBuffersPerShaderStage) — the pipeline then fails outright on any baseline adapter.
+// Leaving it ungated means not-yet-sewn edges can pass through nearby cloth during a recording;
+// that band is thin and the panels are near their final positions, so it is the cheaper wrong.
 fn hasSeam(particleIndex: u32) -> bool {
   for (var j: u32 = 0u; j < 4u; j = j + 1u) {
-    if (seams[particleIndex * 4u + j] > -1i
-      && seamOrder[particleIndex * 4u + j] < gate.sewnUpTo) { return true; }
+    if (seams[particleIndex * 4u + j] > -1i) { return true; }
   }
   return false;
 }
