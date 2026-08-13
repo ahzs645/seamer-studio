@@ -63,6 +63,12 @@ export interface GlobeLanternParams {
   wireDiameter: number;
   /** 0..100 — how hard the wire holds its curve. */
   wireStiffness: number;
+  /**
+   * 'stitched' sews the wire in as the seam is made; 'threaded' feeds it through the finished
+   * casing afterwards, which lets the cloth gather along it. Both are real lantern constructions —
+   * threading is easier on a long continuous rib, stitching holds a crisper line.
+   */
+  wireMode: 'stitched' | 'threaded';
   /** g/m of wire. Annealed aluminium at 1.5 mm is about 4.8. */
   wireLinearMass: number;
   /** Usable cutting-mat area (mm). Helix pieces are split to fit; rings are not split. */
@@ -90,6 +96,7 @@ export const DEFAULT_GLOBE_LANTERN: GlobeLanternParams = {
   channelWidth: 8,
   wireDiameter: 1.5,
   wireStiffness: 85,
+  wireMode: 'stitched',
   wireLinearMass: 4.8,
   matWidth: 292,
   matLength: 597,
@@ -159,6 +166,7 @@ const AZIMUTH_STEPS = 96;
 
 function wireChannel(params: GlobeLanternParams, closed: boolean): WireChannel {
   return {
+    mode: params.wireMode,
     channelWidth: params.channelWidth,
     diameter: params.wireDiameter,
     stiffness: params.wireStiffness,
@@ -995,8 +1003,12 @@ export function globeLanternNotes(params: GlobeLanternParams, stats: GlobeLanter
     'Order of work',
     ' 1. Cut every piece. Keep them in order — they are not interchangeable.',
     ' 2. Press the wire channel back along the marked edge and stitch it, leaving the ends open.',
-    ' 3. Feed the wire through as you go. It needs no in-plane bending: the cut edge already',
-    '    carries the right curve, so forming is only bending out of the plane of the cloth.',
+    params.wireMode === 'threaded'
+      ? ' 3. Sew the whole thing first, then feed the wire through the finished casings. The cloth\n'
+        + '    can gather along it, so ease the fabric out as you go.'
+      : ' 3. Lay the wire in as you close each channel, so cloth and wire are fixed together.',
+    '    Either way it needs no in-plane bending: the cut edge already carries the right curve,',
+    '    so forming is only bending out of the plane of the cloth.',
     ' 4. Sew each new coil to the coil before it, right sides together.',
     ' 5. Finish both openings with a closed wire hoop of the length above.',
     '',

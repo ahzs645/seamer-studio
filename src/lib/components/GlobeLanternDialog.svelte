@@ -91,6 +91,20 @@
             onclick={() => (params.mode = 'helix')}
           >Helix</button>
         </div>
+        <div class="flex items-center gap-2 mt-3 text-xs">
+          <span class="opacity-70">Wire is</span>
+          <div class="join">
+            <button class="join-item btn btn-xs" class:btn-active={params.wireMode === 'stitched'}
+              onclick={() => (params.wireMode = 'stitched')}>stitched in</button>
+            <button class="join-item btn btn-xs" class:btn-active={params.wireMode === 'threaded'}
+              onclick={() => (params.wireMode = 'threaded')}>threaded after</button>
+          </div>
+          <span class="opacity-60">
+            {params.wireMode === 'threaded'
+              ? '— sew it all first, then feed the wire through; the cloth may gather along it'
+              : '— laid in as each channel closes; cloth and wire hold each other'}
+          </span>
+        </div>
         {#if params.mode === 'helix'}
           <label class="flex items-center gap-2 mt-3 text-xs cursor-pointer">
             <input

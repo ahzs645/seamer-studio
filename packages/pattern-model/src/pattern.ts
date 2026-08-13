@@ -176,6 +176,18 @@ export interface PropertyFormula {
  * in-plane curvature, so the wire holds that curve and only bends out of the plane of the cloth.
  */
 export interface WireChannel {
+  /**
+   * How the wire is held.
+   *
+   * 'stitched' — sewn into the seam as you make it, so cloth and wire are fixed to each other along
+   * their whole length and neither can slide.
+   *
+   * 'threaded' — fed through a finished casing afterwards, the way a drawstring goes in. The wire
+   * still holds its own length and curve, but the cloth is free to GATHER along it: the casing can
+   * bunch up shorter than the wire, it just cannot stretch out longer. That difference is the whole
+   * reason the two are worth separating — a threaded rib ruffles, a stitched one cannot.
+   */
+  mode?: 'stitched' | 'threaded';
   /** mm — extra cut width folded back over the wire. 0 = a marked line with no casing. */
   channelWidth: number;
   /** mm — wire diameter; drives the rendered rib and the added linear mass. */

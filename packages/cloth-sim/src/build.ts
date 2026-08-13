@@ -76,7 +76,7 @@ export interface SimData {
   /** Stitch span of each resolved assembly step, in order. */
   assemblySteps: { id: string; label: string; start: number; end: number; settleFrames: number }[];
   /** Ordered particle runs carrying a wire, for rendering the ribs. */
-  wireRuns: { pieceId: string; piecePathId: string; particles: number[]; diameter: number; closed: boolean }[];
+  wireRuns: { pieceId: string; piecePathId: string; particles: number[]; diameter: number; closed: boolean; threaded: boolean }[];
 }
 
 export interface ArrangedPiece {
@@ -232,6 +232,8 @@ export function buildSimData(pattern: Pattern, arranged: ArrangedPiece[], option
   const wireEdges: [number, number][] = [];
   const wireRest: number[] = [];
   const wireCompliance: number[] = [];
+  /** 1 = one-sided (resists stretch only), which is how a threaded casing gathers. */
+  const wireLongRange: number[] = [];
   const wireAddedMass = new Map<number, number>(); // global particle -> kg of wire hung on it
   const wireRuns: SimData['wireRuns'] = [];
 
@@ -376,19 +378,25 @@ export function buildSimData(pattern: Pattern, arranged: ArrangedPiece[], option
       const globals = locals.map((li) => offset + li);
       const curveAlpha = wireStiffnessToCompliance(wire.stiffness);
       const kgPerMm = (wire.linearMass ?? 0) / 1e6; // g/m -> kg/mm
+      // Threaded through a finished casing, the cloth can GATHER along the wire but not stretch out
+      // past it — so its axial links are one-sided, acting only once the fabric is pulled longer
+      // than the wire beneath it. Stitched in, cloth and wire are fixed to each other and the link
+      // is two-sided. Same constraint, same kernel; the flag is the whole difference.
+      const gathers = wire.mode === 'threaded';
       const seg = (x: number, y: number) => Math.hypot(
         mesh.points[y].x - mesh.points[x].x, mesh.points[y].y - mesh.points[x].y
       );
-      const link = (x: number, y: number, alpha: number) => {
+      const link = (x: number, y: number, alpha: number, oneSided = false) => {
         const len = seg(x, y);
         if (len < 1e-6) return;
         wireEdges.push([offset + x, offset + y]);
         wireRest.push(len / 1000);
         wireCompliance.push(alpha);
+        wireLongRange.push(oneSided ? 1 : 0);
       };
       const last = locals.length - 1;
       for (let i = 1; i <= last; i++) {
-        link(locals[i - 1], locals[i], WIRE_AXIAL_COMPLIANCE);
+        link(locals[i - 1], locals[i], WIRE_AXIAL_COMPLIANCE, gathers);
         // half a segment of wire mass onto each end
         const half = (seg(locals[i - 1], locals[i]) / 2) * kgPerMm;
         wireAddedMass.set(globals[i - 1], (wireAddedMass.get(globals[i - 1]) ?? 0) + half);
@@ -396,18 +404,19 @@ export function buildSimData(pattern: Pattern, arranged: ArrangedPiece[], option
       }
       // Curvature: the chord across alternate particles pins the bend angle without pinning the
       // plane it bends in, so the rib keeps its flat-pattern curve and still wraps onto the form.
-      for (let i = 1; i < last; i++) link(locals[i - 1], locals[i + 1], curveAlpha);
+      for (let i = 1; i < last; i++) link(locals[i - 1], locals[i + 1], curveAlpha, gathers);
       if (wire.closed && locals.length > 2) {
-        link(locals[last], locals[0], WIRE_AXIAL_COMPLIANCE);
-        link(locals[last - 1], locals[0], curveAlpha);
-        link(locals[last], locals[1], curveAlpha);
+        link(locals[last], locals[0], WIRE_AXIAL_COMPLIANCE, gathers);
+        link(locals[last - 1], locals[0], curveAlpha, gathers);
+        link(locals[last], locals[1], curveAlpha, gathers);
       }
       wireRuns.push({
         pieceId: inst.mirror ? ap.cloth.pieceId + '#M' : ap.cloth.pieceId,
         piecePathId: inst.mirror ? `${pp.id}#M` : pp.id,
         particles: globals,
         diameter: wire.diameter,
-        closed: !!wire.closed
+        closed: !!wire.closed,
+        threaded: gathers
       });
     }
 
@@ -697,7 +706,7 @@ export function buildSimData(pattern: Pattern, arranged: ArrangedPiece[], option
     allStretchEdges.concat(wireEdges),
     stretchRest.concat(wireRest),
     stretchCompliance.concat(wireCompliance),
-    stretchLong.concat(wireEdges.map(() => 0))
+    stretchLong.concat(wireLongRange)
   );
   const bendColors = buildBendColorGroups(allBendEdges, bendHinge, bendRest, bendCompliance, bendComplianceBeyond, bendTargetAngle);
 

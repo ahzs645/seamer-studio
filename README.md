@@ -40,15 +40,26 @@ results for existing scripts.
 Three features share one idea: a garment is not only a shape, it is a shape plus an order it gets
 sewn in, plus whatever structure is sewn into it.
 
-**Wire channels.** Any `PiecePath` may carry a `wire` (`WireChannel`): a stiffener sewn into the
-edge — boning, a hoop, a lantern rib. `channelWidth` is extra CUT width only, applied through the
-existing per-edge `seamAllowance` override, so the finished geometry is untouched. In the drape the
-wire becomes near-inextensible distance constraints along the edge plus curvature constraints across
-alternate particles, both resting on the FLAT pattern lengths. That is the physical claim of the
-construction: the cut edge already carries the correct in-plane curvature, so the wire holds that
-curve and only bends out of the plane of the cloth. Wire constraints are deliberately kept out of
-`allStretchEdges` — that list seeds near-damping neighbours and feeds the cross-seam softening pass,
-and a rib usually runs *along* a seam, so softening would disable exactly what holds the form.
+**Wire channels.** Any `PiecePath` may carry a `wire` (`WireChannel`): a stiffener along the edge —
+boning, a hoop, a lantern rib. Add or remove one per edge in the property panel. `channelWidth` is
+extra CUT width only, applied through the existing per-edge `seamAllowance` override, so the finished
+geometry is untouched.
+
+In the drape a wire becomes near-inextensible distance constraints along the edge plus curvature
+constraints across alternate particles, both resting on the FLAT pattern lengths. That is the
+physical claim of the construction: the cut edge already carries the correct in-plane curvature, so
+the wire holds that curve and only bends out of the plane of the cloth. Wire constraints are
+deliberately kept out of `allStretchEdges` — that list seeds near-damping neighbours and feeds the
+cross-seam softening pass, and a rib usually runs *along* a seam, so softening would disable exactly
+what holds the form.
+
+The panel also picks how the wire is held, which is a physical fork rather than a note for the maker.
+**Stitched** is sewn in as the seam is made, so cloth and wire are fixed along their whole length;
+its links are ordinary two-sided distance constraints. **Threaded** is fed through a finished casing
+afterwards, so the cloth may gather along the wire but cannot stretch past it; the same links are
+marked long-range, so they act only once the fabric is pulled longer than the wire and stay quiet
+while it bunches. The distance kernel already had that flag. A threaded rib ruffles, a stitched one
+cannot.
 
 **Assembly timeline.** `Pattern.assembly` orders the seams; `resolveAssembly()` completes it (seams
 no step names sew last, in `pattern.seams` order). The solver gates seams by a per-link stitch index

@@ -227,3 +227,73 @@ describe('wire channels', () => {
     expect(axial).toHaveLength(run.particles.length);
   });
 });
+
+describe('threaded wires', () => {
+  const threaded = () => {
+    const pattern = twoSquares();
+    const edge = pattern.pieces[0].mainPaths.find((e) => e.wire)!;
+    edge.wire = { ...WIRE, mode: 'threaded' };
+    return build(pattern);
+  };
+
+  it('reports the mode on the run', () => {
+    expect(build(twoSquares()).wireRuns[0].threaded).toBe(false);
+    expect(threaded().wireRuns[0].threaded).toBe(true);
+  });
+
+  it('makes every link one-sided so the casing can gather', () => {
+    // The distance kernel skips a long-range constraint while the pair is CLOSER than rest, so a
+    // one-sided link resists the cloth being pulled past the wire and permits it to bunch up.
+    const sim = threaded();
+    const oneSided: number[] = [];
+    const twoSided: number[] = [];
+    for (const group of sim.stretchColors) {
+      for (let i = 0; i < group.count; i++) {
+        const alpha = group.props[i * 4];
+        if (alpha !== f32(WIRE_AXIAL_COMPLIANCE) && alpha !== f32(wireStiffnessToCompliance(WIRE.stiffness))) continue;
+        (group.edges[i * 4 + 3] > 0 ? oneSided : twoSided).push(i);
+      }
+    }
+    expect(twoSided).toHaveLength(0);
+    expect(oneSided.length).toBeGreaterThan(0);
+  });
+
+  it('leaves stitched wires two-sided', () => {
+    const sim = build(twoSquares());
+    for (const group of sim.stretchColors) {
+      for (let i = 0; i < group.count; i++) {
+        const alpha = group.props[i * 4];
+        if (alpha !== f32(WIRE_AXIAL_COMPLIANCE)) continue;
+        expect(group.edges[i * 4 + 3]).toBe(0);
+      }
+    }
+  });
+
+  it('does not make ordinary fabric edges one-sided either way', () => {
+    for (const sim of [build(twoSquares()), threaded()]) {
+      let fabricOneSided = 0;
+      for (const group of sim.stretchColors) {
+        for (let i = 0; i < group.count; i++) {
+          const alpha = group.props[i * 4];
+          const isWire = alpha === f32(WIRE_AXIAL_COMPLIANCE)
+            || alpha === f32(wireStiffnessToCompliance(WIRE.stiffness));
+          if (!isWire && group.edges[i * 4 + 3] > 0) fabricOneSided++;
+        }
+      }
+      expect(fabricOneSided).toBe(0);
+    }
+  });
+
+  it('keeps the same rest lengths — only the sidedness changes', () => {
+    const restOf = (sim: ReturnType<typeof build>) => {
+      const out: number[] = [];
+      for (const group of sim.stretchColors) {
+        for (let i = 0; i < group.count; i++) {
+          if (group.props[i * 4] === f32(WIRE_AXIAL_COMPLIANCE)) out.push(group.edges[i * 4 + 2]);
+        }
+      }
+      return out.sort((a, b) => a - b);
+    };
+    expect(restOf(threaded())).toEqual(restOf(build(twoSquares())));
+  });
+});
