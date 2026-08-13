@@ -94,6 +94,8 @@
   let currentPanX = $state(0);
   let currentPanY = $state(0);
   let hoveredPointId: string | null = $state(null);
+  /** Piece under the cursor. Its name is always shown, even where the layout had to drop it. */
+  let hoveredPieceId: string | null = $state(null);
   let cursorPos = $state({ x: 0, y: 0 });
   let measureFrom: string | null = $state(null);
   let showSeams = $state(false); // manual "pin seams on" override; otherwise seams show with the seam tool
@@ -433,6 +435,7 @@
   }
 
   interface LabelPlacement {
+    id: string;
     text: string;
     /** Where the piece actually is — the leader line points back here. */
     anchorX: number;
@@ -460,7 +463,7 @@
    */
   function layoutPieceLabels(
     c: CanvasRenderingContext2D,
-    entries: { text: string; x: number; y: number }[]
+    entries: { id: string; text: string; x: number; y: number }[]
   ): LabelPlacement[] {
     c.font = '600 12px "Noto Sans", sans-serif';
     const H = 19;
@@ -472,8 +475,8 @@
         Math.abs(x - q.x) * 2 < w + q.w + PAD * 2 && Math.abs(y - q.y) * 2 < H + q.h + PAD * 2
       );
 
-    // Nearest-the-top-left first, so the order is stable frame to frame rather than depending on
-    // whichever piece happened to be drawn first.
+    // Nearest the top-left first, so the layout is stable frame to frame rather than depending on
+    // which piece happened to be drawn first.
     const ordered = entries
       .map((e, i) => ({ ...e, i }))
       .sort((a, b) => a.y - b.y || a.x - b.x || a.i - b.i);
@@ -495,14 +498,64 @@
           }
         }
       }
-      if (!put) continue; // no room at this zoom — better absent than piled
-      placed.push({ text: entry.text, anchorX: entry.x, anchorY: entry.y, x: put.x, y: put.y, w, h: H });
+      if (!put) continue; // no room at this zoom — better absent than piled; hover still reveals it
+      placed.push({ id: entry.id, text: entry.text, anchorX: entry.x, anchorY: entry.y, x: put.x, y: put.y, w, h: H });
     }
     return placed;
   }
 
+  /**
+   * Draw the whole set of piece-name chips: laid out so they cannot pile up, and with the hovered
+   * piece's chip guaranteed — reserved before anything else and drawn last, on top, emphasised.
+   *
+   * That guarantee is what makes dropping a chip acceptable. Where pieces genuinely overlap in the
+   * plan there is not room for every name at once, and inventing room by pushing chips far away
+   * would only make them lie about which piece they belong to. Hover answers the question instead:
+   * point at a piece and its name is always there, wherever it is and however tight the coil.
+   */
+  function drawPieceLabels(
+    c: CanvasRenderingContext2D,
+    entries: { id: string; text: string; x: number; y: number }[]
+  ): void {
+    if (!entries.length) return;
+    const hovered = entries.find((e) => e.id === hoveredPieceId) ?? null;
+    // The layout does NOT depend on what is hovered: reserving a slot for the hovered chip would
+    // reflow every other chip on each mouse move, which reads as the plan twitching under the
+    // cursor. The set stays put and the hovered chip is simply drawn over it.
+    const placements = layoutPieceLabels(c, entries);
+    for (const label of placements) {
+      const isHovered = label.id === hoveredPieceId;
+      const moved = Math.hypot(label.x - label.anchorX, label.y - label.anchorY) > label.h;
+      // a chip that had to move draws a leader back to its piece, so it still reads as a label for
+      // that piece and not a stray tag floating over the plan
+      if (moved) {
+        c.save();
+        c.strokeStyle = isHovered ? 'rgba(29,78,216,0.9)' : 'rgba(100,116,139,0.55)';
+        c.lineWidth = 1;
+        c.setLineDash([2, 2]);
+        c.beginPath();
+        c.moveTo(label.anchorX, label.anchorY);
+        c.lineTo(label.x, label.y);
+        c.stroke();
+        c.setLineDash([]);
+        c.fillStyle = isHovered ? 'rgba(29,78,216,0.9)' : 'rgba(100,116,139,0.75)';
+        c.beginPath();
+        c.arc(label.anchorX, label.anchorY, isHovered ? 2.6 : 1.8, 0, Math.PI * 2);
+        c.fill();
+        c.restore();
+      }
+      if (!isHovered) pieceNameChip(c, label.text, label.x, label.y);
+    }
+    // Last, over everything: the hovered piece's own chip, at its own centroid. Drawn even when the
+    // layout dropped it, which is the whole point — point at a piece and you get its name.
+    if (hovered) {
+      const placed = placements.find((l) => l.id === hovered.id);
+      pieceNameChip(c, hovered.text, placed?.x ?? hovered.x, placed?.y ?? hovered.y, true);
+    }
+  }
+
   /** Rounded pill name tag for a piece (matches the source's centred badge). */
-  function pieceNameChip(c: CanvasRenderingContext2D, text: string, x: number, y: number) {
+  function pieceNameChip(c: CanvasRenderingContext2D, text: string, x: number, y: number, emphasis = false) {
     c.font = '600 12px "Noto Sans", sans-serif';
     c.textAlign = 'center';
     c.textBaseline = 'middle';
@@ -516,12 +569,12 @@
     c.arcTo(rx, ry + h, rx, ry, r);
     c.arcTo(rx, ry, rx + w, ry, r);
     c.closePath();
-    c.fillStyle = 'rgba(248,250,252,0.92)';
+    c.fillStyle = emphasis ? '#1d4ed8' : '#f8fafc';
     c.fill();
-    c.strokeStyle = 'rgba(100,116,139,0.35)';
+    c.strokeStyle = emphasis ? '#1d4ed8' : 'rgba(100,116,139,0.45)';
     c.lineWidth = 1;
     c.stroke();
-    c.fillStyle = '#334155';
+    c.fillStyle = emphasis ? '#ffffff' : '#334155';
     c.fillText(text, x, y + 0.5);
     c.textAlign = 'start';
     c.textBaseline = 'alphabetic';
@@ -963,7 +1016,7 @@
       if (bodyEnabled) drawSilhouette(c, minY, maxY);
     }
 
-    const pendingLabels: { text: string; x: number; y: number }[] = [];
+    const pendingLabels: { id: string; text: string; x: number; y: number }[] = [];
     for (const piece of currentPattern.pieces) {
       if (piece.hidden || !layerVisible(piece.layerId)) continue; // hidden piece or hidden layer
       const isSelected = pieceIds.has(piece.id);
@@ -1123,6 +1176,7 @@
         const cuts = pieceCutCounts(piece);
         // collected, not drawn: the chips are laid out together below so they cannot pile up
         pendingLabels.push({
+          id: piece.id,
           text: cuts.total > 1 ? `${piece.name}  ×${cuts.total}` : piece.name,
           x: mid.x,
           y: mid.y
@@ -1130,32 +1184,7 @@
       }
     }
 
-    // Piece names, laid out as a set and drawn above every piece.
-    if (pendingLabels.length) {
-      for (const label of layoutPieceLabels(c, pendingLabels)) {
-        const dx = label.x - label.anchorX;
-        const dy = label.y - label.anchorY;
-        // a chip that had to move draws a leader back to its piece, so it still reads as a label
-        // for that piece and not a stray tag floating over the plan
-        if (Math.hypot(dx, dy) > label.h) {
-          c.save();
-          c.strokeStyle = 'rgba(100,116,139,0.55)';
-          c.lineWidth = 1;
-          c.setLineDash([2, 2]);
-          c.beginPath();
-          c.moveTo(label.anchorX, label.anchorY);
-          c.lineTo(label.x, label.y);
-          c.stroke();
-          c.setLineDash([]);
-          c.fillStyle = 'rgba(100,116,139,0.75)';
-          c.beginPath();
-          c.arc(label.anchorX, label.anchorY, 1.8, 0, Math.PI * 2);
-          c.fill();
-          c.restore();
-        }
-        pieceNameChip(c, label.text, label.x, label.y);
-      }
-    }
+
 
     // notches — short perpendicular ticks at their position along each main edge
     for (const piece of currentPattern.pieces) {
@@ -1485,6 +1514,10 @@
       c.strokeRect(x, y, w, h);
       c.setLineDash([]);
     }
+
+    // Piece names last of all, so nothing — pieces, notches, markers, seam overlays — can cover
+    // the one thing you read to tell the pieces apart.
+    drawPieceLabels(c, pendingLabels);
 
     // compass — a small orientation widget in the top-right corner showing the canvas axes
     // (pattern +y is up = N, +x is right = E)
@@ -3284,6 +3317,7 @@
       seamHover = null;
     }
     hoveredPointId = hitTestPoint(pos.x, pos.y);
+    hoveredPieceId = pieceAt(pos)?.id ?? null;
     render();
   }
 
