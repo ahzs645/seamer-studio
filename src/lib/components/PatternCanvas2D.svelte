@@ -873,9 +873,16 @@
     const pts = indexPoints(currentPattern);
     let best: PlacedPoint | null = null;
     let bestDist = Infinity;
+    const byPiece = new Map(currentPattern.pieces.map((piece) => [piece.id, piece]));
     for (const pp of editorPlacedPoints(currentPattern, pts)) {
       const lid = pts.get(pp.pointId)?.layerId;
       if (!layerVisible(lid) || layerLocked(lid)) continue; // can't pick hidden/locked-layer points
+      // An anchor that is not drawn must not be pickable either: a piece with `hideEditorPoints`
+      // has thousands of them, and clicking to select the PIECE would otherwise land on an
+      // invisible point instead. Selecting the piece first brings its anchors back, drawn and
+      // pickable together.
+      if (pp.pieceId && byPiece.get(pp.pieceId)?.hideEditorPoints
+        && !pointIds.has(pp.pointId) && !pieceIds.has(pp.pieceId)) continue;
       const d = Math.hypot(pt.x - pp.world.x, pt.y - pp.world.y);
       if (d < t && d < bestDist) { bestDist = d; best = pp; }
     }
@@ -1386,7 +1393,15 @@
       for (const pp of allEditorPoints) {
         if (!layerVisible(points.get(pp.pointId)?.layerId)) continue;
         if (!showConstruction && pp.pieceId === '') continue; // hide construction points
-        if (pp.pieceId && piecesById.get(pp.pieceId)?.hideEditorPoints && !pointIds.has(pp.pointId) && hoveredPointId !== pp.pointId) continue;
+        // A piece with `hideEditorPoints` carries thousands of sampled anchors — an imported
+        // outline, or a generated spiral — and drawing them all buries the plan. They stay hidden
+        // unless selected, or hovered WHILE THEIR PIECE IS SELECTED. That last condition is the
+        // point: the lone dot trailing the cursor over a piece nobody is editing says nothing the
+        // cursor does not already say, while selecting the piece first is what makes its anchors
+        // grabbable again.
+        if (pp.pieceId && piecesById.get(pp.pieceId)?.hideEditorPoints
+          && !pointIds.has(pp.pointId)
+          && !(selPieces.has(pp.pieceId) && hoveredPointId === pp.pointId)) continue;
 
         const pt = pp.world;
         const cp = toCanvas(pt);
