@@ -666,7 +666,8 @@
 
   <!-- Assembly timeline: record the garment sewing itself, then scrub the recording -->
   {#if showTimeline}
-    <div class="absolute bottom-3 left-1/2 -translate-x-1/2 z-10">
+    <!-- clears the pose and lighting bars that already own the bottom centre -->
+    <div class="absolute bottom-28 left-1/2 -translate-x-1/2 z-20">
       <AssemblyTimeline
         disabled={status !== 'ready' && status !== 'simulating'}
         record={(options) => renderer?.recordAssemblyTimeline(options) ?? Promise.resolve(null)}
