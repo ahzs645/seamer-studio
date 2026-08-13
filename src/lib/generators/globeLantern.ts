@@ -126,6 +126,12 @@ export interface GlobeLanternResult {
   pattern: Pattern;
   stats: GlobeLanternStats;
   warnings: string[];
+  /**
+   * Height of the globe's centre in the units `savedPositions` uses (metres), so anything asking
+   * which way a piece faces has the axis to measure against. Averaging a piece's own samples gives
+   * the piece's height, not the globe's, and the two only coincide at the equator.
+   */
+  centreY: number;
 }
 
 /* ------------------------------------------------------------------ *
@@ -143,8 +149,6 @@ interface GenEdge {
 interface GenPiece {
   key: string;
   name: string;
-  /** True when this piece's triangles end up facing inward; see `mapsFrontInward`. */
-  flipNormals?: boolean;
   edges: GenEdge[];
   /** stride 5: x2d(mm), y2d(mm), x3d(m), y3d(m), z3d(m) */
   samples: number[];
@@ -200,29 +204,31 @@ function translate(piece: GenPiece, dx: number, dy: number): void {
 /**
  * Does this piece's flat-to-globe map leave its triangles facing INWARD?
  *
- * The renderer picks a piece's outward texture, name badge and shading from the triangle facing, and
- * `flipNormals` is how a piece declares that its facing is the reverse of the usual. The 2D boundary
- * winding has no say — the triangulator normalises it — so the facing comes entirely from the
- * handedness of the flat-to-globe map. For stacked rings that handedness genuinely flips at the
- * equator: above it the band tapers inward so the upper edge develops as the INNER arc of the
- * sector, below it as the outer. The answer is therefore per piece, not per pattern, and getting it
- * wrong means looking at the lantern from the inside.
+ * The app's cloth convention, stated in `scene3d`'s mesh build, is that a piece's triangles wind
+ * with their geometric FRONT face pointing inward, so the outward surface the camera sees is the
+ * back — which is why the face texture is rendered on a `BackSide` mesh and the back texture on a
+ * `FrontSide` one. A piece that lands the other way round shows its lining to the room. The 2D
+ * boundary winding has no say in this (the triangulator normalises it), so the facing comes entirely
+ * from the handedness of the flat-to-globe map.
  *
- * The sign is pinned against the actual render rather than derived: a piece whose front points
- * outward is the un-flipped case.
+ * Note this is measured, not declared. `Piece.settings3d.flipNormals` looks like the right lever and
+ * is not: the renderer only consults it for label sidedness and for the ARRANGEMENT path, and a
+ * generated lantern reaches 3D through `savedPositions`, where nothing applies it. Landing the map
+ * the right way round is therefore the generator's job.
+ *
+ * `centreY` is the globe's centre height in the same units as the samples, and it has to be passed
+ * in rather than averaged out of the piece. A band's own samples average to the band's own height,
+ * which is the globe centre only for a band straddling the equator; for the top ring the estimate
+ * lands inside the band itself and the radial vector collapses to nearly nothing.
  */
-function mapsFrontInward(piece: GenPiece, sampleStride: number): boolean {
+function mapsFrontInward(piece: GenPiece, sampleStride: number, centreY: number): boolean {
   const s = piece.samples;
   const count = s.length / 5;
-  if (count < sampleStride + 2) return false;
+  if (count < sampleStride + 2) return true;
   const at = (i: number) => ({
     x2: s[i * 5], y2: s[i * 5 + 1],
     x3: s[i * 5 + 2], y3: s[i * 5 + 3], z3: s[i * 5 + 4]
   });
-  // centre of the globe, from the piece's own samples — only the axis matters for the radial test
-  let cy = 0;
-  for (let i = 0; i < count; i++) cy += s[i * 5 + 3];
-  cy /= count;
 
   const o = at(0);
   const a = at(1);              // along one grid direction
@@ -231,12 +237,26 @@ function mapsFrontInward(piece: GenPiece, sampleStride: number): boolean {
   const ux = a.x3 - o.x3, uy = a.y3 - o.y3, uz = a.z3 - o.z3;
   const vx = b.x3 - o.x3, vy = b.y3 - o.y3, vz = b.z3 - o.z3;
   const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
-  const radial = nx * o.x3 + ny * (o.y3 - cy) + nz * o.z3;
-  // Sign convention established against the actual render, not from first principles: the shader
-  // treats a piece as normally-oriented when its geometric front points OUTWARD, and `flipNormals`
-  // is how a piece says otherwise. A positive product is the front-outward case, so it needs no
-  // flip; a negative one does.
+  const radial = nx * o.x3 + ny * (o.y3 - centreY) + nz * o.z3;
+  // Sign pinned against the actual render, not derived: a positive product is the front-INWARD case,
+  // which is the one the renderer is built around and therefore the one to aim for.
   return cross2 * radial > 0;
+}
+
+/**
+ * Mirror a ring's development in x, so its map lands front-inward like everything else.
+ *
+ * A ring above the equator tapers the other way from one below it: its upper edge develops as the
+ * INNER arc of the annular sector rather than the outer. That reverses the handedness of the
+ * flat-to-globe map, and the whole upper hemisphere renders lining-out.
+ *
+ * The correction is free here because an annular sector is symmetric about its own bisector, and
+ * `ringFlatPoint` centres the sector on +Y — so negating x maps the sector exactly onto itself. The
+ * cut piece is unchanged down to the millimetre; only which way round it gets applied changes, which
+ * is a thing a sewer does without thinking and a renderer cannot guess.
+ */
+function mirrorFlat(p: Vec2, mirror: boolean): Vec2 {
+  return mirror ? { x: -p.x, y: p.y } : p;
 }
 
 /**
@@ -357,6 +377,20 @@ function buildRings(params: GlobeLanternParams, M: Meridian, mS: number, mE: num
     const isBottom = k === bandCount - 1;
     const steps = Math.max(8, Math.round(AZIMUTH_STEPS / segments));
 
+    // Which way round this band's development lands, probed on a 2x2 stub of the very map the
+    // pieces are built from, so there is one definition of "front inward" in this file rather than a
+    // rule of thumb about hemispheres that would quietly stop holding for a squashed globe.
+    const probe: GenPiece = { key: 'probe', name: 'probe', edges: [], samples: [], particleDistance: 1 };
+    for (const m of [m0, m1]) {
+      for (const psi of [0, TAU / 64]) {
+        const flat = ringFlatPoint(dev, m, psi);
+        const p3 = surfacePoint(M, m, psi);
+        probe.samples.push(flat.x, flat.y, p3.x / 1000, (p3.y + standHeight) / 1000, p3.z / 1000);
+      }
+    }
+    const mirror = !mapsFrontInward(probe, 2, standHeight / 1000);
+    const fp = (m: number, psi: number) => mirrorFlat(ringFlatPoint(dev, m, psi), mirror);
+
     for (let sgi = 0; sgi < segments; sgi++) {
       const psi0 = (sgi / segments) * TAU;
       const psi1 = ((sgi + 1) / segments) * TAU;
@@ -367,8 +401,8 @@ function buildRings(params: GlobeLanternParams, M: Meridian, mS: number, mE: num
       const lower: Vec2[] = [];
       for (let i = 0; i <= steps; i++) {
         const psi = psi0 + ((psi1 - psi0) * i) / steps;
-        upper.push(ringFlatPoint(dev, m0, psi));
-        lower.push(ringFlatPoint(dev, m1, psi));
+        upper.push(fp(m0, psi));
+        lower.push(fp(m1, psi));
       }
       const endB = [upper[upper.length - 1], lower[lower.length - 1]].map((p) => ({ ...p }));
       const endA = [lower[0], upper[0]].map((p) => ({ ...p }));
@@ -390,6 +424,16 @@ function buildRings(params: GlobeLanternParams, M: Meridian, mS: number, mE: num
         edges[2].wire = wireChannel(params, segments === 1);
         edges[2].seamAllowance = params.seamAllowance + params.channelWidth;
       }
+      // Mirroring reverses the direction the boundary is traversed. Nothing downstream should care —
+      // the triangulator normalises winding — but the allowance offset is built per edge from this
+      // loop, so put the original rotational direction back rather than trust that it doesn't. The
+      // rotation afterwards is presentation: it restores the upper edge to the head of the list, so
+      // a mirrored band's edges read in the same order as every other band's in the property panel.
+      if (mirror) {
+        edges.reverse();
+        for (const e of edges) e.poly.reverse();
+        edges.unshift(edges.pop()!);
+      }
 
       // 2D -> 3D samples across the band, so the studio shows the globe before anything simulates.
       const samples: number[] = [];
@@ -398,7 +442,7 @@ function buildRings(params: GlobeLanternParams, M: Meridian, mS: number, mE: num
         const m = m0 + ((m1 - m0) * ri) / rows;
         for (let i = 0; i <= steps; i++) {
           const psi = psi0 + ((psi1 - psi0) * i) / steps;
-          const flat = ringFlatPoint(dev, m, psi);
+          const flat = fp(m, psi);
           const p3 = surfacePoint(M, m, psi);
           samples.push(flat.x, flat.y, p3.x / 1000, (p3.y + standHeight) / 1000, p3.z / 1000);
         }
@@ -411,7 +455,6 @@ function buildRings(params: GlobeLanternParams, M: Meridian, mS: number, mE: num
         samples,
         particleDistance: Math.max(4, Math.min(10, bandArc / 3))
       };
-      ringPiece.flipNormals = mapsFrontInward(ringPiece, steps + 1);
       pieces.push(ringPiece);
 
       stripLength += polylineLength(upper);
@@ -680,7 +723,6 @@ function buildHelix(params: GlobeLanternParams, M: Meridian, mS: number, mE: num
       samples,
       particleDistance: Math.max(4, Math.min(10, w / 3))
     };
-    stripPiece.flipNormals = mapsFrontInward(stripPiece, rows + 1);
     pieces.push(stripPiece);
   }
 
@@ -904,7 +946,9 @@ function toPattern(model: GenModel, params: GlobeLanternParams): Pattern {
         },
         enable3d: true,
         frozen: false,
-        flipNormals: !!gp.flipNormals,
+        // Every generated piece is built to land front-inward, which is the convention the renderer
+        // already assumes, so none of them declares a reversal. See `mapsFrontInward`.
+        flipNormals: false,
         filterExternalCollisionsByClothNormal: false,
         collisionLayer: 0,
         particleDistance: gp.particleDistance,
@@ -975,7 +1019,8 @@ export function generateGlobeLantern(input: Partial<GlobeLanternParams> = {}): G
   return {
     pattern: toPattern(model, params),
     stats: model.stats,
-    warnings: model.warnings
+    warnings: model.warnings,
+    centreY: standOffset(params) / 1000
   };
 }
 

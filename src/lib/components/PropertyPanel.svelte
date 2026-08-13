@@ -212,11 +212,39 @@
     linearMass: 4.8,
     closed: false
   };
+  /** The allowance this edge would cut at with no wire in it. */
+  function baseAllowanceMm(): number {
+    return editingPiece?.seamAllowance ?? currentPattern.seamAllowance ?? 0;
+  }
+  /**
+   * A wire needs the cloth folded back around it, so its channel is extra CUT width — the finished
+   * edge does not move. That is exactly the per-edge allowance override, so keep the two in step the
+   * way the generators write them (`base + channelWidth`). We only touch the override while it is
+   * still tracking the wire; once someone sets their own number we leave it alone, and on removal we
+   * only put the base back if the override was ours.
+   */
+  function wireAllowancePatch(pp: PiecePath, nextChannel: number | null): Partial<PiecePath> {
+    if (pp.seamAllowanceFormula) return {}; // a formula owns this edge; never overwrite it
+    const base = baseAllowanceMm();
+    const tracking = pp.wire
+      ? pp.seamAllowance === undefined || Math.abs(pp.seamAllowance - (base + pp.wire.channelWidth)) < 1e-6
+      : pp.seamAllowance === undefined;
+    if (!tracking) return {};
+    if (nextChannel === null) return { seamAllowance: undefined };
+    return { seamAllowance: base + nextChannel };
+  }
   function setWire(pp: PiecePath, partial: Partial<NonNullable<PiecePath['wire']>>) {
-    updateMainPath(pp.id, { wire: { ...DEFAULT_WIRE, ...pp.wire, ...partial } }, 'Edit wire');
+    const wire = { ...DEFAULT_WIRE, ...pp.wire, ...partial };
+    updateMainPath(pp.id, { wire, ...wireAllowancePatch(pp, wire.channelWidth) }, 'Edit wire');
   }
   function toggleWire(pp: PiecePath, on: boolean) {
-    updateMainPath(pp.id, { wire: on ? { ...DEFAULT_WIRE } : undefined }, on ? 'Add wire' : 'Remove wire');
+    updateMainPath(
+      pp.id,
+      on
+        ? { wire: { ...DEFAULT_WIRE }, ...wireAllowancePatch(pp, DEFAULT_WIRE.channelWidth) }
+        : { wire: undefined, ...wireAllowancePatch(pp, null) },
+      on ? 'Add wire' : 'Remove wire'
+    );
   }
 
   function updateMainPath(ppId: string, partial: Partial<PiecePath>, label = 'Edit corner join') {
@@ -1043,10 +1071,16 @@
                                 ? 'Fed in after the casing is sewn. The cloth may gather along the wire but cannot stretch past it.'
                                 : 'Sewn into the seam as you go. Cloth and wire hold each other along their whole length.'}
                             </p>
-                            <label class="flex items-center justify-between gap-2 text-[11px]">Channel ({unitLabel})
+                            <label class="flex items-center justify-between gap-2 text-[11px]"
+                              title="Extra CUT width for the fold-back that houses the wire. The finished edge does not move — this is added to the edge's seam allowance.">Channel ({unitLabel})
                               <input type="number" min="0" step="0.5" class="input input-bordered input-xs w-20"
                                 value={toUnit(wire.channelWidth).toFixed(2)}
                                 oninput={(e) => setWire(pp, { channelWidth: fromUnit(parseFloat(e.currentTarget.value) || 0) })} /></label>
+                            {#if pp.seamAllowance !== undefined && Math.abs(pp.seamAllowance - (baseAllowanceMm() + wire.channelWidth)) < 1e-6}
+                              <p class="text-[10px] opacity-50">Cuts at {toUnit(baseAllowanceMm()).toFixed(2)} + {toUnit(wire.channelWidth).toFixed(2)} = {toUnit(pp.seamAllowance).toFixed(2)} {unitLabel} on this edge.</p>
+                            {:else}
+                              <p class="text-[10px] opacity-50">This edge has its own allowance ({toUnit(pp.seamAllowance ?? baseAllowanceMm()).toFixed(2)} {unitLabel}), so the channel is not added to it.</p>
+                            {/if}
                             <label class="flex items-center justify-between gap-2 text-[11px]">Diameter ({unitLabel})
                               <input type="number" min="0.1" step="0.1" class="input input-bordered input-xs w-20"
                                 value={toUnit(wire.diameter).toFixed(2)}

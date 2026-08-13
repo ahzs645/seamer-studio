@@ -113,14 +113,18 @@ describe('globe lantern generator', () => {
 });
 
 describe('which way the cloth faces', () => {
-  // The renderer picks a piece's outward texture, name badge and shading from its triangle facing,
-  // and `flipNormals` is how a piece declares the reverse. The 2D boundary winding has no say — the
-  // triangulator normalises it — so the facing comes purely from the handedness of the flat-to-globe
-  // map, which for stacked rings flips at the equator. Get it wrong and you are looking at the
-  // lantern from the inside, which nothing else here would catch.
+  // The app renders a piece's outward surface as the BACK of its triangles — scene3d puts the face
+  // texture on a BackSide mesh for exactly that reason — so every piece has to land with its
+  // geometric front pointing INWARD. The 2D boundary winding has no say (the triangulator normalises
+  // it): the facing comes purely from the handedness of the flat-to-globe map, and for stacked rings
+  // that handedness genuinely flips at the equator, because a band above it develops with its upper
+  // edge as the sector's inner arc. The generator mirrors those bands — free, since an annular
+  // sector is symmetric about its own bisector — rather than declaring `flipNormals`, which the
+  // saved-drape path never reads. Get this wrong and the lantern shows its lining to the room, which
+  // nothing else here would catch.
   for (const mode of ['rings', 'helix'] as const) {
-    it(`${mode}: flipNormals matches how each piece actually lands on the globe`, () => {
-      const { pattern } = generateGlobeLantern({ mode });
+    it(`${mode}: every piece lands front-inward on the globe`, () => {
+      const { pattern, centreY } = generateGlobeLantern({ mode });
       const intervals = computeSeamEdgeIntervals(pattern);
       const points = indexPoints(pattern);
       for (const piece of pattern.pieces) {
@@ -133,10 +137,9 @@ describe('which way the cloth faces', () => {
         expect(reuse, `${piece.name} has no 3D map`).toBeTruthy();
 
         const P = reuse.positions3d;
-        const saved = piece.settings3d.savedPositions!;
-        let axisY = 0;
-        for (let i = 0; i < saved.length; i += 5) axisY += saved[i + 3];
-        axisY /= saved.length / 5;
+        // The globe's centre, not the piece's. A top ring averages to its own height, which puts the
+        // reference point inside the band and makes the radial test read whatever rounding says.
+        const axisY = centreY;
 
         let outward = 0;
         let inward = 0;
@@ -149,9 +152,10 @@ describe('which way the cloth faces', () => {
           const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
           if (nx * ax + ny * (ay - axisY) + nz * az > 0) outward++; else inward++;
         }
-        // front-outward is the un-flipped case
-        expect(outward > inward, `${piece.name} declares the wrong facing`)
-          .toBe(!piece.settings3d.flipNormals);
+        expect(inward, `${piece.name} lands inside out`).toBeGreaterThan(outward);
+        // Nothing generated here is a reversed piece, so nothing should claim to be one.
+        expect(piece.settings3d.flipNormals, `${piece.name} declares a reversal it does not need`)
+          .toBe(false);
       }
     });
   }

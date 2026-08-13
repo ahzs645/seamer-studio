@@ -43,7 +43,10 @@ sewn in, plus whatever structure is sewn into it.
 **Wire channels.** Any `PiecePath` may carry a `wire` (`WireChannel`): a stiffener along the edge —
 boning, a hoop, a lantern rib. Add or remove one per edge in the property panel. `channelWidth` is
 extra CUT width only, applied through the existing per-edge `seamAllowance` override, so the finished
-geometry is untouched.
+geometry is untouched. The panel keeps the two in step — adding a wire grows the edge's allowance by
+the channel, changing the channel moves it, removing the wire puts it back — but only while the
+override is still tracking. Once someone types their own number, or drives the edge with a formula,
+the panel stops touching it and says so instead.
 
 In the drape a wire becomes near-inextensible distance constraints along the edge plus curvature
 constraints across alternate particles, both resting on the FLAT pattern lengths. That is the
@@ -86,6 +89,16 @@ wire channels per coil and a complete assembly order; both split to fit a cuttin
 also ships each piece's exact 2D→3D map as `savedPositions`, so the studio shows the finished lantern
 immediately rather than asking the solver to fold a sphere out of a flat spiral — which nothing in
 the physics would drive it to do.
+
+Every piece is built to land with its triangles facing INWARD, because that is the convention the
+renderer already assumes — `scene3d` puts the face texture on a `BackSide` mesh for exactly that
+reason. A ring above the equator develops the other way round, its upper edge becoming the sector's
+inner arc, so its map is the mirror handedness and the whole upper hemisphere would show its lining
+to the room. The generator mirrors those bands, which costs nothing: an annular sector is symmetric
+about its own bisector, so the cut piece is identical and only which way up it is applied changes.
+`Piece.settings3d.flipNormals` looks like the lever for this and is not — the saved-drape path never
+reads it — so the facing is measured against the globe axis and built in, and the smoke test asserts
+it for every piece in both modes.
 
 Helix pieces stay on the developed spiral by default, so the plan reads as the one continuous ribbon
 the construction actually is; untick that and they pack into rows for cutting. Near the openings the
