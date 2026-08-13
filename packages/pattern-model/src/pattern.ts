@@ -165,6 +165,32 @@ export interface PropertyFormula {
   unit?: 'mm' | 'cm' | 'inch' | 'degrees' | 'none' | string;
 }
 
+/**
+ * A stiffener sewn into an edge — boning, a hoop, or the wire in a lantern rib. The channel is the
+ * folded-back fabric that houses it; `channelWidth` is extra cut width on the edge, and does not
+ * change the finished (stitch-line) geometry.
+ *
+ * In the drape the wire becomes a chain of near-inextensible distance constraints along the edge
+ * plus curvature constraints between alternate particles, both resting on the FLAT pattern lengths.
+ * That is the whole physical claim of the construction: the cut edge already carries the correct
+ * in-plane curvature, so the wire holds that curve and only bends out of the plane of the cloth.
+ */
+export interface WireChannel {
+  /** mm — extra cut width folded back over the wire. 0 = a marked line with no casing. */
+  channelWidth: number;
+  /** mm — wire diameter; drives the rendered rib and the added linear mass. */
+  diameter: number;
+  /**
+   * 0..100, how hard the wire resists being bent away from its flat-pattern curvature.
+   * 100 = effectively rigid. Below ~20 it behaves like a soft cord.
+   */
+  stiffness: number;
+  /** g/m of the wire, added to the particles along the channel. Aluminium 1.5 mm ≈ 4.8 g/m. */
+  linearMass?: number;
+  /** Closed hoop: also constrain the last particle back to the first (ring openings). */
+  closed?: boolean;
+}
+
 /** A boundary edge of a piece: a span of a ConstrainablePath between two points. */
 export interface PiecePath {
   id: string; // PiecePath_xxx — distinct id used by seams
@@ -179,6 +205,8 @@ export interface PiecePath {
   foldAngle?: number;
   // internal paths only: bake this style line into the 3D fabric texture (default true)
   showIn3d?: boolean;
+  // a stiffener sewn along this edge (boning / hoop / lantern wire); undefined = plain fabric edge
+  wire?: WireChannel;
   // per-edge seam-allowance width override in mm (undefined => use the piece/pattern allowance)
   seamAllowance?: number;
   // seam-allowance corner finishing (all optional; undefined => 'intersection' with no cap):
@@ -383,6 +411,39 @@ export interface Seam {
   toPaths: SeamRef[];
 }
 
+/** One step of the assembly order: a seam (or several sewn together) closing in one operation. */
+export interface AssemblyStep {
+  id: string;
+  /** Shown on the timeline — "Join ring 4 to ring 5", "Close the centre back". */
+  label: string;
+  /** Seam ids closed by this step, in the order they are stitched. */
+  seamIds: string[];
+  /**
+   * Frames to hold after this step's stitches close, letting the cloth settle before the next
+   * step starts. Undefined uses the recorder's default.
+   */
+  settleFrames?: number;
+}
+
+/**
+ * The order a garment is sewn in. Seams not named by any step are sewn last, in `pattern.seams`
+ * order, so a pattern that never defines an assembly still records a sensible timeline.
+ *
+ * The timeline's unit is the STITCH, not the seam: every seam resolves to an ordered run of
+ * particle pairs, and the recorder closes them in order. That is what lets a seam zip shut rather
+ * than snap, and what lets a single continuous spiral seam be a timeline in its own right.
+ */
+export interface Assembly {
+  steps: AssemblyStep[];
+  /** Frames held after each step when the step does not set its own. */
+  settleFrames?: number;
+  /**
+   * Stitches closed per recorded frame. Lower = slower, smoother sewing. Undefined lets the
+   * recorder pick from the total stitch count so a whole garment records in a sane number of frames.
+   */
+  stitchesPerFrame?: number;
+}
+
 /** A persistent measurement annotation created with the 2D Measure tool. */
 export interface Measurement {
   id: string;
@@ -562,6 +623,8 @@ export interface Pattern {
   materials: Material[];
   // Optional for patterns saved before the Measure tool existed.
   measurements?: Measurement[];
+  // Optional sewing order driving the assembly timeline; absent = seams sew in `seams` order.
+  assembly?: Assembly;
 
   seamAllowance: number; // mm
   versionName: string;

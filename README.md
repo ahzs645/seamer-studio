@@ -35,6 +35,41 @@ migrated incrementally.
 aliases preserve the old `getPattern()` and object-shaped `getSelection()`
 results for existing scripts.
 
+## Wire channels, assembly timeline, generators
+
+Three features share one idea: a garment is not only a shape, it is a shape plus an order it gets
+sewn in, plus whatever structure is sewn into it.
+
+**Wire channels.** Any `PiecePath` may carry a `wire` (`WireChannel`): a stiffener sewn into the
+edge — boning, a hoop, a lantern rib. `channelWidth` is extra CUT width only, applied through the
+existing per-edge `seamAllowance` override, so the finished geometry is untouched. In the drape the
+wire becomes near-inextensible distance constraints along the edge plus curvature constraints across
+alternate particles, both resting on the FLAT pattern lengths. That is the physical claim of the
+construction: the cut edge already carries the correct in-plane curvature, so the wire holds that
+curve and only bends out of the plane of the cloth. Wire constraints are deliberately kept out of
+`allStretchEdges` — that list seeds near-damping neighbours and feeds the cross-seam softening pass,
+and a rib usually runs *along* a seam, so softening would disable exactly what holds the form.
+
+**Assembly timeline.** `Pattern.assembly` orders the seams; `resolveAssembly()` completes it (seams
+no step names sew last, in `pattern.seams` order). The solver gates seams by a per-link stitch index
+(`SimData.seamOrder`) against a `sewnUpTo` uniform, defaulting to fully sewn so an ungated drape is
+unchanged. The timeline's unit is the STITCH, not the seam — `seamPairsBySeam` is already ordered
+along each edge — which is what lets a seam zip shut rather than snap, and lets one long spiral seam
+be a timeline in its own right.
+
+Unlike PackCAD's folding timeline, this one is a **recording, not a function**. Rigid origami can be
+solved at any scrub position; XPBD is path-dependent and cannot. `recordAssembly()` runs the solver
+forward once and snapshots as it goes; `AssemblyPlayback` scrubs the result. Transport lives in the
+3D panel behind the timeline button.
+
+**Globe lantern generator.** Templates → Generators → Globe lantern. Produces a full `Pattern` from
+parameters in two constructions: stacked rings (each an annular sector, closed form) or a helix (one
+ribbon whose flat shape is the double spiral you get by integrating geodesic curvature). Both carry
+wire channels per coil and a complete assembly order; both split to fit a cutting mat. The generator
+also ships each piece's exact 2D→3D map as `savedPositions`, so the studio shows the finished lantern
+immediately rather than asking the solver to fold a sphere out of a flat spiral — which nothing in
+the physics would drive it to do.
+
 ## Development
 
 Use pnpm from this directory:

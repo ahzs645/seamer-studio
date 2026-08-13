@@ -215,6 +215,16 @@ export class ClothSimulation {
     this.engine.setSelfCollisionEnabled(enabled);
   }
 
+  /** Total gated stitches — the top of the assembly timeline. */
+  get stitchCount(): number {
+    return this.simData.stitchCount;
+  }
+
+  /** Close stitches below `count`; the rest stay loose. Drives the assembly recording. */
+  setSewnUpTo(count: number) {
+    this.engine.setSewnUpTo(count);
+  }
+
   /** Re-point the anchor targets at the latest settled positions and softly hold them. Used after a
    *  body-change re-drape so the garment gently holds the NEW clean drape (not a rigid freeze). */
   reanchorToSettled(scale = 0.25) {

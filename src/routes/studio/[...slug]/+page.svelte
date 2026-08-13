@@ -5,6 +5,7 @@
   import { replaceState } from '$app/navigation';
   import PatternCanvas2D from '$lib/components/PatternCanvas2D.svelte';
   import PatternScene3D from '$lib/components/PatternScene3D.svelte';
+  import GlobeLanternDialog from '$lib/components/GlobeLanternDialog.svelte';
   import StudioToolbar from '$lib/components/StudioToolbar.svelte';
   import PropertyPanel from '$lib/components/PropertyPanel.svelte';
   import LayerPanel from '$lib/components/LayerPanel.svelte';
@@ -721,6 +722,19 @@
     };
   }
 
+  let showGlobeLantern = $state(false);
+
+  /** Adopt a freshly generated pattern as the open document, exactly as a template load does. */
+  async function adoptGeneratedPattern(generated: Pattern) {
+    const data = normalizePattern({ ...generated, id: crypto.randomUUID(), versionId: crypto.randomUUID(), isPublic: false });
+    currentPattern = data;
+    patternName = data.name;
+    restoreWorkspace(data);
+    pattern.set(data);
+    await restoreHistory(data.id);
+    saved = false;
+  }
+
   async function loadTemplate(key: string) {
     const tpl = templatePatterns[key];
     if (!tpl) return;
@@ -895,6 +909,13 @@
               </button>
             </li>
           {/each}
+          <li class="menu-title pt-2"><span>Generators</span></li>
+          <li>
+            <button class="w-full text-left" onclick={() => (showGlobeLantern = true)} data-testid="template-globe-lantern">
+              <span class="block truncate text-sm font-medium">Globe lantern…</span>
+              <span class="block truncate text-xs opacity-55">Wire-in-seam sphere from a coiled strip — helix or stacked rings</span>
+            </button>
+          </li>
           <li class="menu-title pt-2"><span>Drafting examples</span></li>
           {#each draftingTemplates as tpl}
             <li>
@@ -1046,6 +1067,11 @@
 {#if showCuttingRoom}<CuttingRoomModal {currentPattern} onchange={handlePatternUpdate} onclose={() => (showCuttingRoom = false)} />{/if}
 {#if showVersions}<VersionsModal {currentPattern} onrestore={applyRestoredVersion} onchange={handlePatternUpdate} onclose={() => (showVersions = false)} />{/if}
 {#if showSettings}<SettingsModal onclose={() => (showSettings = false)} />{/if}
+<GlobeLanternDialog
+  open={showGlobeLantern}
+  ongenerate={(p) => void adoptGeneratedPattern(p)}
+  onclose={() => (showGlobeLantern = false)}
+/>
 {#if showPrintDialog}<PrintDialog pattern={currentPattern} {patternName} onclose={() => (showPrintDialog = false)} />{/if}
 {#if dxfPending}<DxfImportDialog filename={dxfPending.name} onapply={importDxfWithOptions} oncancel={() => (dxfPending = null)} />{/if}
 {#if svgPending}<SvgImportDialog filename={svgPending.name} onapply={importSvgWithOptions} oncancel={() => (svgPending = null)} />{/if}

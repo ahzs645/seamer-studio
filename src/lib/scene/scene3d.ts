@@ -23,6 +23,11 @@ import { cylinderRefit } from '@seamer/cloth-sim';
 import { toOBJ, toSTL } from '@atelier/io/three';
 import { SolverRunner, requestDevice, isWebGPUAvailable } from '@atelier/sim';
 import {
+  recordAssembly,
+  type AssemblyRecording,
+  type RecordOptions
+} from '$lib/timeline/assemblyRecording';
+import {
   docToWorld,
   worldToDoc,
   type Viewport
@@ -1453,6 +1458,65 @@ export class PatternRenderer {
       this.releaseSimulationLease = this.viewport.acquireRenderLease('cloth-solver');
     }
     this.simRunner?.start();
+  }
+
+  /** Show the wire sewn into each channel (lantern ribs, boning, hoops). */
+  setShowWires(show: boolean) {
+    this.overlays.setShowWires(show);
+    this.invalidate();
+  }
+
+  /**
+   * Record the garment sewing itself together.
+   *
+   * The live solver is paused first: it writes into the same particle buffer, and a recording that
+   * shared it would capture frames from two different clocks. `from` picks the starting state —
+   * 'saved' holds pieces where they already belong and only opens the seams (right for a generated
+   * lantern, whose drape is known exactly), 'arranged' starts from the pre-drape layout, which is a
+   * true assembly for a garment arranged on a body.
+   */
+  async recordAssemblyTimeline(
+    options: RecordOptions & { from?: 'saved' | 'arranged' } = {}
+  ): Promise<AssemblyRecording | null> {
+    const prepared = this.prepared;
+    if (!prepared) return null;
+    const sim = await this.ensureSim(false);
+    if (!sim) return null;
+    this.pauseSimulation();
+
+    const from = options.from ?? (this.patternHasSavedDrape() ? 'saved' : 'arranged');
+    const recording = await recordAssembly(
+      {
+        stitchCount: sim.stitchCount,
+        setSewnUpTo: (count) => sim.setSewnUpTo(count),
+        step: () => sim.step(),
+        reset: () => (from === 'saved' ? sim.resetToSaved() : sim.resetToArranged())
+      },
+      prepared.simData.assemblySteps,
+      prepared.simData.particleCount,
+      options
+    );
+
+    // Leave the solver fully sewn again, or the next Play would continue from a half-open garment.
+    sim.setSewnUpTo(sim.stitchCount);
+    return recording;
+  }
+
+  /** True when the pattern ships its own drape, so a recording can start from the finished form. */
+  private patternHasSavedDrape(): boolean {
+    return !!this.pattern?.pieces.some(
+      (piece) => (piece.settings3d.savedPositions?.length ?? 0) >= 15
+    );
+  }
+
+  /** Paint a recorded frame. Pass null to hand the view back to the live/settled positions. */
+  showAssemblyFrame(positions: Float32Array | null) {
+    const fallback = this.sim?.positions ?? this.prepared?.simData.positions;
+    const next = positions ?? fallback;
+    if (!next) return;
+    this.applyClothPositions(next);
+    this.overlays.updatePositions(next);
+    this.invalidate();
   }
 
   /** Freeze the live solver exactly where it is without welding seams or writing a new saved drape. */

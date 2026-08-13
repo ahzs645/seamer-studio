@@ -11,6 +11,7 @@
     type SeamPick
   } from '@seamer/pattern-model';
   import { PatternRenderer, type DrapeDebugState, type RendererStatus, type SceneMode } from '$lib/scene/scene3d';
+  import AssemblyTimeline from '$lib/components/AssemblyTimeline.svelte';
   import { createSeamerAoPass } from '$lib/scene/n8aoPost';
   import type { SimConfig } from '@seamer/cloth-sim';
   import { isDarkTheme, toggleTheme, applyStoredTheme, onThemeChange } from '$lib/utils/theme';
@@ -512,6 +513,18 @@
 
   // Simulation controls: expose the solver parameters (matches the source's "Simulation controls").
   let showSimPanel = $state(false);
+  let showTimeline = $state(false);
+  let showWires = $state(true);
+
+  function toggleTimeline() {
+    showTimeline = !showTimeline;
+    // A recording drives the mesh directly; leaving the solver running would fight it for the buffer.
+    if (showTimeline && status === 'simulating') renderer?.pauseSimulation();
+  }
+  function toggleWires() {
+    showWires = !showWires;
+    renderer?.setShowWires(showWires);
+  }
   let stretchError = $state<number | null>(null);
   let simCfg = $state<SimConfig | null>(null);
   let cameraFov = $state(54);
@@ -558,6 +571,8 @@
     { label: sceneMode === 'arrange' && arrangeKind === 'manipulate' ? 'Exit move mode' : 'Move pieces (M)', icon: 'open_with', onClick: toggleManipulateMode, active: () => sceneMode === 'arrange' && arrangeKind === 'manipulate', shortcut: 'M' },
     { label: frozenSelected ? 'Unfreeze piece' : 'Freeze piece', icon: frozenSelected ? 'lock_open' : 'lock', onClick: toggleFreezeSelected, active: () => frozenSelected },
     { label: 'Simulation controls', icon: 'tune', onClick: toggleSimPanel, active: () => showSimPanel },
+    { label: 'Assembly timeline', icon: 'linear_scale', onClick: toggleTimeline, active: () => showTimeline, sep: true },
+    { label: showWires ? 'Hide wires' : 'Show wires', icon: 'cable', onClick: toggleWires, active: () => showWires },
     { label: dark ? 'Light mode' : 'Dark mode', icon: dark ? 'light_mode' : 'dark_mode', onClick: toggleDark, active: () => dark, sep: true },
     { label: 'Download as OBJ', icon: 'download', onClick: downloadOBJ },
     { label: 'Download as STL', icon: 'deployed_code', onClick: () => void downloadSTL() },
@@ -646,6 +661,18 @@
       {#if arrangeKind === 'manipulate'}
         <span class="text-[10px] opacity-60 bg-base-200/70 rounded px-2 py-0.5">Drag a piece off the body — Settle eases it back into place</span>
       {/if}
+    </div>
+  {/if}
+
+  <!-- Assembly timeline: record the garment sewing itself, then scrub the recording -->
+  {#if showTimeline}
+    <div class="absolute bottom-3 left-1/2 -translate-x-1/2 z-10">
+      <AssemblyTimeline
+        disabled={status !== 'ready' && status !== 'simulating'}
+        record={(options) => renderer?.recordAssemblyTimeline(options) ?? Promise.resolve(null)}
+        showFrame={(positions) => renderer?.showAssemblyFrame(positions)}
+        onclose={() => (showTimeline = false)}
+      />
     </div>
   {/if}
 
