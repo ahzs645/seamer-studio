@@ -512,10 +512,16 @@
    * plan there is not room for every name at once, and inventing room by pushing chips far away
    * would only make them lie about which piece they belong to. Hover answers the question instead:
    * point at a piece and its name is always there, wherever it is and however tight the coil.
+   *
+   * Hovering also clears the piece itself. Naming a piece you still cannot see is only half an
+   * answer, so every OTHER chip resting on the hovered outline is hidden for as long as the cursor
+   * is on it — in a tight coil that is the difference between reading the name and reading the
+   * shape it belongs to.
    */
   function drawPieceLabels(
     c: CanvasRenderingContext2D,
-    entries: { id: string; text: string; x: number; y: number }[]
+    entries: { id: string; text: string; x: number; y: number }[],
+    hoveredOutline: Vec2[] | null
   ): void {
     if (!entries.length) return;
     const hovered = entries.find((e) => e.id === hoveredPieceId) ?? null;
@@ -523,8 +529,22 @@
     // reflow every other chip on each mouse move, which reads as the plan twitching under the
     // cursor. The set stays put and the hovered chip is simply drawn over it.
     const placements = layoutPieceLabels(c, entries);
+
+    /**
+     * Does this chip sit on the hovered piece? A thin coil's bounding box is mostly empty, so test
+     * the outline itself: any sampled point of it landing inside the chip means the chip is
+     * covering part of the shape.
+     */
+    const coversHovered = (l: LabelPlacement): boolean => {
+      if (!hoveredOutline) return false;
+      const x0 = l.x - l.w / 2 - 2, x1 = l.x + l.w / 2 + 2;
+      const y0 = l.y - l.h / 2 - 2, y1 = l.y + l.h / 2 + 2;
+      return hoveredOutline.some((q) => q.x >= x0 && q.x <= x1 && q.y >= y0 && q.y <= y1);
+    };
+
     for (const label of placements) {
       const isHovered = label.id === hoveredPieceId;
+      if (!isHovered && coversHovered(label)) continue; // get out of the way of what is being read
       const moved = Math.hypot(label.x - label.anchorX, label.y - label.anchorY) > label.h;
       // a chip that had to move draws a leader back to its piece, so it still reads as a label for
       // that piece and not a stray tag floating over the plan
@@ -1017,6 +1037,8 @@
     }
 
     const pendingLabels: { id: string; text: string; x: number; y: number }[] = [];
+    /** The hovered piece's outline in canvas space — chips sitting on it are hidden while hovering. */
+    let hoveredOutline: Vec2[] | null = null;
     for (const piece of currentPattern.pieces) {
       if (piece.hidden || !layerVisible(piece.layerId)) continue; // hidden piece or hidden layer
       const isSelected = pieceIds.has(piece.id);
@@ -1118,6 +1140,7 @@
       }
 
       // grain line through centroid (magenta, like the source)
+      if (piece.id === hoveredPieceId) hoveredOutline = outline.map(toCanvas);
       const cen = polygonCentroid(outline);
       const o0 = tf({ x: 0, y: 0 });
       const gv = piece.grainVector;
@@ -1517,7 +1540,7 @@
 
     // Piece names last of all, so nothing — pieces, notches, markers, seam overlays — can cover
     // the one thing you read to tell the pieces apart.
-    drawPieceLabels(c, pendingLabels);
+    drawPieceLabels(c, pendingLabels, hoveredOutline);
 
     // compass — a small orientation widget in the top-right corner showing the canvas axes
     // (pattern +y is up = N, +x is right = E)
