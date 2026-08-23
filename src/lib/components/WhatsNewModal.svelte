@@ -62,12 +62,14 @@
   }
 </script>
 
+<svelte:window onkeydown={(e) => { if (notes && e.key === 'Escape') dismiss(); }} />
+
 {#if notes}
   <div
     class="fixed inset-0 z-[210] flex items-center justify-center bg-black/40"
     role="button" tabindex="-1"
     onclick={(e) => { if (e.target === e.currentTarget) dismiss(); }}
-    onkeydown={(e) => e.key === 'Escape' && dismiss()}
+    onkeydown={() => {}}
   >
     <div class="bg-base-100 w-[min(520px,92vw)] rounded-lg shadow-2xl p-5" role="dialog" aria-modal="true" aria-label="Pattern Studio update">
       <div class="flex items-center justify-between mb-1">

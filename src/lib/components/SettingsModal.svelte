@@ -12,11 +12,13 @@
   function flipTheme() { toggleTheme(); dark = isDarkTheme(); }
 </script>
 
+<svelte:window onkeydown={(e) => { if (e.key === 'Escape') onclose(); }} />
+
 <div
   class="fixed inset-0 z-[200] flex items-center justify-center bg-black/40"
   role="button" tabindex="-1"
   onclick={(e) => { if (e.target === e.currentTarget) onclose(); }}
-  onkeydown={(e) => e.key === 'Escape' && onclose()}
+  onkeydown={() => {}}
 >
   <div class="bg-base-100 w-[min(440px,92vw)] rounded-lg shadow-2xl p-4 space-y-3" role="dialog" aria-label="Settings">
     <div class="flex items-center justify-between">
@@ -53,7 +55,13 @@
       <label class="flex items-center justify-between gap-2"><span>Autosave every</span>
         <span class="flex items-center gap-1">
           <input type="number" min="2" max="120" step="1" class="input input-bordered input-sm w-20" value={$autoSaveSeconds}
-            oninput={(e) => autoSaveSeconds.set(Math.max(2, Math.min(120, parseInt(e.currentTarget.value) || 5)))} />
+            onchange={(e) => {
+              // commit on Enter/blur so multi-digit values can be typed freely; clamp only then
+              const v = parseInt(e.currentTarget.value);
+              const s = Number.isFinite(v) ? Math.max(2, Math.min(120, v)) : $autoSaveSeconds;
+              autoSaveSeconds.set(s);
+              e.currentTarget.value = String(s);
+            }} />
           <span class="text-base-content/60">s</span>
         </span></label>
 

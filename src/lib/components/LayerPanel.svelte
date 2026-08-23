@@ -150,12 +150,13 @@
           </div>
           <label class="flex items-center gap-2">
             <span class="w-16">Width</span>
-            <input type="range" min="0.5" max="4" step="0.5" class="range range-xs flex-1" value={st.lineWidth ?? 1} onchange={(e) => setStyle(layer.id, { lineWidth: +(e.currentTarget as HTMLInputElement).value })} />
+            <!-- oninput so the canvas tracks the drag live; rapid updates coalesce into one undo entry (history coalesceMs) -->
+            <input type="range" min="0.5" max="4" step="0.5" class="range range-xs flex-1" value={st.lineWidth ?? 1} oninput={(e) => setStyle(layer.id, { lineWidth: +(e.currentTarget as HTMLInputElement).value })} />
             <span class="w-6 text-right">{st.lineWidth ?? 1}</span>
           </label>
           <label class="flex items-center gap-2">
             <span class="w-16">Opacity</span>
-            <input type="range" min="0.1" max="1" step="0.1" class="range range-xs flex-1" value={st.opacity ?? 1} onchange={(e) => setStyle(layer.id, { opacity: +(e.currentTarget as HTMLInputElement).value })} />
+            <input type="range" min="0.1" max="1" step="0.1" class="range range-xs flex-1" value={st.opacity ?? 1} oninput={(e) => setStyle(layer.id, { opacity: +(e.currentTarget as HTMLInputElement).value })} />
             <span class="w-6 text-right">{st.opacity ?? 1}</span>
           </label>
           <label class="flex items-center gap-2">

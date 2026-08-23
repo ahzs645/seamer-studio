@@ -26,6 +26,7 @@
   import { isDarkTheme, onThemeChange } from '$lib/utils/theme';
   import DrawingTools from '$lib/components/DrawingTools.svelte';
   import ContextMenu, { type MenuItem } from '$lib/components/ContextMenu.svelte';
+  import NumericInput from '$lib/components/NumericInput.svelte';
   import { toast } from '$lib/stores/toast';
   import { selectedTool, zoom, panOffset, selectedSeamId, seamTool, pathPickRequest, cursorMm, interactionMode, frozenSnapshotOpacity, pendingPaste, type PendingPaste } from '$lib/stores/pattern';
   import {
@@ -760,7 +761,7 @@
       } else if ((e.metaKey || e.ctrlKey) && (e.key === '-' || e.key === '=' || e.key === '+')) {
         e.preventDefault();
         const f = e.key === '-' ? 1 / 1.25 : 1.25;
-        zoom.update((z) => Math.max(0.05, Math.min(20, z * f)));
+        zoom.update((z) => Math.max(0.02, Math.min(20, z * f))); // min matches the toolbar's 0.02 clamp
       }
     };
     window.addEventListener('keydown', onKey);
@@ -3511,11 +3512,11 @@
         <input type="range" class="range range-xs" min="0.05" max="1" step="0.05" value={bgOpacity} oninput={(e) => { bgOpacity = parseFloat(e.currentTarget.value); render(); }} /></label>
       {#if bgImage}
         <label class="flex items-center justify-between gap-2">Width (mm)
-          <input type="number" step="10" class="input input-bordered input-xs w-20" value={bgWidthMm} oninput={(e) => { bgWidthMm = parseFloat(e.currentTarget.value) || 1; render(); }} /></label>
+          <NumericInput step="10" class="input input-bordered input-xs w-20" value={bgWidthMm} oncommit={(v) => { bgWidthMm = v || 1; render(); }} /></label>
       {/if}
       <div class="grid grid-cols-2 gap-1">
-        <label class="flex items-center gap-1">X<input type="number" step="5" class="input input-bordered input-xs w-full" value={bgX} oninput={(e) => { bgX = parseFloat(e.currentTarget.value) || 0; render(); }} /></label>
-        <label class="flex items-center gap-1">Y<input type="number" step="5" class="input input-bordered input-xs w-full" value={bgY} oninput={(e) => { bgY = parseFloat(e.currentTarget.value) || 0; render(); }} /></label>
+        <label class="flex items-center gap-1">X<NumericInput step="5" class="input input-bordered input-xs w-full" value={bgX} oncommit={(v) => { bgX = v; render(); }} /></label>
+        <label class="flex items-center gap-1">Y<NumericInput step="5" class="input input-bordered input-xs w-full" value={bgY} oncommit={(v) => { bgY = v; render(); }} /></label>
       </div>
 
       {#if bgImage}

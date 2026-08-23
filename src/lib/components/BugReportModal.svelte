@@ -56,11 +56,13 @@
   }
 </script>
 
+<svelte:window onkeydown={(e) => { if (e.key === 'Escape') onclose(); }} />
+
 <div
   class="fixed inset-0 z-[200] flex items-center justify-center bg-black/40"
   role="button" tabindex="-1"
   onclick={(e) => { if (e.target === e.currentTarget) onclose(); }}
-  onkeydown={(e) => e.key === 'Escape' && onclose()}
+  onkeydown={() => {}}
 >
   <div class="bg-base-100 w-[min(560px,92vw)] rounded-lg shadow-2xl p-4" role="dialog" aria-label="Send feedback">
     <div class="flex items-center justify-between mb-3">

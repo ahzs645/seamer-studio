@@ -27,10 +27,9 @@
 	}
 </script>
 
-<div class="dropdown dropdown-end">
+<div class="relative">
 	<button
 		type="button"
-		tabindex="0"
 		class="btn btn-ghost btn-xs gap-1"
 		class:text-error={errorCount > 0}
 		class:text-warning={errorCount === 0 && warnCount > 0}
@@ -43,7 +42,9 @@
 		{#if errorCount + warnCount > 0}<span class="text-xs tabular-nums">{errorCount + warnCount}</span>{/if}
 	</button>
 	{#if open}
-		<div class="dropdown-content z-[60] mt-1 w-80 max-h-96 overflow-y-auto bg-base-100 border border-base-300 rounded-box shadow-lg p-2">
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div class="fixed inset-0 z-40" onclick={() => (open = false)} onkeydown={() => {}} role="button" tabindex="-1"></div>
+		<div class="absolute right-0 z-[60] mt-1 w-80 max-h-96 overflow-y-auto bg-base-100 border border-base-300 rounded-box shadow-lg p-2">
 			{#if issues.length === 0}
 				<div class="flex items-center gap-2 text-sm text-success p-2">
 					<span class="material-symbols-rounded notranslate" aria-hidden="true">check_circle</span>

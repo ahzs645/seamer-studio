@@ -6,6 +6,18 @@
   body {
     @apply font-sans;
   }
+
+  /* Hide the native number-input spinners: inside the tiny input-xs boxes they collide
+     with the digits and duplicate the app's own stepper controls. */
+  input[type='number']::-webkit-inner-spin-button,
+  input[type='number']::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  input[type='number'] {
+    -moz-appearance: textfield;
+    appearance: textfield;
+  }
 }
 
 @font-face {

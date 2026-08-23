@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Pattern } from '@seamer/pattern-model';
-  import { BODY_FIELDS, unitSuffix, COLUMN_NAMES, type MeasurementDef } from '@seamer/avatar';
+  import { BODY_FIELDS, unitSuffix, unitKind, COLUMN_NAMES, type MeasurementDef } from '@seamer/avatar';
   import { loadGenderModel } from '@seamer/avatar';
   import { toMetricKnown, completeMeasurements } from '@seamer/avatar';
   import { bodyProfiles, saveBodyProfile, updateBodyProfile, removeBodyProfile } from '$lib/stores/bodyProfiles';
@@ -19,25 +19,47 @@
 
   const imperial = $derived(currentPattern.body.unitType !== 'metric');
 
-  // Estimated measurements (from the statistical model), in DISPLAY units, used as the value when
-  // the user hasn't entered one — so steppers start from the current value, not 0.
+  // Estimated measurements (from the statistical model), in DISPLAY units, shown as placeholders
+  // (and used as slider positions) when the user hasn't entered a value.
   let estimates = $state<Record<string, number>>({});
+  // Per-field slider/clamp bounds in DISPLAY units, derived from the gender model's min/max
+  // (min*0.9 .. max*1.1, like the original); age is fixed at 18..80.
+  let ranges = $state<Record<string, { min: number; max: number }>>({});
+  let estimateToken = 0; // drops stale async loadGenderModel resolutions
 
   $effect(() => {
     const body = currentPattern.body;
     const imp = body.unitType !== 'metric';
+    const token = ++estimateToken;
     loadGenderModel(body.gender)
       .then((model) => {
+        if (token !== estimateToken) return; // stale: a newer body/gender superseded this load
         const full = completeMeasurements(model, toMetricKnown(body)); // metric, COLUMN_NAMES order
         const out: Record<string, number> = {};
+        const bounds: Record<string, { min: number; max: number }> = {};
         for (const f of BODY_FIELDS) {
           let metric: number;
           if (f.name === 'weight') metric = Math.pow(full[COLUMN_NAMES.indexOf('weightCbrt')] || 0, 3);
           else if (f.name === 'age') metric = full[COLUMN_NAMES.indexOf('age')] || 0;
           else metric = full[COLUMN_NAMES.indexOf(f.name)] || 0;
           out[f.name] = toDisplay(metric, f, imp);
+
+          if (f.kind === 'age') {
+            bounds[f.name] = { min: 18, max: 80 };
+            continue;
+          }
+          const col = model.columnNames.indexOf(f.name === 'weight' ? 'weightCbrt' : f.name);
+          if (col < 0) continue;
+          let lo = model.min[col];
+          let hi = model.max[col];
+          if (f.name === 'weight') { lo = Math.pow(lo, 3); hi = Math.pow(hi, 3); } // cbrt(kg) -> kg
+          bounds[f.name] = {
+            min: Math.round(toDisplay(lo * 0.9, f, imp) * 10) / 10,
+            max: Math.round(toDisplay(hi * 1.1, f, imp) * 10) / 10
+          };
         }
         estimates = out;
+        ranges = bounds;
       })
       .catch(() => {});
   });
@@ -63,8 +85,24 @@
   function setGender(gender: 'male' | 'female' | 'neutral') {
     onchange({ ...currentPattern, body: { ...currentPattern.body, gender, useLegacyDefaultAvatar: false }, hasChanged: true });
   }
+  // Conversion factors matching @seamer/avatar measurements.ts
+  const LB_TO_KG = 0.453592;
+  const IN_TO_CM = 2.54;
+
   function setUnit(unitType: 'imperial' | 'metric') {
-    onchange({ ...currentPattern, body: { ...currentPattern.body, unitType }, hasChanged: true });
+    if (unitType === currentPattern.body.unitType) return;
+    // Stored field values are in display units: convert them so 30 in stays 76.2 cm, not "30 cm".
+    const toImperial = unitType === 'imperial';
+    const fields: Record<string, number> = {};
+    for (const [name, raw] of Object.entries(currentPattern.body.fields)) {
+      if (raw == null || Number.isNaN(raw)) continue;
+      const kind = unitKind(name);
+      let v = raw;
+      if (kind === 'weight') v = toImperial ? raw / LB_TO_KG : raw * LB_TO_KG;
+      else if (kind === 'length') v = toImperial ? raw / IN_TO_CM : raw * IN_TO_CM;
+      fields[name] = Math.round(v * 10) / 10;
+    }
+    onchange({ ...currentPattern, body: { ...currentPattern.body, unitType, fields }, hasChanged: true });
   }
   function useImportedMeasurements() {
     onchange({
@@ -73,12 +111,26 @@
       hasChanged: true
     });
   }
-  function updateField(name: string, value: number) {
-    const fields = { ...currentPattern.body.fields, [name]: Math.round(value * 10) / 10 };
+  /** Clamp to the model-derived range, round to 0.1 (age to 1), commit; returns the committed value. */
+  function updateField(name: string, value: number): number {
+    let v = value;
+    if (!Number.isFinite(v)) return currentPattern.body.fields[name] ?? estimates[name] ?? 0; // no-op on NaN
+    const r = ranges[name];
+    if (r) v = Math.min(r.max, Math.max(r.min, v));
+    v = unitKind(name) === 'age' ? Math.round(v) : Math.round(v * 10) / 10;
+    const fields = { ...currentPattern.body.fields, [name]: v };
     onchange({ ...currentPattern, body: { ...currentPattern.body, fields, useLegacyDefaultAvatar: false }, hasChanged: true });
+    return v;
   }
-  function bump(f: MeasurementDef, dir: number) {
-    updateField(f.name, displayValue(f) + dir * stepSize(f));
+  /** Number-input commit (Enter/blur): NaN/empty reverts the display; otherwise clamp + commit. */
+  function commitInput(f: MeasurementDef, el: HTMLInputElement) {
+    const v = parseFloat(el.value);
+    if (el.value.trim() === '' || !Number.isFinite(v)) {
+      const set = currentPattern.body.fields[f.name];
+      el.value = set != null && !Number.isNaN(set) ? String(set) : '';
+      return;
+    }
+    el.value = String(updateField(f.name, v)); // reflect clamped/rounded value even if state is unchanged
   }
   function clearField(name: string) {
     const fields = { ...currentPattern.body.fields };
@@ -203,29 +255,43 @@
 
   <div class="mb-2">
     <span class="text-xs opacity-70">Measurements</span>
-    <div class="space-y-1 mt-1">
+    <div class="space-y-1.5 mt-1">
       {#each visibleFields as f (f.name)}
-        {@const isEstimate = currentPattern.body.fields[f.name] == null}
-        <div class="flex items-center gap-1">
-          <button class="truncate flex-1 text-left hover:text-accent" title="{f.label} — click to frame in 3D" onclick={() => bodyZoomRequest.set(f.name)}>{f.label}</button>
-          <div class="join">
-            <button class="join-item btn btn-xs px-1.5" aria-label="decrease" onclick={() => bump(f, -1)}>−</button>
+        {@const userValue = currentPattern.body.fields[f.name]}
+        {@const isEstimate = userValue == null}
+        {@const range = ranges[f.name]}
+        <div>
+          <div class="flex items-center gap-1">
+            <button class="truncate flex-1 text-left hover:text-accent" title="{f.label} — click to frame in 3D" onclick={() => bodyZoomRequest.set(f.name)}>{f.label}</button>
+            <span class="text-[10px] opacity-50">{unitSuffix(f.kind, imperial)}</span>
+            <button class="btn btn-xs btn-ghost px-0.5 text-error" title="Reset to estimate" disabled={isEstimate} onclick={() => clearField(f.name)}>×</button>
+          </div>
+          <div class="flex items-center gap-1.5 mt-0.5">
+            <input
+              type="range"
+              class="range range-xs flex-1"
+              min={range?.min ?? 0}
+              max={range?.max ?? 100}
+              step={f.kind === 'age' ? 1 : 0.1}
+              disabled={!range}
+              value={displayValue(f)}
+              oninput={(e) => updateField(f.name, parseFloat(e.currentTarget.value))}
+              aria-label="{f.label} slider"
+            />
             <input
               type="number"
-              class="join-item input input-bordered input-xs w-12 text-right tabular-nums px-1"
-              class:opacity-50={isEstimate}
-              value={displayValue(f).toFixed(f.kind === 'age' ? 0 : 1)}
+              class="input input-bordered input-xs w-16 text-right tabular-nums px-1"
+              value={userValue ?? ''}
+              placeholder={(estimates[f.name] ?? 0).toFixed(f.kind === 'age' ? 0 : 1)}
+              min={range?.min}
+              max={range?.max}
               step={stepSize(f)}
-              oninput={(e) => { const v = parseFloat(e.currentTarget.value); if (!Number.isNaN(v)) updateField(f.name, v); }}
+              onfocus={(e) => e.currentTarget.select()}
+              onwheel={(e) => { if (document.activeElement === e.currentTarget) e.preventDefault(); }}
+              onchange={(e) => commitInput(f, e.currentTarget)}
+              aria-label={f.label}
             />
-            <button class="join-item btn btn-xs px-1.5" aria-label="increase" onclick={() => bump(f, 1)}>+</button>
           </div>
-          <span class="text-[10px] opacity-50 w-5">{unitSuffix(f.kind, imperial)}</span>
-          {#if !isEstimate}
-            <button class="btn btn-xs btn-ghost px-0.5 text-error" title="Reset to estimate" onclick={() => clearField(f.name)}>×</button>
-          {:else}
-            <span class="w-4"></span>
-          {/if}
         </div>
       {/each}
     </div>

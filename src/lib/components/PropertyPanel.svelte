@@ -33,6 +33,7 @@
   import { MATERIAL_PRESETS, getPreset } from '$lib/data/materialPresets';
   import { rebakeArc, arcCenter } from '@seamer/pattern-model/utils/arcParametric';
   import TextureMapSource from '$lib/components/TextureMapSource.svelte';
+  import NumericInput from '$lib/components/NumericInput.svelte';
 
   interface Props {
     currentPattern: Pattern;
@@ -66,7 +67,8 @@
     if (pathIds.size !== 1) return null;
     const pathId = [...pathIds][0];
     const path = currentPattern.paths.find((p) => p.id === pathId);
-    if (!path) return null;
+    // Parametric arcs get the dedicated Arc editor — don't also offer the generic Edge editor.
+    if (!path || path.arc) return null;
     const byId = (id: string) => currentPattern.points.find((q) => q.id === id) ?? null;
     for (const piece of currentPattern.pieces) {
       if (pieceIds.size > 0 && !pieceIds.has(piece.id)) continue;
@@ -678,9 +680,9 @@
       {#if !linkWarpWeft}{@render matSlider('Stretch weft', m.stretchWeftValue, 0, 100, 1, (v) => setStretch(m.id, 'weft', v))}{/if}
       {@render matSlider('Bend', m.bendValue, 0, 100, 1, (v) => updateMaterial(m.id, (x) => ({ ...x, bendValue: v })))}
       <label class="flex flex-col gap-0.5">Simulation thickness (mm)
-        <input type="number" step="0.1" class="input input-bordered input-xs" value={m.thickness} oninput={(e) => updateMaterial(m.id, (x) => ({ ...x, thickness: parseFloat(e.currentTarget.value) || 0 }))} /></label>
+        <NumericInput step="0.1" class="input input-bordered input-xs" value={m.thickness} oncommit={(v) => updateMaterial(m.id, (x) => ({ ...x, thickness: v }))} /></label>
       <label class="flex flex-col gap-0.5">Weight (g/m²)
-        <input type="number" step="1" class="input input-bordered input-xs" value={m.weight} oninput={(e) => updateMaterial(m.id, (x) => ({ ...x, weight: parseFloat(e.currentTarget.value) || 0 }))} /></label>
+        <NumericInput step="1" class="input input-bordered input-xs" value={m.weight} oncommit={(v) => updateMaterial(m.id, (x) => ({ ...x, weight: v }))} /></label>
     </div>
 
     <hr class="border-base-200" />
@@ -708,7 +710,7 @@
 
 <div class="w-[340px] border-l bg-base-100 flex flex-col shrink-0 overflow-y-auto" data-tour-id="tour-properties">
   <div class="w-full bg-base-300 p-2 px-4 font-bold text-sm flex items-center sticky z-10 top-0 border-b-2 border-accent">
-    <span data-testid="property-panel-heading">Properties{editingEdge ? ' for Edge' : editingPiece ? ' for Piece' : editingPoint ? ' for Point' : ' for Pattern'}</span>
+    <span data-testid="property-panel-heading">Properties{editingArc ? ' for Arc' : editingEdge ? ' for Edge' : editingPiece ? ' for Piece' : editingPoint ? ' for Point' : ' for Pattern'}</span>
     {#if onclose}
       <button class="ml-auto pt-1" type="button" title="Close properties" aria-label="Close properties" onclick={onclose}>
         <span class="material-symbols-rounded">close</span>
@@ -788,14 +790,14 @@
         </div>
       </div>
       <label class="flex flex-col gap-0.5">Length ({edgeUnit})
-        <input type="number" step="0.1" class="input input-bordered input-xs"
-          value={edgeToDisp(edgeLenMm).toFixed(2)}
-          onchange={(e) => edgeMove(edgeToMm(parseFloat(e.currentTarget.value) || 0), edgeAngleDeg)} /></label>
+        <NumericInput step="0.1" class="input input-bordered input-xs"
+          value={edgeToDisp(edgeLenMm)} decimals={2}
+          oncommit={(v) => edgeMove(edgeToMm(v), edgeAngleDeg)} /></label>
       <label class="flex flex-col gap-0.5">Angle (°)
-        <input type="number" step="0.5" class="input input-bordered input-xs"
+        <NumericInput step="0.5" class="input input-bordered input-xs"
           data-testid="edge-angle-input"
-          value={edgeAngleDeg.toFixed(2)}
-          onchange={(e) => edgeMove(edgeLenMm, parseFloat(e.currentTarget.value) || 0)} /></label>
+          value={edgeAngleDeg} decimals={2}
+          oncommit={(v) => edgeMove(edgeLenMm, v)} /></label>
       <div class="flex gap-1">
         <button class="btn btn-xs flex-1" title="Rotate -1°" onclick={() => edgeMove(edgeLenMm, edgeAngleDeg - 1)}>−1°</button>
         <button class="btn btn-xs flex-1" title="Rotate -0.1°" onclick={() => edgeMove(edgeLenMm, edgeAngleDeg - 0.1)}>−0.1°</button>
@@ -884,11 +886,11 @@
               <span class="text-[11px] font-semibold opacity-70">Cut count</span>
               <div class="grid grid-cols-2 gap-1">
                 <label class="flex flex-col gap-0.5 text-[11px]">Right pieces
-                  <input type="number" min="0" step="1" class="input input-bordered input-xs" value={piece.rightPieces}
-                    oninput={(e) => updatePiece((p) => ({ ...p, rightPieces: Math.max(0, parseInt(e.currentTarget.value) || 0) }), 'Cut count')} /></label>
+                  <NumericInput min="0" step="1" class="input input-bordered input-xs" value={piece.rightPieces}
+                    oncommit={(v) => updatePiece((p) => ({ ...p, rightPieces: Math.max(0, Math.trunc(v)) }), 'Cut count')} /></label>
                 <label class="flex flex-col gap-0.5 text-[11px]">Left (mirrored)
-                  <input type="number" min="0" step="1" class="input input-bordered input-xs" value={piece.leftPieces}
-                    oninput={(e) => updatePiece((p) => ({ ...p, leftPieces: Math.max(0, parseInt(e.currentTarget.value) || 0) }), 'Cut count')} /></label>
+                  <NumericInput min="0" step="1" class="input input-bordered input-xs" value={piece.leftPieces}
+                    oncommit={(v) => updatePiece((p) => ({ ...p, leftPieces: Math.max(0, Math.trunc(v)) }), 'Cut count')} /></label>
               </div>
               <label class="flex items-center justify-between gap-2 text-[11px]">Mirror left along
                 <select class="select select-bordered select-xs w-20" value={piece.mirrorLeftPiecesAxis}
@@ -903,8 +905,8 @@
                 onchange={(e) => updatePiece((p) => { if (e.currentTarget.checked) return { ...p, seamAllowance: currentPattern.seamAllowance }; const { seamAllowance, ...rest } = p; return rest as Piece; }, 'Override seam allowance')} /> Override seam allowance</label>
               {#if piece.seamAllowance !== undefined}
                 <label class="flex items-center justify-between gap-2">Allowance ({unitLabel})
-                  <input type="number" min="0" step="0.1" class="input input-bordered input-xs w-20" value={toUnit(piece.seamAllowance).toFixed(2)}
-                    oninput={(e) => updatePiece((p) => ({ ...p, seamAllowance: fromUnit(parseFloat(e.currentTarget.value) || 0) }), 'Edit seam allowance')} /></label>
+                  <NumericInput min="0" step="0.1" class="input input-bordered input-xs w-20" value={toUnit(piece.seamAllowance)} decimals={2}
+                    oncommit={(v) => updatePiece((p) => ({ ...p, seamAllowance: fromUnit(v) }), 'Edit seam allowance')} /></label>
               {:else}
                 <p class="opacity-70">Pattern default: {toUnit(currentPattern.seamAllowance).toFixed(2)} {unitLabel}</p>
               {/if}
@@ -918,8 +920,8 @@
             {:else if s.id === 'orientation'}
               <label class="flex flex-col gap-0.5">Rotation (°)
                 <span class="flex items-center gap-1">
-                  <input type="number" class="input input-bordered input-xs flex-1" value={piece.rotation} step="1" disabled={!!piece.rotationFormula}
-                    oninput={(e) => updatePiece((p) => ({ ...p, rotation: parseFloat(e.currentTarget.value) || 0 }))} />
+                  <NumericInput class="input input-bordered input-xs flex-1" value={piece.rotation} step="1" disabled={!!piece.rotationFormula}
+                    oncommit={(v) => updatePiece((p) => ({ ...p, rotation: v }))} />
                   <button class="btn btn-xs px-1" class:btn-accent={!!piece.rotationFormula} title="Drive rotation with a formula (degrees)"
                     onclick={() => (formulaEditKey = formulaEditKey === `rot:${piece.id}` ? null : `rot:${piece.id}`)}>ƒ</button>
                 </span></label>
@@ -928,10 +930,10 @@
                   onchange={(e) => setPieceFormula(piece.id, 'rotation', e.currentTarget.value)} />
               {/if}
               <div class="grid grid-cols-2 gap-1">
-                <label>Grain X<input type="number" step="0.1" class="input input-bordered input-xs w-full" value={piece.grainVector.x} disabled={!!piece.grainFormula}
-                  oninput={(e) => updatePiece((p) => ({ ...p, grainVector: { ...p.grainVector, x: parseFloat(e.currentTarget.value) || 0 } }))} /></label>
-                <label>Grain Y<input type="number" step="0.1" class="input input-bordered input-xs w-full" value={piece.grainVector.y} disabled={!!piece.grainFormula}
-                  oninput={(e) => updatePiece((p) => ({ ...p, grainVector: { ...p.grainVector, y: parseFloat(e.currentTarget.value) || 0 } }))} /></label>
+                <label>Grain X<NumericInput step="0.1" class="input input-bordered input-xs w-full" value={piece.grainVector.x} disabled={!!piece.grainFormula}
+                  oncommit={(v) => updatePiece((p) => ({ ...p, grainVector: { ...p.grainVector, x: v } }))} /></label>
+                <label>Grain Y<NumericInput step="0.1" class="input input-bordered input-xs w-full" value={piece.grainVector.y} disabled={!!piece.grainFormula}
+                  oncommit={(v) => updatePiece((p) => ({ ...p, grainVector: { ...p.grainVector, y: v } }))} /></label>
               </div>
               <label class="flex items-center justify-between gap-2 text-[11px]">Grain angle formula (°)
                 <button class="btn btn-xs px-1" class:btn-accent={!!piece.grainFormula}
@@ -991,8 +993,8 @@
                     {#if s.id === 'internal'}
                       <div class="border-t border-base-200 px-2 py-1.5 bg-base-100 space-y-1">
                         <label class="flex items-center justify-between gap-2 text-[11px]">Fold angle (°) — dart/pleat dihedral
-                          <input type="number" step="1" class="input input-bordered input-xs w-20" value={pp.foldAngle ?? 0}
-                            oninput={(e) => updateInternalPath(pp.id, { foldAngle: parseFloat(e.currentTarget.value) || 0 })} /></label>
+                          <NumericInput step="1" class="input input-bordered input-xs w-20" value={pp.foldAngle ?? 0}
+                            oncommit={(v) => updateInternalPath(pp.id, { foldAngle: v })} /></label>
                         <label class="flex items-center gap-2 text-[11px]" title="Bake this style line into the 3D fabric texture">
                           <input type="checkbox" class="checkbox checkbox-xs" checked={pp.showIn3d !== false}
                             onchange={(e) => updateInternalPath(pp.id, { showIn3d: e.currentTarget.checked }, 'Show line in 3D')} /> Show in 3D</label>
@@ -1015,16 +1017,16 @@
                           </div>
                           {#if joinType === 'radius'}
                             <label class="flex items-center justify-between gap-2 text-[11px]">Radius ({unitLabel})
-                              <input type="number" min="0" step="0.1" class="input input-bordered input-xs w-20" value={toUnit(cornerValueMm(pp)).toFixed(2)}
-                                oninput={(e) => setCornerValueMm(pp, fromUnit(parseFloat(e.currentTarget.value) || 0))} /></label>
+                              <NumericInput min="0" step="0.1" class="input input-bordered input-xs w-20" value={toUnit(cornerValueMm(pp))} decimals={2}
+                                oncommit={(v) => setCornerValueMm(pp, fromUnit(v))} /></label>
                           {:else if joinType === 'byLength'}
                             <label class="flex items-center justify-between gap-2 text-[11px]">Corner length ({unitLabel})
-                              <input type="number" min="0" step="0.1" class="input input-bordered input-xs w-20" value={toUnit(cornerValueMm(pp)).toFixed(2)}
-                                oninput={(e) => setCornerValueMm(pp, fromUnit(parseFloat(e.currentTarget.value) || 0))} /></label>
+                              <NumericInput min="0" step="0.1" class="input input-bordered input-xs w-20" value={toUnit(cornerValueMm(pp))} decimals={2}
+                                oncommit={(v) => setCornerValueMm(pp, fromUnit(v))} /></label>
                           {:else if joinType === 'intersection'}
                             <label class="flex items-center justify-between gap-2 text-[11px]">Max length ({unitLabel}, 0 = uncapped)
-                              <input type="number" min="0" step="0.1" class="input input-bordered input-xs w-20" value={toUnit(cornerValueMm(pp)).toFixed(2)}
-                                oninput={(e) => setCornerValueMm(pp, fromUnit(parseFloat(e.currentTarget.value) || 0))} /></label>
+                              <NumericInput min="0" step="0.1" class="input input-bordered input-xs w-20" value={toUnit(cornerValueMm(pp))} decimals={2}
+                                oncommit={(v) => setCornerValueMm(pp, fromUnit(v))} /></label>
                           {:else}
                             <p class="text-[10px] opacity-50">{CORNER_TYPES.find((c) => c.id === joinType)?.title}</p>
                           {/if}
@@ -1037,8 +1039,8 @@
                           {#if pp.seamAllowance !== undefined}
                             <label class="flex items-center justify-between gap-2 text-[11px]">Edge allowance ({unitLabel})
                               <span class="flex items-center gap-1">
-                                <input type="number" min="0" step="0.1" class="input input-bordered input-xs w-20" value={toUnit(pp.seamAllowance).toFixed(2)} disabled={!!pp.seamAllowanceFormula}
-                                  oninput={(e) => updateMainPath(pp.id, { seamAllowance: fromUnit(parseFloat(e.currentTarget.value) || 0) }, 'Edit edge allowance')} />
+                                <NumericInput min="0" step="0.1" class="input input-bordered input-xs w-20" value={toUnit(pp.seamAllowance)} decimals={2} disabled={!!pp.seamAllowanceFormula}
+                                  oncommit={(v) => updateMainPath(pp.id, { seamAllowance: fromUnit(v) }, 'Edit edge allowance')} />
                                 <button class="btn btn-xs px-1" class:btn-accent={!!pp.seamAllowanceFormula} title="Drive with a formula (variables/measurements by name; mm)"
                                   onclick={() => (formulaEditKey = formulaEditKey === `sa:${pp.id}` ? null : `sa:${pp.id}`)}>ƒ</button>
                               </span></label>
@@ -1073,18 +1075,18 @@
                             </p>
                             <label class="flex items-center justify-between gap-2 text-[11px]"
                               title="Extra CUT width for the fold-back that houses the wire. The finished edge does not move — this is added to the edge's seam allowance.">Channel ({unitLabel})
-                              <input type="number" min="0" step="0.5" class="input input-bordered input-xs w-20"
-                                value={toUnit(wire.channelWidth).toFixed(2)}
-                                oninput={(e) => setWire(pp, { channelWidth: fromUnit(parseFloat(e.currentTarget.value) || 0) })} /></label>
+                              <NumericInput min="0" step="0.5" class="input input-bordered input-xs w-20"
+                                value={toUnit(wire.channelWidth)} decimals={2}
+                                oncommit={(v) => setWire(pp, { channelWidth: fromUnit(v) })} /></label>
                             {#if pp.seamAllowance !== undefined && Math.abs(pp.seamAllowance - (baseAllowanceMm() + wire.channelWidth)) < 1e-6}
                               <p class="text-[10px] opacity-50">Cuts at {toUnit(baseAllowanceMm()).toFixed(2)} + {toUnit(wire.channelWidth).toFixed(2)} = {toUnit(pp.seamAllowance).toFixed(2)} {unitLabel} on this edge.</p>
                             {:else}
                               <p class="text-[10px] opacity-50">This edge has its own allowance ({toUnit(pp.seamAllowance ?? baseAllowanceMm()).toFixed(2)} {unitLabel}), so the channel is not added to it.</p>
                             {/if}
                             <label class="flex items-center justify-between gap-2 text-[11px]">Diameter ({unitLabel})
-                              <input type="number" min="0.1" step="0.1" class="input input-bordered input-xs w-20"
-                                value={toUnit(wire.diameter).toFixed(2)}
-                                oninput={(e) => setWire(pp, { diameter: fromUnit(parseFloat(e.currentTarget.value) || 0.1) })} /></label>
+                              <NumericInput min="0.1" step="0.1" class="input input-bordered input-xs w-20"
+                                value={toUnit(wire.diameter)} decimals={2}
+                                oncommit={(v) => setWire(pp, { diameter: fromUnit(v || 0.1) })} /></label>
                             <label class="flex items-center justify-between gap-2 text-[11px]" title="How hard the wire resists being bent away from the curve the flat pattern gives it">
                               Stiffness
                               <span class="flex items-center gap-1">
@@ -1093,9 +1095,9 @@
                                 <span class="tabular-nums w-6 text-right">{wire.stiffness}</span>
                               </span></label>
                             <label class="flex items-center justify-between gap-2 text-[11px]" title="Annealed aluminium at 1.5 mm is about 4.8 g/m">Weight (g/m)
-                              <input type="number" min="0" step="0.1" class="input input-bordered input-xs w-20"
+                              <NumericInput min="0" step="0.1" class="input input-bordered input-xs w-20"
                                 value={wire.linearMass ?? 0}
-                                oninput={(e) => setWire(pp, { linearMass: parseFloat(e.currentTarget.value) || 0 })} /></label>
+                                oncommit={(v) => setWire(pp, { linearMass: v })} /></label>
                             <label class="flex items-center gap-2 text-[11px]" title="Join the wire end to end — a closed hoop rather than an open rib">
                               <input type="checkbox" class="checkbox checkbox-xs" checked={!!wire.closed}
                                 onchange={(e) => setWire(pp, { closed: e.currentTarget.checked })} /> Closed hoop</label>
@@ -1122,9 +1124,9 @@
                             <div class="space-y-0.5">
                               <div class="flex items-center gap-1">
                                 {#if anchored}
-                                  <input type="number" min="0" step="0.1" class="input input-bordered input-xs flex-1" title="Distance from point ({unitLabel})"
-                                    value={toUnit((n.distance as number) ?? 0).toFixed(1)} disabled={!!n.distanceFormula}
-                                    oninput={(e) => updateNotch(pp, n.id as string, { distance: fromUnit(parseFloat(e.currentTarget.value) || 0) })} />
+                                  <NumericInput min="0" step="0.1" class="input input-bordered input-xs flex-1" title="Distance from point ({unitLabel})"
+                                    value={toUnit((n.distance as number) ?? 0)} decimals={1} disabled={!!n.distanceFormula}
+                                    oncommit={(v) => updateNotch(pp, n.id as string, { distance: fromUnit(v) })} />
                                   <button class="btn btn-xs px-1" class:btn-accent={!!n.distanceFormula} title="Drive the distance with a formula (mm)"
                                     onclick={() => (formulaEditKey = formulaEditKey === `nd:${n.id}` ? null : `nd:${n.id}`)}>ƒ</button>
                                 {:else}
@@ -1135,9 +1137,9 @@
                                   onchange={(e) => updateNotch(pp, n.id as string, { type: e.currentTarget.value as NotchType })}>
                                   {#each NOTCH_TYPES as nt}<option value={nt.id}>{nt.label}</option>{/each}
                                 </select>
-                                <input type="number" min="0" step="0.1" class="input input-bordered input-xs w-14" title="Size ({unitLabel})"
-                                  value={toUnit((n.size as number) ?? currentPattern.defaultNotchSize).toFixed(1)}
-                                  oninput={(e) => updateNotch(pp, n.id as string, { size: fromUnit(parseFloat(e.currentTarget.value) || 0) })} />
+                                <NumericInput min="0" step="0.1" class="input input-bordered input-xs w-14" title="Size ({unitLabel})"
+                                  value={toUnit((n.size as number) ?? currentPattern.defaultNotchSize)} decimals={1}
+                                  oncommit={(v) => updateNotch(pp, n.id as string, { size: fromUnit(v) })} />
                                 <button class="material-symbols-rounded text-base opacity-60 hover:text-error" title="Remove notch" aria-label="Remove notch"
                                   onclick={() => removeNotch(pp, n.id as string)}>delete</button>
                               </div>
@@ -1181,10 +1183,10 @@
                 <input type="text" class="input input-bordered input-xs" value={piece.settings3d.arrangement.cylinderName}
                   oninput={(e) => updateArrangement('cylinderName', e.currentTarget.value)} /></label>
               <div class="grid grid-cols-2 gap-1">
-                <label>u°<input type="number" class="input input-bordered input-xs w-full" value={piece.settings3d.arrangement.uDegrees}
-                  oninput={(e) => updateArrangement('uDegrees', parseFloat(e.currentTarget.value) || 0)} /></label>
-                <label>v<input type="number" step="0.05" class="input input-bordered input-xs w-full" value={piece.settings3d.arrangement.v}
-                  oninput={(e) => updateArrangement('v', parseFloat(e.currentTarget.value) || 0)} /></label>
+                <label>u°<NumericInput class="input input-bordered input-xs w-full" value={piece.settings3d.arrangement.uDegrees}
+                  oncommit={(v) => updateArrangement('uDegrees', v)} /></label>
+                <label>v<NumericInput step="0.05" class="input input-bordered input-xs w-full" value={piece.settings3d.arrangement.v}
+                  oncommit={(v) => updateArrangement('v', v)} /></label>
               </div>
               <label class="flex items-center gap-2"><input type="checkbox" class="checkbox checkbox-xs" checked={piece.settings3d.frozen}
                 onchange={(e) => updatePiece((p) => ({ ...p, settings3d: { ...p.settings3d, frozen: e.currentTarget.checked } }))} /> Freeze piece in simulation</label>
@@ -1193,8 +1195,8 @@
               <label class="flex items-center gap-2"><input type="checkbox" class="checkbox checkbox-xs" checked={piece.settings3d.filterExternalCollisionsByClothNormal}
                 onchange={(e) => updatePiece((p) => ({ ...p, settings3d: { ...p.settings3d, filterExternalCollisionsByClothNormal: e.currentTarget.checked } }))} /> Body collision by normal</label>
               <label class="flex items-center justify-between gap-2">Collision layer
-                <input type="number" min="0" step="1" class="input input-bordered input-xs w-16" value={piece.settings3d.collisionLayer}
-                  oninput={(e) => updatePiece((p) => ({ ...p, settings3d: { ...p.settings3d, collisionLayer: Math.max(0, parseInt(e.currentTarget.value) || 0) } }))} /></label>
+                <NumericInput min="0" step="1" class="input input-bordered input-xs w-16" value={piece.settings3d.collisionLayer}
+                  oncommit={(v) => updatePiece((p) => ({ ...p, settings3d: { ...p.settings3d, collisionLayer: Math.max(0, Math.trunc(v)) } }))} /></label>
               <label class="flex items-center justify-between gap-2">Particle distance
                 <input type="number" min="0" step="1" placeholder="default" class="input input-bordered input-xs w-16" value={piece.settings3d.particleDistance ?? ''}
                   onchange={(e) => { const v = parseFloat(e.currentTarget.value); updatePiece((p) => ({ ...p, settings3d: { ...p.settings3d, particleDistance: Number.isFinite(v) && v > 0 ? v : null } })); }} /></label>
@@ -1215,8 +1217,8 @@
       <label class="flex flex-col gap-0.5">Name
         <input type="text" class="input input-bordered input-xs" value={ep.name} oninput={(e) => updatePoint('name', e.currentTarget.value)} /></label>
       <div class="grid grid-cols-2 gap-1">
-        <label>X (mm)<input type="number" class="input input-bordered input-xs w-full" value={ep.x.toFixed(1)} disabled={!!cn} oninput={(e) => updatePoint('x', parseFloat(e.currentTarget.value) || 0)} step="0.1" /></label>
-        <label>Y (mm)<input type="number" class="input input-bordered input-xs w-full" value={ep.y.toFixed(1)} disabled={!!cn} oninput={(e) => updatePoint('y', parseFloat(e.currentTarget.value) || 0)} step="0.1" /></label>
+        <label>X (mm)<NumericInput class="input input-bordered input-xs w-full" value={ep.x} decimals={1} disabled={!!cn} oncommit={(v) => updatePoint('x', v)} step="0.1" /></label>
+        <label>Y (mm)<NumericInput class="input input-bordered input-xs w-full" value={ep.y} decimals={1} disabled={!!cn} oncommit={(v) => updatePoint('y', v)} step="0.1" /></label>
       </div>
 
       {#if currentPattern.gradingProfile?.rulTable}
@@ -1297,7 +1299,7 @@
                 <select class="select select-bordered select-xs" value={currentPattern.lengthUnit} onchange={(e) => updatePattern({ lengthUnit: e.currentTarget.value as Pattern['lengthUnit'] })}>
                   <option value="cm">Centimeters</option><option value="mm">Millimeters</option><option value="inch">Inches</option></select></label>
               <label class="flex flex-col gap-0.5">Default seam allowance
-                <span class="flex items-center gap-2"><input type="number" step="0.1" class="input input-bordered input-xs w-20" value={toUnit(currentPattern.seamAllowance).toFixed(2)} oninput={(e) => updatePattern({ seamAllowance: fromUnit(parseFloat(e.currentTarget.value) || 0) })} /><span class="opacity-60">{unitLabel}</span></span></label>
+                <span class="flex items-center gap-2"><NumericInput step="0.1" class="input input-bordered input-xs w-20" value={toUnit(currentPattern.seamAllowance)} decimals={2} oncommit={(v) => updatePattern({ seamAllowance: fromUnit(v) })} /><span class="opacity-60">{unitLabel}</span></span></label>
               <div class="flex items-end gap-2">
                 <label class="flex flex-col gap-0.5 flex-1">Default point labeling
                   <select class="select select-bordered select-xs" value={currentPattern.pointLabeling} onchange={(e) => updatePattern({ pointLabeling: e.currentTarget.value })}>
@@ -1307,7 +1309,7 @@
               </div>
               <div class="flex gap-2">
                 <label class="flex flex-col gap-0.5 flex-1">Default notch size
-                  <span class="flex items-center gap-2"><input type="number" step="0.1" class="input input-bordered input-xs w-20" value={toUnit(currentPattern.defaultNotchSize).toFixed(2)} oninput={(e) => updatePattern({ defaultNotchSize: fromUnit(parseFloat(e.currentTarget.value) || 0) })} /><span class="opacity-60">{unitLabel}</span></span></label>
+                  <span class="flex items-center gap-2"><NumericInput step="0.1" class="input input-bordered input-xs w-20" value={toUnit(currentPattern.defaultNotchSize)} decimals={2} oncommit={(v) => updatePattern({ defaultNotchSize: fromUnit(v) })} /><span class="opacity-60">{unitLabel}</span></span></label>
                 <label class="flex flex-col gap-0.5">Notch type
                   <select class="select select-bordered select-xs" value={currentPattern.defaultNotchType ?? 'single'} onchange={(e) => updatePattern({ defaultNotchType: e.currentTarget.value as 'single' | 'double' | 'tee' | 'slit' })}>
                     <option value="single">Single</option><option value="double">Double (balance)</option><option value="tee">Tee</option><option value="slit">Slit</option></select></label>
@@ -1329,8 +1331,8 @@
               <hr class="border-base-200" />
               <span class="text-xs font-semibold opacity-70">Simulation</span>
               <label class="flex items-center justify-between gap-2">Gravity
-                <input type="number" step="0.1" class="input input-bordered input-xs w-20" value={currentPattern.settings3d.gravity[1]}
-                  oninput={(e) => updateSettings3D({ gravity: [currentPattern.settings3d.gravity[0], parseFloat(e.currentTarget.value) || 0, currentPattern.settings3d.gravity[2]] })} /></label>
+                <NumericInput step="0.1" class="input input-bordered input-xs w-20" value={currentPattern.settings3d.gravity[1]}
+                  oncommit={(v) => updateSettings3D({ gravity: [currentPattern.settings3d.gravity[0], v, currentPattern.settings3d.gravity[2]] })} /></label>
               <label class="flex items-center gap-2"><input type="checkbox" class="checkbox checkbox-xs" checked={currentPattern.settings3d.handleSelfCollisions} onchange={(e) => updateSettings3D({ handleSelfCollisions: e.currentTarget.checked })} /> Self-collisions</label>
               <label class="flex items-center gap-2"><input type="checkbox" class="checkbox checkbox-xs" checked={currentPattern.settings3d.forceLowEndHardware} onchange={(e) => updateSettings3D({ forceLowEndHardware: e.currentTarget.checked })} /> Force low-end hardware</label>
               <label class="flex items-center gap-2" title="Debug: pin each piece's topmost particles while simulating"><input type="checkbox" class="checkbox checkbox-xs" checked={currentPattern.settings3d.fixTop ?? false} onchange={(e) => updateSettings3D({ fixTop: e.currentTarget.checked })} /> Fix top (debug pin)</label>
@@ -1347,21 +1349,21 @@
               <label class="flex items-center gap-2"><input type="checkbox" class="checkbox checkbox-xs" checked={currentPattern.settings3d.n8aoEnabled} onchange={(e) => updateSettings3D({ n8aoEnabled: e.currentTarget.checked })} /> Ambient occlusion (N8AO)</label>
               {#if currentPattern.settings3d.n8aoEnabled}
                 <label class="flex items-center justify-between gap-2 text-[11px]">AO intensity
-                  <input type="number" step="0.1" min="0" max="2" class="input input-bordered input-xs w-20" value={currentPattern.settings3d.n8aoIntensity}
-                    oninput={(e) => updateSettings3D({ n8aoIntensity: parseFloat(e.currentTarget.value) || 0 })} /></label>
+                  <NumericInput step="0.1" min="0" max="2" class="input input-bordered input-xs w-20" value={currentPattern.settings3d.n8aoIntensity}
+                    oncommit={(v) => updateSettings3D({ n8aoIntensity: v })} /></label>
                 <label class="flex items-center justify-between gap-2 text-[11px]" title="World-space occlusion radius (m) — larger darkens broader cavities">AO radius (m)
-                  <input type="number" step="0.02" min="0.01" max="1" class="input input-bordered input-xs w-20" value={currentPattern.settings3d.n8aoRadius}
-                    oninput={(e) => updateSettings3D({ n8aoRadius: parseFloat(e.currentTarget.value) || 0.12 })} /></label>
+                  <NumericInput step="0.02" min="0.01" max="1" class="input input-bordered input-xs w-20" value={currentPattern.settings3d.n8aoRadius}
+                    oncommit={(v) => updateSettings3D({ n8aoRadius: v })} /></label>
                 <label class="flex items-center justify-between gap-2 text-[11px]" title="Distance falloff exponent — higher fades occlusion faster with distance">AO falloff
-                  <input type="number" step="0.1" min="0.1" max="4" class="input input-bordered input-xs w-20" value={currentPattern.settings3d.n8aoDistanceFalloff}
-                    oninput={(e) => updateSettings3D({ n8aoDistanceFalloff: parseFloat(e.currentTarget.value) || 1 })} /></label>
+                  <NumericInput step="0.1" min="0.1" max="4" class="input input-bordered input-xs w-20" value={currentPattern.settings3d.n8aoDistanceFalloff}
+                    oncommit={(v) => updateSettings3D({ n8aoDistanceFalloff: v })} /></label>
               {/if}
               <label class="flex items-center justify-between gap-2 text-[11px]" title="Depth of field: 0 = off; lower f-stops blur more away from the orbit target">Bokeh f-stop
-                <input type="number" step="0.5" min="0" class="input input-bordered input-xs w-20" value={currentPattern.settings3d.bokehFStop}
-                  oninput={(e) => updateSettings3D({ bokehFStop: parseFloat(e.currentTarget.value) || 0 })} /></label>
+                <NumericInput step="0.5" min="0" class="input input-bordered input-xs w-20" value={currentPattern.settings3d.bokehFStop}
+                  oncommit={(v) => updateSettings3D({ bokehFStop: v })} /></label>
               <label class="flex items-center justify-between gap-2 text-[11px]">SMAA scale
-                <input type="number" step="1" min="0" class="input input-bordered input-xs w-20" value={currentPattern.settings3d.smaaScale}
-                  oninput={(e) => updateSettings3D({ smaaScale: parseFloat(e.currentTarget.value) || 0 })} /></label>
+                <NumericInput step="1" min="0" class="input input-bordered input-xs w-20" value={currentPattern.settings3d.smaaScale}
+                  oncommit={(v) => updateSettings3D({ smaaScale: v })} /></label>
 
             {:else if s.id === 'sizes'}
               <!-- Sizes -->
@@ -1379,7 +1381,7 @@
                     <div class="flex items-center gap-1">
                       <span class="inline-block w-3 h-3 rounded-full shrink-0" style="background:{sz.color}"></span>
                       <input class="input input-bordered input-xs flex-1 min-w-0" value={sz.name} oninput={(e) => updateSize(sz.id, { name: e.currentTarget.value })} />
-                      <input type="number" step="0.01" class="input input-bordered input-xs w-16" title="Grade scale" value={sz.scale} oninput={(e) => updateSize(sz.id, { scale: parseFloat(e.currentTarget.value) || 1 })} />
+                      <NumericInput step="0.01" class="input input-bordered input-xs w-16" title="Grade scale" value={sz.scale} oncommit={(v) => updateSize(sz.id, { scale: v })} />
                       <button class="btn btn-ghost btn-xs p-1 text-error" title="Remove size" aria-label="Remove size" onclick={() => removeSize(sz.id)}><span class="material-symbols-rounded text-base">delete</span></button>
                     </div>
                   {/each}
@@ -1441,7 +1443,12 @@
                   {/if}
                   <label class="flex flex-col gap-0.5">Value
                     <span class="flex items-center gap-2">
-                      <input type="number" class="input input-bordered input-sm flex-1" value={v.value ?? 0} oninput={(e) => updateVariable(v.id, { value: parseFloat(e.currentTarget.value) || 0, valueFormula: { ...v.valueFormula, formula: e.currentTarget.value } })} />
+                      <!-- Commits on blur/Enter. A formula-free variable keeps its mirrored literal formula in
+                           step; a dialog-set formula is left untouched (only `value` updates). -->
+                      <NumericInput class="input input-bordered input-sm flex-1" value={v.value ?? 0}
+                        oncommit={(num) => updateVariable(v.id, !v.valueFormula?.formula || v.valueFormula.formula === String(v.value)
+                          ? { value: num, valueFormula: { ...v.valueFormula, formula: String(num) } }
+                          : { value: num })} />
                       <select class="select select-bordered select-sm w-16" value={v.valueFormula?.unit ?? 'none'} onchange={(e) => updateVariable(v.id, { valueFormula: { ...v.valueFormula, unit: e.currentTarget.value } })}>
                         <option value="none">none</option><option value="cm">cm</option><option value="mm">mm</option><option value="inch">in</option><option value="percent">%</option><option value="degrees">°</option></select>
                       <button class="btn btn-primary btn-sm w-8 h-8 p-1" title="Formula editor" aria-label="Formula editor" onclick={() => (formulaVarId = v.id)}><span class="material-symbols-rounded">function</span></button>
@@ -1461,7 +1468,7 @@
               </div>
               {#each Object.entries(currentPattern.body.fields) as [name, value]}
                 <label class="flex items-center gap-2"><span class="flex-1 capitalize">{name}</span>
-                  <input type="number" step="0.1" class="input input-bordered input-xs w-20" value={value} oninput={(e) => updateBodyField(name, parseFloat(e.currentTarget.value) || 0)} /></label>
+                  <NumericInput step="0.1" class="input input-bordered input-xs w-20" {value} oncommit={(v) => updateBodyField(name, v)} /></label>
               {/each}
 
             {:else if s.id === 'materials'}
@@ -1513,9 +1520,9 @@
                     </div>
                     <div class="grid grid-cols-3 gap-1">
                       <label class="flex flex-col gap-0.5 text-[11px]">Size (mm)
-                        <input type="number" min="1" step="1" class="input input-bordered input-xs" value={t.fontSize ?? 15} oninput={(e) => updateText(t.id, { fontSize: parseFloat(e.currentTarget.value) || 15 })} /></label>
+                        <NumericInput min="1" step="1" class="input input-bordered input-xs" value={t.fontSize ?? 15} oncommit={(v) => updateText(t.id, { fontSize: v || 15 })} /></label>
                       <label class="flex flex-col gap-0.5 text-[11px]">Angle (°)
-                        <input type="number" step="1" class="input input-bordered input-xs" value={t.rotation ?? 0} oninput={(e) => updateText(t.id, { rotation: parseFloat(e.currentTarget.value) || 0 })} /></label>
+                        <NumericInput step="1" class="input input-bordered input-xs" value={t.rotation ?? 0} oncommit={(v) => updateText(t.id, { rotation: v })} /></label>
                       <label class="flex flex-col gap-0.5 text-[11px]">Color
                         <input type="color" class="w-full h-6 rounded border" value={t.color ?? '#1e293b'} oninput={(e) => updateText(t.id, { color: e.currentTarget.value })} /></label>
                     </div>
@@ -1539,15 +1546,15 @@
                       <div class="w-10 h-10 rounded border border-base-300 shrink-0 bg-base-200" style={`background-image:url('${im.url}');background-size:cover;background-position:center`}></div>
                       <div class="grid grid-cols-2 gap-1 flex-1">
                         <label class="flex flex-col gap-0.5 text-[11px]">Width (mm)
-                          <input type="number" min="1" step="1" class="input input-bordered input-xs" value={(im.width ?? 100).toFixed(0)} oninput={(e) => onchange(imageUpdate(currentPattern, im.id, { width: parseFloat(e.currentTarget.value) || 100 }), 'Resize image')} /></label>
+                          <NumericInput min="1" step="1" class="input input-bordered input-xs" value={im.width ?? 100} decimals={0} oncommit={(v) => onchange(imageUpdate(currentPattern, im.id, { width: v || 100 }), 'Resize image')} /></label>
                         <label class="flex flex-col gap-0.5 text-[11px]">Height (mm)
-                          <input type="number" min="1" step="1" class="input input-bordered input-xs" value={(im.height ?? 100).toFixed(0)} oninput={(e) => onchange(imageUpdate(currentPattern, im.id, { height: parseFloat(e.currentTarget.value) || 100 }), 'Resize image')} /></label>
+                          <NumericInput min="1" step="1" class="input input-bordered input-xs" value={im.height ?? 100} decimals={0} oncommit={(v) => onchange(imageUpdate(currentPattern, im.id, { height: v || 100 }), 'Resize image')} /></label>
                       </div>
                       <button class="btn btn-ghost btn-xs p-1 text-error" title="Delete image" aria-label="Delete image" onclick={() => removeImage(im.id)}><span class="material-symbols-rounded text-base">delete</span></button>
                     </div>
                     <div class="grid grid-cols-2 gap-1">
                       <label class="flex flex-col gap-0.5 text-[11px]">Angle (°)
-                        <input type="number" step="1" class="input input-bordered input-xs" value={im.rotation ?? 0} oninput={(e) => updateImage(im.id, { rotation: parseFloat(e.currentTarget.value) || 0 })} /></label>
+                        <NumericInput step="1" class="input input-bordered input-xs" value={im.rotation ?? 0} oncommit={(v) => updateImage(im.id, { rotation: v })} /></label>
                       <label class="flex flex-col gap-0.5 text-[11px]">Opacity
                         <input type="range" min="0" max="1" step="0.05" class="range range-xs" value={im.opacity ?? 1} oninput={(e) => updateImage(im.id, { opacity: parseFloat(e.currentTarget.value) })} /></label>
                     </div>

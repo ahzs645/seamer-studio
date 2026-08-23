@@ -27,8 +27,11 @@
   function zoomOut() { zoom.update((v) => Math.max(0.02, v * 0.8)); }
 
   function handleKeydown(e: KeyboardEvent) {
-    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+    const t = e.target;
+    if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement || (t instanceof HTMLElement && t.isContentEditable)) return;
     if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return; // plain keys only (Cmd+V etc. are app-level)
+    // while the pointer is over the 3D pane, plain keys (M/A/Space) belong to the 3D scene's shortcuts
+    if (document.querySelector('[data-testid="pattern-scene-3d"]:hover')) return;
     // M doubles as "mirror selection" — an active selection wins over the measure tool
     if (e.key.toLowerCase() === 'm' &&
         (editorView.selection.get('point').size || editorView.selection.get('path').size || editorView.selection.get('piece').size)) return;

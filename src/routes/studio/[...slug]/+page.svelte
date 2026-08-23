@@ -772,8 +772,9 @@
   function handleRedo() { const next = redo($state.snapshot(currentPattern) as Pattern); if (next) { currentPattern = next; patternName = next.name; restoreWorkspace(next); pattern.set(next); saved = false; } }
 
   function handleKeydown(e: KeyboardEvent) {
-    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-    if ((e.metaKey || e.ctrlKey) && e.key === 'z') { e.preventDefault(); e.shiftKey ? handleRedo() : handleUndo(); }
+    const t = e.target;
+    if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement || (t instanceof HTMLElement && t.isContentEditable)) return;
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); e.shiftKey ? handleRedo() : handleUndo(); }
     if ((e.metaKey || e.ctrlKey) && e.key === 's') { e.preventDefault(); handleSave(); }
     if ((e.metaKey || e.ctrlKey) && (e.key === 'd' || e.key === 'D')) { e.preventDefault(); duplicateSelectedPiece(); }
     if ((e.metaKey || e.ctrlKey) && (e.key === 'c' || e.key === 'C')) { e.preventDefault(); handleCopy(); }
@@ -891,7 +892,9 @@
       <span class="text-sm font-lexend font-semibold hidden lg:inline">Pattern Studio</span>
     </div>
     <div class="flex items-center gap-2">
-      <input type="text" class="input input-bordered input-xs w-40 lg:w-56" placeholder="Pattern name..." bind:value={patternName} data-testid="pattern-name-input" />
+      <input type="text" class="input input-bordered input-xs w-40 lg:w-56" placeholder="Pattern name..." bind:value={patternName}
+        oninput={(e) => { currentPattern = { ...currentPattern, name: e.currentTarget.value }; pattern.set(currentPattern); saved = false; }}
+        data-testid="pattern-name-input" />
       <div class="dropdown dropdown-end">
         <div role="button" tabindex="0" class="btn btn-xs btn-ghost" data-testid="templates-menu-trigger">Templates</div>
         <ul class="dropdown-content menu bg-base-200 rounded-box z-50 mt-1 max-h-[80vh] w-80 flex-nowrap overflow-y-auto p-2 shadow-xl">

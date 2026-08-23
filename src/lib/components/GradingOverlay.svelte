@@ -7,8 +7,12 @@
   } from '@seamer/pattern-model';
   import { hasConstraints, solveForSize } from '@seamer/pattern-model/solver/solve';
   import { applyRulOffsetsToPattern } from '$lib/utils/rulImport';
+  import { isDarkTheme, onThemeChange } from '$lib/utils/theme';
 
   let { currentPattern, onclose }: { currentPattern: Pattern; onclose: () => void } = $props();
+
+  // The canvas paints its own background, so follow the app theme instead of hardcoding white/slate.
+  let dark = $state(isDarkTheme());
 
   let tab = $state<'table' | 'overlay'>('overlay');
   let showDraft = $state(false);
@@ -19,7 +23,7 @@
 
   // size layers = base (scale 1) + the pattern's graded sizes
   const sizeLayers = $derived([
-    { id: 'base', name: currentPattern.currentSize || 'Base', scale: 1, color: '#334155' },
+    { id: 'base', name: currentPattern.currentSize || 'Base', scale: 1, color: dark ? '#e2e8f0' : '#334155' },
     ...(currentPattern.gradingProfile?.sizes ?? [])
   ]);
 
@@ -32,7 +36,7 @@
     const c = ctx;
     const W = canvasEl.width, H = canvasEl.height;
     c.clearRect(0, 0, W, H);
-    c.fillStyle = '#ffffff'; c.fillRect(0, 0, W, H);
+    c.fillStyle = dark ? '#1e293b' : '#ffffff'; c.fillRect(0, 0, W, H);
 
     // TRUE grading when points are formula-constrained: re-solve geometry per size from variable
     // overrides. Otherwise fall back to a proportional grade (scale about each piece's origin).
@@ -90,7 +94,7 @@
     };
 
     if (showDraft) {
-      c.strokeStyle = 'rgba(100,116,139,0.5)'; c.lineWidth = 1; c.setLineDash([4, 3]);
+      c.strokeStyle = dark ? 'rgba(148,163,184,0.55)' : 'rgba(100,116,139,0.5)'; c.lineWidth = 1; c.setLineDash([4, 3]);
       for (const poly of draftPolys) { trace(poly, false); c.stroke(); }
       c.setLineDash([]);
     }
@@ -121,11 +125,14 @@
     resize();
     const ro = new ResizeObserver(resize);
     if (canvasEl.parentElement) ro.observe(canvasEl.parentElement);
-    return () => ro.disconnect();
+    const offTheme = onThemeChange(() => (dark = isDarkTheme()));
+    return () => { ro.disconnect(); offTheme(); };
   });
 
-  $effect(() => { void [tab, showDraft, showPieces, alignByOrigin, currentPattern]; if (tab === 'overlay') draw(); });
+  $effect(() => { void [tab, showDraft, showPieces, alignByOrigin, currentPattern, dark]; if (tab === 'overlay') draw(); });
 </script>
+
+<svelte:window onkeydown={(e) => { if (e.key === 'Escape') onclose(); }} />
 
 <div class="fixed inset-0 z-[115] flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true">
   <div class="bg-base-100 rounded-lg shadow-xl w-[min(900px,95vw)] h-[min(640px,90vh)] flex flex-col p-4">

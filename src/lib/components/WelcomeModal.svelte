@@ -32,6 +32,8 @@
 	];
 </script>
 
+<svelte:window onkeydown={(e) => { if (open && e.key === 'Escape') dismiss(); }} />
+
 {#if open}
 	<div
 		class="fixed inset-0 z-[85] flex items-center justify-center bg-black/40"
@@ -39,7 +41,7 @@
 		tabindex="-1"
 		aria-label="Dismiss welcome"
 		onclick={dismiss}
-		onkeydown={(e) => e.key === 'Escape' && dismiss()}
+		onkeydown={() => {}}
 	>
 		<div
 			class="bg-base-100 rounded-lg shadow-xl max-w-lg w-[90vw] p-6"
@@ -47,7 +49,7 @@
 			aria-modal="true"
 			tabindex="-1"
 			onclick={(e) => e.stopPropagation()}
-			onkeydown={(e) => e.stopPropagation()}
+			onkeydown={() => {}}
 		>
 			<h2 class="font-lexend font-semibold text-xl mb-1">Welcome to Pattern Studio</h2>
 			<p class="text-sm opacity-70 mb-4">Design sewing patterns in 2D and see them drape in 3D.</p>

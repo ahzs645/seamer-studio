@@ -22,13 +22,17 @@
 
   // Regenerating on every keystroke keeps the numbers honest — they come from the pattern that
   // would actually be created, not from a formula that could drift away from the generator.
-  const preview = $derived.by((): { stats: GlobeLanternStats; warnings: string[]; error: string | null } => {
+  // A half-typed (cleared) field binds null; hold the preview neutral instead of flashing the error alert.
+  const preview = $derived.by((): { stats: GlobeLanternStats | null; warnings: string[]; error: string | null } => {
+    if (fields.some(({ key }) => !Number.isFinite(params[key] as number))) {
+      return { stats: null, warnings: [], error: null };
+    }
     try {
       const { stats, warnings } = generateGlobeLantern($state.snapshot(params));
       return { stats, warnings, error: null };
     } catch (error) {
       return {
-        stats: null as unknown as GlobeLanternStats,
+        stats: null,
         warnings: [],
         error: error instanceof Error ? error.message : 'These parameters do not make a globe.'
       };
@@ -148,6 +152,8 @@
 
       {#if preview.error}
         <div class="alert alert-error text-xs py-2 mb-3">{preview.error}</div>
+      {:else if !preview.stats}
+        <div class="alert text-xs py-2 mb-3">Fill in every measurement to preview the lantern.</div>
       {:else}
         <div class="stats stats-horizontal shadow w-full text-xs mb-2 overflow-x-auto">
           <div class="stat py-2 px-3">
@@ -193,11 +199,11 @@
       {/if}
 
       <div class="modal-action">
-        <button class="btn btn-sm btn-ghost" onclick={saveNotes} disabled={!!preview.error}>
+        <button class="btn btn-sm btn-ghost" onclick={saveNotes} disabled={!preview.stats}>
           Save cutting notes
         </button>
         <button class="btn btn-sm" onclick={onclose}>Cancel</button>
-        <button class="btn btn-sm btn-primary" onclick={create} disabled={!!preview.error}>
+        <button class="btn btn-sm btn-primary" onclick={create} disabled={!preview.stats}>
           Create pattern
         </button>
       </div>

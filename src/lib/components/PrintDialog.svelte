@@ -15,10 +15,18 @@
   type PageKey = keyof typeof PAGE_SIZES_MM;
   const PAGE_KEYS: PageKey[] = ['A4', 'A3', 'A2', 'A1', 'A0', 'Letter'];
   let paperSize = $state<PageKey>('A4');
-  let marginMm = $state(10);
+  let marginMm = $state<number | null>(10); // null while the field is cleared
   let orientation = $state<'portrait' | 'landscape'>('portrait');
-  let scalePct = $state(100); // 100% = true scale
+  let scalePct = $state<number | null>(100); // 100% = true scale; null while cleared
   let renest = $state(false); // re-nest pieces onto the paper strip to minimize pages
+
+  // a cleared number input binds null — compute with the defaults and gate Print/Export until valid
+  const marginVal = $derived(marginMm ?? 10);
+  const scaleVal = $derived(scalePct ?? 100);
+  const inputsValid = $derived(
+    marginMm != null && Number.isFinite(marginMm) && marginMm >= 0 &&
+    scalePct != null && Number.isFinite(scalePct) && scalePct > 0
+  );
 
   const pageDims = $derived.by(() => {
     const [w, h] = PAGE_SIZES_MM[paperSize] ?? PAGE_SIZES_MM.A4;
@@ -27,20 +35,20 @@
   // the pattern actually printed: re-nested onto the printable width when requested
   const printedPattern = $derived.by(() => {
     if (!renest) return pattern;
-    const usable = (pageDims.w - 2 * marginMm) / (scalePct / 100);
+    const usable = (pageDims.w - 2 * marginVal) / (scaleVal / 100);
     return nestPatternForPaper(pattern, usable);
   });
   const contentBounds = $derived(patternBoundsMm(printedPattern));
   const pageCount = $derived(tilePageCount(
-    contentBounds.width * (scalePct / 100),
-    contentBounds.height * (scalePct / 100),
-    { pageWmm: pageDims.w, pageHmm: pageDims.h, marginMm, overlapMm: TILE_OVERLAP_MM }
+    contentBounds.width * (scaleVal / 100),
+    contentBounds.height * (scaleVal / 100),
+    { pageWmm: pageDims.w, pageHmm: pageDims.h, marginMm: marginVal, overlapMm: TILE_OVERLAP_MM }
   ));
 
   function doPrint() {
     printPatternTiled(printedPattern, {
-      pageWmm: pageDims.w, pageHmm: pageDims.h, marginMm,
-      scale: scalePct / 100, title: patternName
+      pageWmm: pageDims.w, pageHmm: pageDims.h, marginMm: marginVal,
+      scale: scaleVal / 100, title: patternName
     });
     onclose();
   }
@@ -50,7 +58,7 @@
     try {
       const blob = await patternToPDF(printedPattern, {
         page: paperSize, landscape: orientation === 'landscape',
-        marginMm, overlapMm: TILE_OVERLAP_MM, scale: scalePct / 100,
+        marginMm: marginVal, overlapMm: TILE_OVERLAP_MM, scale: scaleVal / 100,
         tile: true, title: patternName
       });
       downloadBlob(`${base}.pdf`, blob);
@@ -107,8 +115,8 @@
 
     <div class="flex justify-end gap-2">
       <button class="btn btn-sm btn-ghost" onclick={onclose}>Cancel</button>
-      <button class="btn btn-sm" onclick={doExportPDF}>Export PDF</button>
-      <button class="btn btn-sm btn-primary" onclick={doPrint}>Print</button>
+      <button class="btn btn-sm" onclick={doExportPDF} disabled={!inputsValid}>Export PDF</button>
+      <button class="btn btn-sm btn-primary" onclick={doPrint} disabled={!inputsValid}>Print</button>
     </div>
   </div>
 </div>

@@ -54,11 +54,13 @@
   const fmt = (iso: string) => { try { return new Date(iso).toLocaleString(); } catch { return iso; } };
 </script>
 
+<svelte:window onkeydown={(e) => { if (e.key === 'Escape') onclose(); }} />
+
 <div
   class="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 p-4"
   role="button" tabindex="-1"
   onclick={(e) => { if (e.target === e.currentTarget) onclose(); }}
-  onkeydown={(e) => e.key === 'Escape' && onclose()}
+  onkeydown={() => {}}
 >
   <div class="bg-base-100 w-[min(560px,94vw)] max-h-[80vh] rounded-lg shadow-2xl flex flex-col overflow-hidden" role="dialog" aria-label="Version history">
     <div class="flex items-center justify-between px-4 py-2 border-b border-base-300">

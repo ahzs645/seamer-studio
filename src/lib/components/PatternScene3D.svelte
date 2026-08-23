@@ -591,11 +591,22 @@
   function setSnapOpacity(o: number) { snapOpacity = o; renderer?.setSnapshotOpacity(o); }
 
   // 'A' toggles arrange mode, Space starts/stops the simulation (matches the source's shortcuts).
+  // The listener is window-level, so only claim these plain keys while the pointer is over the 3D
+  // pane (or focus is inside it) — otherwise M/A/Space belong to the 2D side (mirror selection,
+  // measure tool, …) and would double-fire.
+  let paneHovered = $state(false);
+  let paneFocused = $state(false);
   function handleKey(e: KeyboardEvent) {
-    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+    if (!paneHovered && !paneFocused) return;
+    const t = e.target;
+    if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement || (t instanceof HTMLElement && t.isContentEditable)) return;
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.key === 'a' || e.key === 'A') { e.preventDefault(); toggleArrangeMode(); }
-    if (e.key === 'm' || e.key === 'M') { e.preventDefault(); toggleManipulateMode(); }
+    if (e.key === 'm' || e.key === 'M') {
+      // like the 2D toolbar, M defers to "mirror selection" while a piece is selected outside arrange mode
+      if (sceneMode !== 'arrange' && selectedPieceId) return;
+      e.preventDefault(); toggleManipulateMode();
+    }
     if (e.key === ' ') { e.preventDefault(); toggleSimulate(); }
   }
 
@@ -629,7 +640,16 @@
 
 <svelte:window onkeydown={handleKey} />
 
-<div class="w-full h-full relative" data-testid="pattern-scene-3d" data-status={status}>
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div
+  class="w-full h-full relative"
+  data-testid="pattern-scene-3d"
+  data-status={status}
+  onpointerenter={() => (paneHovered = true)}
+  onpointerleave={() => (paneHovered = false)}
+  onfocusin={() => (paneFocused = true)}
+  onfocusout={() => (paneFocused = false)}
+>
   <div
     class="w-full h-full"
     use:viewportAction={{

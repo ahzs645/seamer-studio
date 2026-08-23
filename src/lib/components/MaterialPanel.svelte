@@ -61,6 +61,15 @@
     onchange({ ...currentPattern, materials, hasChanged: true });
   }
 
+  /** Commit a numeric field on Enter/blur (one undo entry per edit). Non-numeric or empty input
+   *  restores the previous value in the field instead of being coerced to 0. */
+  function commitNumber(e: Event, current: number, apply: (v: number) => void) {
+    const el = e.currentTarget as HTMLInputElement;
+    const v = el.value.trim() === '' ? NaN : Number(el.value);
+    if (Number.isFinite(v)) apply(v);
+    else el.value = String(current);
+  }
+
   function setColor(id: string, color: string) {
     patch(id, (m) => ({
       ...m,
@@ -107,31 +116,31 @@
           <div class="grid grid-cols-2 gap-1">
             <label>Stretch warp
               <input type="number" min="0" max="100" class="input input-bordered input-xs w-full" value={mat.stretchWarpValue}
-                oninput={(e) => patch(mat.id, (m) => ({ ...m, stretchWarpValue: +e.currentTarget.value }))} /></label>
+                onchange={(e) => commitNumber(e, mat.stretchWarpValue, (v) => patch(mat.id, (m) => ({ ...m, stretchWarpValue: v })))} /></label>
             <label>Stretch weft
               <input type="number" min="0" max="100" class="input input-bordered input-xs w-full" value={mat.stretchWeftValue}
-                oninput={(e) => patch(mat.id, (m) => ({ ...m, stretchWeftValue: +e.currentTarget.value }))} /></label>
+                onchange={(e) => commitNumber(e, mat.stretchWeftValue, (v) => patch(mat.id, (m) => ({ ...m, stretchWeftValue: v })))} /></label>
             <label>Bend
               <input type="number" min="0" max="100" class="input input-bordered input-xs w-full" value={mat.bendValue}
-                oninput={(e) => patch(mat.id, (m) => ({ ...m, bendValue: +e.currentTarget.value }))} /></label>
+                onchange={(e) => commitNumber(e, mat.bendValue, (v) => patch(mat.id, (m) => ({ ...m, bendValue: v })))} /></label>
             <label>Thickness (mm)
               <input type="number" step="0.1" class="input input-bordered input-xs w-full" value={mat.thickness}
-                oninput={(e) => patch(mat.id, (m) => ({ ...m, thickness: +e.currentTarget.value }))} /></label>
+                onchange={(e) => commitNumber(e, mat.thickness, (v) => patch(mat.id, (m) => ({ ...m, thickness: v })))} /></label>
             <label class="col-span-2">Weight (g/m²)
               <input type="number" class="input input-bordered input-xs w-full" value={mat.weight}
-                oninput={(e) => patch(mat.id, (m) => ({ ...m, weight: +e.currentTarget.value }))} /></label>
+                onchange={(e) => commitNumber(e, mat.weight, (v) => patch(mat.id, (m) => ({ ...m, weight: v })))} /></label>
             <label class="col-span-2" title="3D-only visual shell: >0 extrudes the fabric front/back apart with a darkened edge strip">Visual thickness (mm, 3D)
               <input type="number" step="0.5" min="0" class="input input-bordered input-xs w-full" value={mat.visualizationThickness ?? 0}
-                oninput={(e) => patch(mat.id, (m) => ({ ...m, visualizationThickness: Math.max(0, +e.currentTarget.value) }))} /></label>
+                onchange={(e) => commitNumber(e, mat.visualizationThickness ?? 0, (v) => patch(mat.id, (m) => ({ ...m, visualizationThickness: Math.max(0, v) })))} /></label>
           </div>
           <div class="font-semibold mt-1 opacity-70">Material shrinkage</div>
           <div class="grid grid-cols-2 gap-1">
             <label>Horizontal (%)
               <input type="number" step="0.1" class="input input-bordered input-xs w-full" value={mat.shrinkageHorizontalPercentage ?? 0}
-                oninput={(e) => patch(mat.id, (m) => ({ ...m, shrinkageHorizontalPercentage: +e.currentTarget.value }))} /></label>
+                onchange={(e) => commitNumber(e, mat.shrinkageHorizontalPercentage ?? 0, (v) => patch(mat.id, (m) => ({ ...m, shrinkageHorizontalPercentage: v })))} /></label>
             <label>Vertical (%)
               <input type="number" step="0.1" class="input input-bordered input-xs w-full" value={mat.shrinkageVerticalPercentage ?? 0}
-                oninput={(e) => patch(mat.id, (m) => ({ ...m, shrinkageVerticalPercentage: +e.currentTarget.value }))} /></label>
+                onchange={(e) => commitNumber(e, mat.shrinkageVerticalPercentage ?? 0, (v) => patch(mat.id, (m) => ({ ...m, shrinkageVerticalPercentage: v })))} /></label>
           </div>
 
           <div class="font-semibold mt-1 opacity-70">Texture maps</div>
@@ -157,22 +166,22 @@
           <div class="grid grid-cols-2 gap-1">
             <label>Roughness (0–1)
               <input type="number" min="0" max="1" step="0.05" class="input input-bordered input-xs w-full" value={mat.roughness}
-                oninput={(e) => patch(mat.id, (m) => ({ ...m, roughness: +e.currentTarget.value }))} /></label>
+                onchange={(e) => commitNumber(e, mat.roughness, (v) => patch(mat.id, (m) => ({ ...m, roughness: v })))} /></label>
             <label>Metalness (0–1)
               <input type="number" min="0" max="1" step="0.05" class="input input-bordered input-xs w-full" value={mat.metalness}
-                oninput={(e) => patch(mat.id, (m) => ({ ...m, metalness: +e.currentTarget.value }))} /></label>
+                onchange={(e) => commitNumber(e, mat.metalness, (v) => patch(mat.id, (m) => ({ ...m, metalness: v })))} /></label>
             <label>Specularity (0–1)
               <input type="number" min="0" max="1" step="0.05" class="input input-bordered input-xs w-full" value={mat.specularIntensity}
-                oninput={(e) => patch(mat.id, (m) => ({ ...m, specularIntensity: +e.currentTarget.value }))} /></label>
+                onchange={(e) => commitNumber(e, mat.specularIntensity, (v) => patch(mat.id, (m) => ({ ...m, specularIntensity: v })))} /></label>
             <label>Opacity (0–1)
               <input type="number" min="0" max="1" step="0.05" class="input input-bordered input-xs w-full" value={mat.opacity}
-                oninput={(e) => patch(mat.id, (m) => ({ ...m, opacity: +e.currentTarget.value }))} /></label>
+                onchange={(e) => commitNumber(e, mat.opacity, (v) => patch(mat.id, (m) => ({ ...m, opacity: v })))} /></label>
             <label>Normal scale
               <input type="number" min="0" max="4" step="0.1" class="input input-bordered input-xs w-full" value={mat.normalScale}
-                oninput={(e) => patch(mat.id, (m) => ({ ...m, normalScale: +e.currentTarget.value }))} /></label>
+                onchange={(e) => commitNumber(e, mat.normalScale, (v) => patch(mat.id, (m) => ({ ...m, normalScale: v })))} /></label>
             <label>Alpha cutoff
               <input type="number" min="0" max="1" step="0.05" class="input input-bordered input-xs w-full" value={mat.alphaCutoff}
-                oninput={(e) => patch(mat.id, (m) => ({ ...m, alphaCutoff: +e.currentTarget.value }))} /></label>
+                onchange={(e) => commitNumber(e, mat.alphaCutoff, (v) => patch(mat.id, (m) => ({ ...m, alphaCutoff: v })))} /></label>
           </div>
           <button class="btn btn-xs btn-ghost w-full" onclick={() => (editingId = null)}>Done</button>
         </div>

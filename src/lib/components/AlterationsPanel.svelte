@@ -47,8 +47,10 @@
 
   // ---- driver preview (no edit mode): set the driver variable's value -> redraft interpolates -------
   let previewTrackId = $state<string>('');
+  let previewDraft = $state<number | null>(null); // slider position while dragging; committed on change
   const previewTrack = $derived(tracks.find((t) => t.id === previewTrackId) ?? tracks[0] ?? null);
   const previewDriver = $derived(previewTrack?.driverVariableId ? currentPattern.variables.find((v) => v.id === previewTrack.driverVariableId)?.value ?? 0 : 0);
+  const previewShown = $derived(previewDraft ?? Number(previewDriver));
   function setDriverValue(varId: string, value: number) {
     const variables = currentPattern.variables.map((v) => (v.id === varId ? { ...v, value } : v));
     onchange({ ...currentPattern, variables, hasChanged: true });
@@ -116,7 +118,7 @@
           <label class="form-control">
             <span class="label-text text-xs">Driver — {varName(editState.driverVariableId)}</span>
             <input type="number" class="input input-bordered input-sm w-32" value={editState.driverValue}
-              onchange={(e) => onsetdriver(Number((e.currentTarget as HTMLInputElement).value))} />
+              onchange={(e) => { const el = e.currentTarget as HTMLInputElement; const v = Number(el.value); if (el.value.trim() === '' || !Number.isFinite(v)) { el.value = String(editState?.driverValue ?? 0); return; } onsetdriver(v); }} />
           </label>
           <button class="btn btn-primary btn-sm" onclick={onsavesample}><span class="material-symbols-rounded text-base">photo_camera</span> Save sample</button>
           <div class="flex-1"></div>
@@ -189,13 +191,15 @@
           <section class="border-t pt-3">
             <h3 class="font-semibold text-sm mb-2">Preview</h3>
             <div class="flex items-center gap-2">
-              <select class="select select-bordered select-xs" bind:value={previewTrackId}>
+              <select class="select select-bordered select-xs" bind:value={previewTrackId} onchange={() => (previewDraft = null)}>
                 {#each tracks as t (t.id)}<option value={t.id}>{t.name}</option>{/each}
               </select>
               {#if previewTrack?.driverVariableId}
-                <span class="text-xs opacity-60 w-28">{varName(previewTrack.driverVariableId)} = {Number(previewDriver).toFixed(1)}</span>
+                <span class="text-xs opacity-60 w-28">{varName(previewTrack.driverVariableId)} = {previewShown.toFixed(1)}</span>
                 <input type="range" class="range range-xs flex-1" min={sampleRange().min} max={sampleRange().max} step="0.5"
-                  value={previewDriver} oninput={(e) => setDriverValue(previewTrack.driverVariableId!, Number((e.currentTarget as HTMLInputElement).value))} />
+                  value={previewShown}
+                  oninput={(e) => (previewDraft = Number((e.currentTarget as HTMLInputElement).value))}
+                  onchange={(e) => { setDriverValue(previewTrack.driverVariableId!, Number((e.currentTarget as HTMLInputElement).value)); previewDraft = null; }} />
               {:else}
                 <span class="text-xs opacity-50">assign a driver variable to preview</span>
               {/if}
@@ -233,7 +237,7 @@
             {#each anchors as a (a.id)}
               <div class="flex items-center gap-2 flex-wrap border rounded p-1.5">
                 <input class="input input-bordered input-xs w-32" value={a.name} onchange={(e) => patchAnchor(a.id, { name: (e.currentTarget as HTMLInputElement).value })} />
-                <label class="text-xs opacity-60">@<input type="number" class="input input-bordered input-xs w-16" value={a.driverValue} onchange={(e) => patchAnchor(a.id, { driverValue: Number((e.currentTarget as HTMLInputElement).value) })} /></label>
+                <label class="text-xs opacity-60">@<input type="number" class="input input-bordered input-xs w-16" value={a.driverValue} onchange={(e) => { const el = e.currentTarget as HTMLInputElement; const v = Number(el.value); if (el.value.trim() === '' || !Number.isFinite(v)) { el.value = String(a.driverValue); return; } patchAnchor(a.id, { driverValue: v }); }} /></label>
                 {#each categoryVarIds as cid (cid)}
                   {@const cv = currentPattern.variables.find((x) => x.id === cid)}
                   <select class="select select-bordered select-xs" value={a.categories[cid] ?? ''} onchange={(e) => setAnchorCategory(a.id, cid, (e.currentTarget as HTMLSelectElement).value)}>

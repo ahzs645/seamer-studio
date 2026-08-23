@@ -40,6 +40,8 @@
 	];
 </script>
 
+<svelte:window onkeydown={(e) => { if (open && e.key === 'Escape') open = false; }} />
+
 {#if open}
 	<div
 		class="fixed inset-0 z-[80] flex items-center justify-center bg-black/40"
@@ -47,7 +49,7 @@
 		tabindex="-1"
 		aria-label="Close shortcuts"
 		onclick={() => (open = false)}
-		onkeydown={(e) => e.key === 'Escape' && (open = false)}
+		onkeydown={() => {}}
 	>
 		<div
 			class="bg-base-100 rounded-lg shadow-xl max-w-2xl w-[90vw] max-h-[80vh] overflow-y-auto p-5"
@@ -55,7 +57,7 @@
 			aria-modal="true"
 			tabindex="-1"
 			onclick={(e) => e.stopPropagation()}
-			onkeydown={(e) => e.stopPropagation()}
+			onkeydown={() => {}}
 		>
 			<div class="flex items-center mb-4">
 				<span class="material-symbols-rounded notranslate mr-2" aria-hidden="true">keyboard</span>
