@@ -15,6 +15,7 @@ export * from './cylinderRefit';
 export * from './geometry/boundary';
 export * from './geometry/arrangement';
 export * from './geometry/cylinders';
+export * from './preparedGarment';
 
 export interface ClothSolverState {
   readonly positions: Float32Array;
