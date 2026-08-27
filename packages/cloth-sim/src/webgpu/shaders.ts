@@ -177,8 +177,8 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     let hingeMid = 0.5 * (hingeA + hingeB);
     let w1Scale = w1 / sumWeight;
     let w2Scale = w2 / sumWeight;
-    p1 = hingeMid + rotateAroundAxis(p1 - hingeMid, edgeDir, -angleStep * w1Scale);
-    p2 = hingeMid + rotateAroundAxis(p2 - hingeMid, edgeDir, angleStep * w2Scale);
+    p1 = hingeMid + rotateAroundAxis(p1 - hingeMid, edgeDir, angleStep * w1Scale);
+    p2 = hingeMid + rotateAroundAxis(p2 - hingeMid, edgeDir, -angleStep * w2Scale);
     positions[p1Index] = vec4f(p1, w1);
     positions[p2Index] = vec4f(p2, w2);
   } else {
@@ -328,7 +328,7 @@ const maxIncidentTrianglesPerParticle = ${maxIncident}u;
 const incidentStride = ${incidentStride}u;
 
 fn getClosestPointOnTriangle(p0: vec3f, p1: vec3f, p2: vec3f, point: vec3f) -> vec3f {
-  let edge0 = p1 - p0; let edge1 = p2 - p0; let v0 = point - p0;
+  let edge0 = p1 - p0; let edge1 = p2 - p0; let v0 = p0 - point;
   let a = dot(edge0, edge0); let b = dot(edge0, edge1); let c = dot(edge1, edge1);
   let d = dot(edge0, v0); let e = dot(edge1, v0);
   let det = a * c - b * b;
@@ -348,7 +348,7 @@ fn getClosestPointOnTriangle(p0: vec3f, p1: vec3f, p2: vec3f, point: vec3f) -> v
       else { t = clamp(-e / c, 0.0, 1.0); s = 0.0; }
     } else if (t < 0.0) {
       if (a + d > b + e) { let numer = c + e - b - d; let denom = a - 2.0 * b + c; s = clamp(numer / denom, 0.0, 1.0); t = 1.0 - s; }
-      else { s = clamp(-e / c, 0.0, 1.0); t = 0.0; }
+      else { s = clamp(-d / a, 0.0, 1.0); t = 0.0; }
     } else { let numer = c + e - b - d; let denom = a - 2.0 * b + c; s = clamp(numer / denom, 0.0, 1.0); t = 1.0 - s; }
   }
   return p0 + s * edge0 + t * edge1;
@@ -720,7 +720,7 @@ fn decodeTriangleOutsideSign(metaValue: u32) -> f32 {
 }
 
 fn getClosestPointOnTriangle(p0: vec3f, p1: vec3f, p2: vec3f, point: vec3f) -> vec3f {
-  let edge0 = p1 - p0; let edge1 = p2 - p0; let v0 = point - p0;
+  let edge0 = p1 - p0; let edge1 = p2 - p0; let v0 = p0 - point;
   let a = dot(edge0, edge0); let b = dot(edge0, edge1); let c = dot(edge1, edge1);
   let d = dot(edge0, v0); let e = dot(edge1, v0);
   let det = a * c - b * b;
@@ -740,7 +740,7 @@ fn getClosestPointOnTriangle(p0: vec3f, p1: vec3f, p2: vec3f, point: vec3f) -> v
       else { t = clamp(-e / c, 0.0, 1.0); s = 0.0; }
     } else if (t < 0.0) {
       if (a + d > b + e) { let numer = c + e - b - d; let denom = a - 2.0 * b + c; s = clamp(numer / denom, 0.0, 1.0); t = 1.0 - s; }
-      else { s = clamp(-e / c, 0.0, 1.0); t = 0.0; }
+      else { s = clamp(-d / a, 0.0, 1.0); t = 0.0; }
     } else { let numer = c + e - b - d; let denom = a - 2.0 * b + c; s = clamp(numer / denom, 0.0, 1.0); t = 1.0 - s; }
   }
   return p0 + s * edge0 + t * edge1;
