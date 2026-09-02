@@ -1,0 +1,15 @@
+{
+  "name": "@seamer/body-model",
+  "version": "0.1.0",
+  "description": "The parametric, rigged human body model behind seamer-studio and knitterer: shape from seventeen measurements, a 52-bone skeleton derived from the mesh, and linear-blend skinning. Plain ES modules, no dependencies.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": ["src", "README.md"],
+  "scripts": {
+    "test": "node test/body-model.test.mjs"
+  }
+}
