@@ -1,76 +1,32 @@
-// Loading + parsing of the parametric body-model assets shipped in static/models/.
-// Parsers are pure (operate on already-fetched JSON / ArrayBuffers) so they can be unit tested;
-// loadAvatarAssets() / loadGenderAssets() wrap them with fetch and per-asset caching.
-//
-// Binary formats (little-endian), verified against byte sizes:
-//   indices.bin       Float32  ×(numTris*3)  face indices stored as floats (cast to int)
-//   skin_indices.bin  Uint16   ×(numVerts*4) bone indices
-//   skin_weights.bin  Float32  ×(numVerts*4) skin weights (each quad sums to 1)
-//   <gender>_coefficients.bin  Float32  layout [vertexInOrder][axis 0..2][coeff 0..17],
-//       vertexInOrder = symmetry.centeredIndices then symmetry.pairs; 18 = 17 weights + 1 intercept.
+// The app's side of the shared body model: where the files are served from, and
+// per-asset caching around the loaders in @seamer/body-model. The model's own
+// types, parsers and formats live there; this re-exports them so a caller has
+// one import either way.
 
-export interface BoneData {
-  indices: number[]; // 4 vertex indices whose weighted sum is the joint world position
-  weights: number[]; // 4 weights (may be negative; ~sum to 1)
-  parent: string | null;
-  rotation: [number, number, number, string]; // rest euler [x,y,z,'XYZ']
-}
+import {
+  loadBodyModel,
+  parseIndices,
+  parseSkinIndices,
+  parseSkinWeights,
+  parseCoefficients
+} from '@seamer/body-model';
+import type { BaseModel, GenderModel } from '@seamer/body-model';
 
-export type PoseData = Record<string, { x: number; y: number; z: number }>; // boneName -> absolute euler (XYZ)
+export type {
+  ArrangementPointDef,
+  BaseModel,
+  Bone,
+  BoneData,
+  Cylinder,
+  GenderModel,
+  Landmark,
+  LoadedBodyModel,
+  PoseData,
+  Skeleton,
+  Skin
+} from '@seamer/body-model';
 
-export interface Cylinder {
-  id: string;
-  name: string;
-  startBone: string;
-  endBone: string;
-  vertexIndices: number[];
-  padding: number;
-  uOffsetDegrees: number;
-  tapered: boolean;
-  elliptical: boolean;
-  axisReversed: boolean;
-  enabled: boolean;
-}
-
-export interface ArrangementPointDef {
-  id: string;
-  name: string;
-  cylinderName: string;
-  uDegrees: number;
-  v: number;
-  enabled: boolean;
-}
-
-export interface Landmark {
-  id: number;
-  vertexIndex: number;
-  name: string;
-  x: number;
-  y: number;
-  z: number;
-  enabled: boolean;
-}
-
-export interface BaseModel {
-  bodyParts: Record<string, number[]>;
-  symmetry: { centeredIndices: number[]; pairs: [number, number][] };
-  measurements: unknown[];
-  coefficientNames: string[];
-  landmarks: Landmark[];
-  bones: [string, BoneData][];
-  poses: Record<string, PoseData>;
-  cylinders: Cylinder[];
-  arrangementPoints: ArrangementPointDef[];
-}
-
-export interface GenderModel {
-  covariances: number[][]; // 69 x 69
-  means: number[]; // 69
-  min: number[];
-  max: number[];
-  columnNames: string[]; // 69
-  numSamples: number;
-}
+export { parseIndices, parseSkinIndices, parseSkinWeights, parseCoefficients };
 
 export interface AvatarAssets {
   baseModel: BaseModel;
@@ -89,34 +45,13 @@ export interface GenderAssets {
 
 let modelsBase = '/models';
 
-// ---- pure parsers -----------------------------------------------------------
-
+// The JSON assets are read as-is; these name the shape rather than convert it.
 export function parseBaseModel(json: unknown): BaseModel {
   return json as BaseModel;
 }
 
 export function parseGenderModel(json: unknown): GenderModel {
   return json as GenderModel;
-}
-
-/** indices.bin holds integer face indices stored as Float32; cast to Uint32. */
-export function parseIndices(buf: ArrayBuffer): Uint32Array {
-  const f = new Float32Array(buf);
-  const out = new Uint32Array(f.length);
-  for (let i = 0; i < f.length; i++) out[i] = Math.round(f[i]);
-  return out;
-}
-
-export function parseSkinIndices(buf: ArrayBuffer): Uint16Array {
-  return new Uint16Array(buf);
-}
-
-export function parseSkinWeights(buf: ArrayBuffer): Float32Array {
-  return new Float32Array(buf);
-}
-
-export function parseCoefficients(buf: ArrayBuffer): Float32Array {
-  return new Float32Array(buf);
 }
 
 // ---- browser loaders --------------------------------------------------------
@@ -158,22 +93,13 @@ async function fetchJson(url: string): Promise<unknown> {
 export function loadAvatarAssets(base = modelsBase): Promise<AvatarAssets> {
   if (avatarAssetsCache) return avatarAssetsCache;
   avatarAssetsCache = (async () => {
-    const [baseJson, indicesBuf, skinIdxBuf, skinWBuf] = await Promise.all([
-      fetchJson(`${base}/base_model.json`),
-      fetchArrayBuffer(`${base}/indices.bin`),
-      fetchArrayBuffer(`${base}/skin_indices.bin`),
-      fetchArrayBuffer(`${base}/skin_weights.bin`)
-    ]);
-    const baseModel = parseBaseModel(baseJson);
-    const indices = parseIndices(indicesBuf);
-    const skinIndices = parseSkinIndices(skinIdxBuf);
-    const skinWeights = parseSkinWeights(skinWBuf);
+    const { baseModel, indices, skin } = await loadBodyModel(base, { fetchJson, fetchBytes: fetchArrayBuffer });
     return {
       baseModel,
       indices,
-      skinIndices,
-      skinWeights,
-      numVertices: skinWeights.length / 4,
+      skinIndices: skin.indices,
+      skinWeights: skin.weights,
+      numVertices: skin.weights.length / 4,
       numTriangles: indices.length / 3
     };
   })();

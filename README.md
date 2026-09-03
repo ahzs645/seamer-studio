@@ -17,9 +17,13 @@ XPBD cloth simulation, application UI, server routes, and product pages.
   reconstruction, skinning, controllers, and silhouettes.
 - `src` — SvelteKit application. `/studio` opens the Pencil Skirt template by
   default.
-- `packages/body-model` — `@seamer/body-model`: the parametric rigged body
-  itself, plain ES modules with the model's binary assets alongside them in
-  `models/`. Served to the browser at `/models` by a plugin in `vite.config.ts`.
+- `vendor/body-model` — `@seamer/body-model`, a git submodule of
+  [ahzs645/body-model](https://github.com/ahzs645/body-model): the parametric
+  rigged body itself — shape, skeleton, skinning — as plain ES modules with the
+  model's binary assets alongside them in `models/`. `packages/avatar` is a
+  three.js skin over it, so there is one implementation of the body, shared with
+  knitterer. Served to the browser at `/models` by a plugin in `vite.config.ts`.
+  Initialise it with `git submodule update --init vendor/body-model`.
 
 The 2D editor intentionally remains the existing Canvas2D implementation. Its
 document Y axis is mathematical Y-up; only the canvas/SVG projection flips Y.

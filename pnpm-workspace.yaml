@@ -1,2 +1,4 @@
 packages:
   - packages/*
+  # The body model is a submodule, shared with knitterer.
+  - vendor/body-model

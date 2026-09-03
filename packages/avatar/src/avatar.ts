@@ -1,60 +1,8 @@
-// Per-vertex parametric body reconstruction.
-//
-// The coefficient buffer is a per-(vertex,axis) affine map: position = sum_i(coeff_i * basis_i) +
-// intercept. Memory layout is [vertexInOrder][axis 0..2][value 0..17] where value 0..16 are the
-// basis weights for the 17 COEFFICIENT_NAMES and value 17 is the intercept; vertexInOrder is
-// symmetry.centeredIndices (written once) followed by symmetry.pairs (written to both members of
-// the pair, with the X component negated for the mirror vertex). Output is in meters, +Y up,
-// mirror plane X = 0.
+// The per-vertex parametric reconstruction lives in @seamer/body-model, which is
+// where both this and knitterer read it from. Re-exported here so callers that
+// already import from @seamer/avatar do not have to change.
 
-import type { BaseModel } from './assets';
-
-const COEFF_COUNT = 17;
-const STRIDE = COEFF_COUNT + 1; // 18
-
-/**
- * Reconstruct the rest-pose vertex positions (Float32Array length numVertices*3, meters).
- * @param coeff17 the 17 coefficient values in COEFFICIENT_NAMES order.
- */
-export function reconstructVertices(
-  baseModel: BaseModel,
-  coefficients: Float32Array,
-  coeff17: number[],
-  numVertices: number
-): Float32Array {
-  const { centeredIndices, pairs } = baseModel.symmetry;
-  const e = coeff17;
-  const n = new Float32Array(numVertices * 3);
-  let l = 0;
-
-  const evalVertexAxis = (): number => {
-    let d = 0;
-    for (let p = 0; p < COEFF_COUNT; p++) d += e[p] * coefficients[l + p];
-    d += coefficients[l + COEFF_COUNT]; // intercept
-    l += STRIDE;
-    return d;
-  };
-
-  for (let u = 0; u < centeredIndices.length; u++) {
-    const c = centeredIndices[u];
-    n[c * 3] = evalVertexAxis();
-    n[c * 3 + 1] = evalVertexAxis();
-    n[c * 3 + 2] = evalVertexAxis();
-  }
-
-  for (let u = 0; u < pairs.length; u++) {
-    const c = pairs[u][0];
-    const f2 = pairs[u][1];
-    for (let d = 0; d < 3; d++) {
-      const v = evalVertexAxis();
-      n[c * 3 + d] = v;
-      n[f2 * 3 + d] = v;
-    }
-    n[f2 * 3] = -n[c * 3]; // mirror X only
-  }
-
-  return n;
-}
+export { reconstructVertices, coefficientCount, coefficientsFrom, meanCoefficients } from '@seamer/body-model';
 
 export interface BoundingBox {
   min: [number, number, number];

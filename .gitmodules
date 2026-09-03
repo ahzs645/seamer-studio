@@ -1,0 +1,4 @@
+[submodule "vendor/body-model"]
+	path = vendor/body-model
+	url = https://github.com/ahzs645/body-model
+	branch = main

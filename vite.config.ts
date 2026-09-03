@@ -14,11 +14,11 @@ const ATELIER = [
   '@atelier/svelte'
 ];
 
-// The body model's assets live with the model, not in static/, so the package
-// is self-contained and can be split out on its own. The app still serves them
-// at /models: this hands them out in dev and preview, and copies them into the
-// client build, which is what adapter-static ships.
-const MODELS_DIR = fileURLToPath(new URL('./packages/body-model/models/', import.meta.url));
+// The body model's assets live with the model, in the submodule, so both this
+// and knitterer read one copy. The app still serves them at /models: this hands
+// them out in dev and preview, and copies them into the client build, which is
+// what adapter-static ships.
+const MODELS_DIR = fileURLToPath(new URL('./vendor/body-model/models/', import.meta.url));
 
 const MODEL_TYPES: Record<string, string> = {
   '.json': 'application/json',

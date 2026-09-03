@@ -111,6 +111,9 @@ importers:
 
   packages/avatar:
     dependencies:
+      '@seamer/body-model':
+        specifier: workspace:*
+        version: link:../../vendor/body-model
       '@seamer/pattern-model':
         specifier: workspace:*
         version: link:../pattern-model
@@ -121,8 +124,6 @@ importers:
       '@types/three':
         specifier: 0.184.1
         version: 0.184.1
-
-  packages/body-model: {}
 
   packages/cloth-sim:
     dependencies:
@@ -166,6 +167,8 @@ importers:
       '@atelier/io':
         specifier: file:../../../atelier/packages/io
         version: file:../atelier/packages/io(three@0.181.2)
+
+  vendor/body-model: {}
 
 packages:
 
