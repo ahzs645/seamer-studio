@@ -1,10 +1,7 @@
-// Plain Node, no runner: `node packages/body-model/test/body-model.test.mjs`.
-import { readFile } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
+// Plain Node, no runner: `node test/body-model.test.mjs`.
 import assert from "node:assert/strict";
+import { loadBodyModelFromDisk } from "../src/node.js";
 import {
-  loadBodyModel,
   reconstructVertices,
   meanCoefficients,
   createSkeleton,
@@ -12,14 +9,6 @@ import {
   jointWorldPositions,
   armsUpPose,
 } from "../src/index.js";
-
-const here = dirname(fileURLToPath(import.meta.url));
-const folder = resolve(here, "..", "..", "..", "static", "models");
-const fetchJson = async (path) => JSON.parse(await readFile(path, "utf8"));
-const fetchBytes = async (path) => {
-  const bytes = await readFile(path);
-  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-};
 
 let passed = 0;
 const test = (name, run) => {
@@ -33,7 +22,8 @@ const test = (name, run) => {
   }
 };
 
-const model = await loadBodyModel(folder, { gender: "male", fetchJson, fetchBytes });
+// No folder: the package reads its own models/.
+const model = await loadBodyModelFromDisk(undefined, { gender: "male" });
 const means = meanCoefficients(model.baseModel, model.statistics);
 const rest = reconstructVertices(model.baseModel, model.coefficients, means);
 const skeleton = createSkeleton(model.baseModel, rest);

@@ -1,5 +1,9 @@
 import { sveltekit } from '@sveltejs/kit/vite';
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
+import { copyFileSync, createReadStream, mkdirSync, readdirSync, statSync } from 'node:fs';
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import { extname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const ATELIER = [
   '@atelier/core',
@@ -10,8 +14,55 @@ const ATELIER = [
   '@atelier/svelte'
 ];
 
+// The body model's assets live with the model, not in static/, so the package
+// is self-contained and can be split out on its own. The app still serves them
+// at /models: this hands them out in dev and preview, and copies them into the
+// client build, which is what adapter-static ships.
+const MODELS_DIR = fileURLToPath(new URL('./packages/body-model/models/', import.meta.url));
+
+const MODEL_TYPES: Record<string, string> = {
+  '.json': 'application/json',
+  '.bin': 'application/octet-stream'
+};
+
+function modelFile(url: string): string | null {
+  const name = /(?:^|\/)models\/([A-Za-z0-9_.-]+)$/.exec(url.split('?')[0])?.[1];
+  if (!name || name.includes('..')) return null;
+  const file = join(MODELS_DIR, name);
+  return statSync(file, { throwIfNoEntry: false })?.isFile() ? file : null;
+}
+
+function bodyModelAssets(): Plugin {
+  let ssr = false;
+  const serve = (req: IncomingMessage, res: ServerResponse, next: () => void) => {
+    const file = req.url ? modelFile(req.url) : null;
+    if (!file) return next();
+    res.setHeader('Content-Type', MODEL_TYPES[extname(file)] ?? 'application/octet-stream');
+    createReadStream(file).pipe(res);
+  };
+  return {
+    name: 'body-model-assets',
+    configResolved(config) {
+      ssr = Boolean(config.build.ssr);
+    },
+    configureServer(server) {
+      server.middlewares.use(serve);
+    },
+    configurePreviewServer(server) {
+      server.middlewares.use(serve);
+    },
+    writeBundle(options) {
+      // The browser fetches them, so only the client build needs them.
+      if (ssr || !options.dir) return;
+      const out = join(options.dir, 'models');
+      mkdirSync(out, { recursive: true });
+      for (const name of readdirSync(MODELS_DIR)) copyFileSync(join(MODELS_DIR, name), join(out, name));
+    }
+  };
+}
+
 export default defineConfig({
-  plugins: [sveltekit()],
+  plugins: [sveltekit(), bodyModelAssets()],
   server: {
     fs: {
       // pnpm symlinks resolve workspace packages (./packages/*) and the linked

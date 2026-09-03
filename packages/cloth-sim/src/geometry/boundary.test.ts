@@ -119,7 +119,7 @@ function buildDefaultAvatar(pattern: Pattern): {
   indices: Uint32Array;
   cylinders: ReturnType<typeof buildCylinders>;
 } {
-  const models = new URL('../../../../static/models/', import.meta.url);
+  const models = new URL('../../../body-model/models/', import.meta.url);
   const base = parseBaseModel(JSON.parse(readFileSync(new URL('base_model.json', models), 'utf8'))) as BaseModel;
   const gender = JSON.parse(readFileSync(new URL('female_model.json', models), 'utf8')) as GenderModel;
   const indices = parseIndices(readArrayBuffer(new URL('indices.bin', models)));

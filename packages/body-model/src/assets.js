@@ -10,6 +10,10 @@
 //
 // All little-endian. Parsers are pure so they can be tested on bytes.
 
+// The package carries its own copy of the files, so a caller that has no
+// opinion about where they live does not need one.
+const modelFolder = new URL("../models/", import.meta.url).href;
+
 const modelFiles = {
   baseModel: "base_model.json",
   indices: "indices.bin",
@@ -23,7 +27,7 @@ function parseIndices(buffer) {
   const floats = new Float32Array(buffer);
   const indices = new Uint32Array(floats.length);
   for (let index = 0; index < floats.length; index++) {
-    indices[index] = floats[index];
+    indices[index] = Math.round(floats[index]);
   }
   return indices;
 }
@@ -40,10 +44,16 @@ function parseCoefficients(buffer) {
   return new Float32Array(buffer);
 }
 
-// Everything the skeleton and skinning need, fetched from one folder. `fetchBytes`
-// and `fetchJson` are injected so the same loader serves a browser (fetch) and
-// Node (readFile).
-async function loadBodyModel(folder, { fetchJson, fetchBytes, gender = null } = {}) {
+// Everything the skeleton and skinning need, fetched from one folder --
+// `modelFolder`, this package's own `models/`, unless a caller says otherwise
+// (an app that serves the files from its own static route wants its own path).
+// `fetchBytes` and `fetchJson` are injected so the same loader serves a browser
+// (fetch) and Node (readFile); they default to `fetch`, which is what a browser
+// and Node 18+ both have.
+async function loadBodyModel(
+  folder = modelFolder,
+  { fetchJson = fetchJsonOverHttp, fetchBytes = fetchBytesOverHttp, gender = null } = {}
+) {
   const base = folder.endsWith("/") ? folder : `${folder}/`;
   const [baseModel, indices, skinIndices, skinWeights] = await Promise.all([
     fetchJson(`${base}${modelFiles.baseModel}`),
@@ -63,4 +73,20 @@ async function loadBodyModel(folder, { fetchJson, fetchBytes, gender = null } = 
   return model;
 }
 
-export { modelFiles, parseIndices, parseSkinIndices, parseSkinWeights, parseCoefficients, loadBodyModel };
+async function fetchJsonOverHttp(url) {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`body model: ${url} is ${response.status}`);
+  }
+  return response.json();
+}
+
+async function fetchBytesOverHttp(url) {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`body model: ${url} is ${response.status}`);
+  }
+  return response.arrayBuffer();
+}
+
+export { modelFolder, modelFiles, parseIndices, parseSkinIndices, parseSkinWeights, parseCoefficients, loadBodyModel };

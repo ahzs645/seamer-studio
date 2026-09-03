@@ -122,6 +122,8 @@ importers:
         specifier: 0.184.1
         version: 0.184.1
 
+  packages/body-model: {}
+
   packages/cloth-sim:
     dependencies:
       '@atelier/geometry':
