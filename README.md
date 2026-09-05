@@ -23,7 +23,9 @@ XPBD cloth simulation, application UI, server routes, and product pages.
   model's binary assets alongside them in `models/`. `packages/avatar` is a
   three.js skin over it, so there is one implementation of the body, shared with
   knitterer. Served to the browser at `/models` by a plugin in `vite.config.ts`.
-  Initialise it with `git submodule update --init vendor/body-model`.
+  Initialise it with `git submodule update --init vendor/body-model`. Both
+  apps pin the same commit; a change to the body is made in that repository
+  and the pin moved forward here and in knitterer together.
 
 The 2D editor intentionally remains the existing Canvas2D implementation. Its
 document Y axis is mathematical Y-up; only the canvas/SVG projection flips Y.
