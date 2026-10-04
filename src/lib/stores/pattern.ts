@@ -200,10 +200,6 @@ export const zoom = writable<number>(1);
 
 export const panOffset = writable<{ x: number; y: number }>({ x: 0, y: 0 });
 
-export const showGrid = writable<boolean>(true);
-
-export const snapToGrid = writable<boolean>(false);
-
 /** Live cursor position in drafting millimetres (set by the 2D canvas), for the status bar. Null when
  *  the pointer is outside the canvas. */
 export const cursorMm = writable<{ x: number; y: number } | null>(null);

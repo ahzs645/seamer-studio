@@ -16,6 +16,8 @@ const DOCUMENT_DB_NAME = 'seamer-studio-documents';
 const DOCUMENT_DB_VERSION = 1;
 const DOCUMENT_VERSIONS_STORE = 'versions';
 const MIGRATION_KEY = 'seamer.local-documents-migrated.v1';
+const MIGRATION_DB_NAME = 'seamer-studio-migrations';
+const MIGRATION_STORE = 'migrations';
 
 const documents = new LocalDocumentStore<Pattern>({
   dbName: DOCUMENT_DB_NAME,
@@ -71,17 +73,50 @@ function transactionDone(transaction: IDBTransaction): Promise<void> {
   });
 }
 
-function openDatabase(name: string, version?: number): Promise<IDBDatabase> {
+function openDatabase(
+  name: string,
+  version?: number,
+  upgrade?: (database: IDBDatabase) => void
+): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
+    let blocked = false;
     const request = version === undefined
       ? indexedDB.open(name)
       : indexedDB.open(name, version);
-    request.onsuccess = () => resolve(request.result);
+    request.onupgradeneeded = () => upgrade?.(request.result);
+    request.onsuccess = () => {
+      if (blocked) { request.result.close(); return; }
+      resolve(request.result);
+    };
     request.onerror = () =>
       reject(request.error ?? new Error(`Could not open IndexedDB database "${name}"`));
-    request.onblocked = () =>
+    request.onblocked = () => {
+      blocked = true;
       reject(new Error(`Opening IndexedDB database "${name}" was blocked`));
+    };
   });
+}
+
+async function migrationMarker(write = false): Promise<boolean> {
+  // Keep migration metadata independent of the engine's fixed documents schema.
+  const database = await openDatabase(MIGRATION_DB_NAME, 1, (db) => {
+    if (!db.objectStoreNames.contains(MIGRATION_STORE)) {
+      db.createObjectStore(MIGRATION_STORE, { keyPath: 'id' });
+    }
+  });
+  try {
+    const transaction = database.transaction(MIGRATION_STORE, write ? 'readwrite' : 'readonly');
+    const store = transaction.objectStore(MIGRATION_STORE);
+    if (write) {
+      store.put({ id: MIGRATION_KEY, complete: true });
+      await transactionDone(transaction);
+      return true;
+    }
+    const marker = await requestResult(store.get(MIGRATION_KEY));
+    return marker?.complete === true;
+  } finally {
+    database.close();
+  }
 }
 
 async function readStore<T>(database: IDBDatabase, storeName: string): Promise<T[]> {
@@ -132,9 +167,13 @@ async function migrateVersions(versions: LegacyVersionRecord[]): Promise<void> {
   await documents.list();
   const database = await openDatabase(DOCUMENT_DB_NAME, DOCUMENT_DB_VERSION);
   try {
+    const existing = await readStore<{ id: string }>(database, DOCUMENT_VERSIONS_STORE);
+    const existingIds = new Set(existing.map((version) => version.id));
     const transaction = database.transaction(DOCUMENT_VERSIONS_STORE, 'readwrite');
     const store = transaction.objectStore(DOCUMENT_VERSIONS_STORE);
     for (const version of versions) {
+      // A missing migration marker must not replace a newer destination snapshot.
+      if (existingIds.has(version.id)) continue;
       store.put({
         id: version.id,
         documentId: version.patternId,
@@ -156,7 +195,16 @@ let migrationPromise: Promise<void> | null = null;
 
 async function migrateLegacyRecords(): Promise<void> {
   if (!browser) throw new Error('IndexedDB is unavailable outside the browser');
-  if (localStorage.getItem(MIGRATION_KEY) === 'complete') return;
+  if (await migrationMarker()) return;
+  // The marker is an optimization; blocked localStorage must not disable IndexedDB saves.
+  let legacyMarkerComplete = false;
+  try {
+    legacyMarkerComplete = localStorage.getItem(MIGRATION_KEY) === 'complete';
+  } catch { /* IndexedDB may still be available when localStorage is blocked. */ }
+  if (legacyMarkerComplete) {
+    await migrationMarker(true);
+    return;
+  }
 
   const legacy = await readLegacyRecords();
   for (const pattern of legacy.patterns) {
@@ -174,7 +222,12 @@ async function migrateLegacyRecords(): Promise<void> {
       historyEntries(record.patternId, record.savedAt, record.redo)
     );
   }
-  localStorage.setItem(MIGRATION_KEY, 'complete');
+  // Commit completion only after every destination write succeeds. This prevents
+  // deleted migrated documents from being resurrected when localStorage is lost.
+  await migrationMarker(true);
+  try {
+    localStorage.setItem(MIGRATION_KEY, 'complete');
+  } catch { /* migrationPromise remembers completion for this session. */ }
 }
 
 function ensureMigrated(): Promise<void> {
@@ -186,8 +239,11 @@ function ensureMigrated(): Promise<void> {
 }
 
 export async function savePattern(pattern: Pattern): Promise<void> {
+  // Match the document store's JSON snapshot format, including reactive callers,
+  // before migration/opening IndexedDB can yield to another edit.
+  const snapshot = JSON.parse(JSON.stringify(pattern)) as Pattern;
   await ensureMigrated();
-  await documents.save(pattern.id, pattern.name, pattern);
+  await documents.save(snapshot.id, snapshot.name, snapshot);
 }
 
 export async function loadPattern(id: string): Promise<Pattern | null> {
@@ -224,8 +280,8 @@ export async function saveVersion(
   snapshot: Pattern,
   versionNumber: number
 ): Promise<VersionRecord> {
+  const storedSnapshot = JSON.parse(JSON.stringify({ ...snapshot, versionNumber })) as Pattern;
   await ensureMigrated();
-  const storedSnapshot = { ...snapshot, versionNumber };
   const metadata = await documents.saveVersion(patternId, name, storedSnapshot);
   return {
     id: metadata.id,

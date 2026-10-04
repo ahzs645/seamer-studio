@@ -32,15 +32,40 @@ async function loadShaders() {
   try {
     const config = await vite.ssrLoadModule('/packages/cloth-sim/src/config.ts');
     const shaders = await vite.ssrLoadModule('/packages/cloth-sim/src/webgpu/shaders.ts');
+    const surfaceSelf = await vite.ssrLoadModule('/packages/cloth-sim/src/webgpu/surfaceSelf.ts');
+    const support = await vite.ssrLoadModule('/packages/cloth-sim/src/supportShader.ts');
+    const bodyBVH = await vite.ssrLoadModule('/packages/cloth-sim/src/webgpu/bodySurfaceBroadphase.ts');
+    const bodyPoints = await vite.ssrLoadModule('/packages/cloth-sim/src/webgpu/bodyPointContacts.ts');
+    const diagnosticCopies = await vite.ssrLoadModule('/packages/cloth-sim/src/webgpu/diagnosticCopies.ts');
+    const seamGate = await vite.ssrLoadModule('/packages/cloth-sim/src/webgpu/seamGate.ts');
     const cfg = config.SIM_CONFIG;
     const HASH = 1024;
+    // Exercise the source-only packed activation gate as well as the legacy native gate.
+    // This also checks a near-limit layout rather than only small sample garments.
+    const sourceGate = seamGate.buildSeamGateLayout(4096, 64);
+    const largeSourceGate = seamGate.buildSeamGateLayout(120000, 1024);
+    const sourceSewingConfig = { ...cfg, seamIterations: 8 };
+    const sourceSewingMotion = config.resolveSewingMotionPolicy(sourceSewingConfig, true);
+    const closedRestoration = {
+      maximumSq: sourceSewingMotion.closedRestorationPerIterationMaximumSq,
+      previousGapSq: sourceSewingMotion.closedGapCriterionMeters ** 2
+    };
     return {
       integrate: shaders.integrateWGSL(cfg),
       distance: shaders.distanceConstraintWGSL(cfg),
       bending: shaders.bendingConstraintWGSL(cfg),
       seam: shaders.seamWGSL(cfg, config.seamMaxDisplacementSq(cfg)),
+      sourceSeam: shaders.seamWGSL(sourceSewingConfig, sourceSewingMotion.openPerIterationMaximumSq, sourceGate, closedRestoration),
+      largeSourceSeam: shaders.seamWGSL(sourceSewingConfig, sourceSewingMotion.openPerIterationMaximumSq, largeSourceGate, closedRestoration),
+      captureCollisionSubstep: bodyPoints.captureCollisionSubstepWGSL(),
+      captureUint32Words: diagnosticCopies.captureUint32WordsWGSL(),
+      gatherBodyPointContacts: bodyPoints.gatherBodyPointContactsWGSL(),
+      solveBodyPointContacts: bodyPoints.solveBodyPointContactsWGSL(cfg,12),
       initExternalCollision: shaders.initExternalCollisionWGSL(cfg, HASH),
       solveExternalCollision: shaders.solveExternalCollisionWGSL(cfg, 12),
+      initExternalSurfaceCollision: bodyBVH.initBodySurfaceBVHCollisionWGSL(cfg,0),
+      solveExternalSurfaceCollision: shaders.solveExternalSurfaceCollisionWGSL(cfg),
+      gatherExternalSurfaceCorrections: shaders.gatherExternalSurfaceCorrectionsWGSL(12),
       applyCorrections: shaders.applyCorrectionsWGSL(),
       resetCorrections: shaders.resetCorrectionsWGSL(),
       triangleCenters: shaders.triangleCentersWGSL(),
@@ -49,6 +74,20 @@ async function loadShaders() {
       prefixSum: shaders.prefixSumWGSL(HASH),
       fillHash: shaders.fillHashWGSL(HASH, cfg.clothSpacing),
       initSelfCollision: shaders.initSelfCollisionWGSL(cfg, HASH),
+      initSelfSurfaceCollision: surfaceSelf.initSelfSurfaceCollisionWGSL(cfg),
+      initSelfSurfaceCollisionAtomicReference: surfaceSelf.initSelfSurfaceCollisionWGSL(cfg, true, true),
+      refitSurfaceBVH: surfaceSelf.refitSurfaceBVHWGSL(),
+      refitSurfaceLeaves: surfaceSelf.refitSurfaceLeavesWGSL(),
+      refitSurfaceParents: surfaceSelf.refitSurfaceParentsWGSL(),
+      solveSelfSurfaceCollision: surfaceSelf.solveSelfSurfaceCollisionWGSL(cfg),
+      solveSelfSurfaceCollisionStrict: surfaceSelf.solveSelfSurfaceCollisionWGSL(cfg, false),
+      sourceSelfSurfaceCollision: surfaceSelf.solveSelfSurfaceCollisionWGSL(cfg, false, sourceGate),
+      largeSourceSelfSurfaceCollision: surfaceSelf.solveSelfSurfaceCollisionWGSL(cfg, false, largeSourceGate),
+      sourceRefinedSelfSurfaceCollision: surfaceSelf.solveSelfSurfaceCollisionWGSL(cfg, false, sourceGate, true),
+      largeSourceRefinedSelfSurfaceCollision: surfaceSelf.solveSelfSurfaceCollisionWGSL(cfg, false, largeSourceGate, true),
+      gatherSelfSurfaceCorrections: surfaceSelf.gatherSelfSurfaceCorrectionsWGSL(cfg, 12),
+      surfaceSeamGaps: surfaceSelf.surfaceSeamGapsWGSL(),
+      assemblySupport: support.assemblySupportWGSL(),
       solveSelfCollision: shaders.solveSelfCollisionWGSL(cfg),
       nearDamping: shaders.nearDampingWGSL(cfg),
       computeDampingState: shaders.computeDampingStateWGSL(),
@@ -69,8 +108,16 @@ const server = http.createServer((_req, res) => {
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 const { port } = server.address();
 
-// `--use-webgpu-adapter=swiftshader` is what makes this run without a GPU at all.
-const launchArgs = ['--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader', '--no-sandbox'];
+// Explicit alternate diagnostics keep the same eight-buffer device and shader validation.
+const graphicsProfile = process.env.SEAMER_WEBGPU_BACKEND ?? 'swiftshader';
+if (!['swiftshader', 'mesa-gles'].includes(graphicsProfile)) {
+  throw new Error('SEAMER_WEBGPU_BACKEND must be swiftshader or mesa-gles');
+}
+const launchArgs = graphicsProfile === 'mesa-gles'
+  ? ['--enable-unsafe-webgpu', '--use-vulkan=native', '--use-angle=vulkan',
+      '--enable-features=Vulkan', '--disable-vulkan-surface', '--ignore-gpu-blocklist',
+      '--use-webgpu-adapter=opengles', '--force-webgpu-compat', '--no-sandbox']
+  : ['--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader', '--enable-unsafe-swiftshader', '--no-sandbox'];
 
 /** Prefer Playwright's own browser; fall back to a preinstalled one when the pin doesn't match. */
 async function launchChromium() {
@@ -116,7 +163,10 @@ try {
       await device.popErrorScope();
       results[name] = { errors, pipeline };
     }
-    return { results, appliedLimits: requiredLimits };
+    const info = adapter.info;
+    return { results, appliedLimits: requiredLimits, deviceStorageBuffers: device.limits.maxStorageBuffersPerShaderStage,
+      adapter: { vendor: info.vendor, architecture: info.architecture, device: info.device,
+        description: info.description, isFallbackAdapter: info.isFallbackAdapter } };
   }, [shaders, BASELINE_LIMITS]);
 
   if (report.fatal) {
@@ -133,6 +183,7 @@ try {
       if (pipeline) console.error(`    pipeline: ${pipeline.trim()}`);
     }
     const limits = Object.entries(report.appliedLimits).map(([k, v]) => `${k}=${v}`).join(' ');
+    console.log(JSON.stringify({ graphicsProfile, adapter: report.adapter, deviceStorageBuffers: report.deviceStorageBuffers }));
     console.log(
       failures.length === 0
         ? `\n✓ ${names.length} kernels compile and build a pipeline at baseline limits (${limits})`

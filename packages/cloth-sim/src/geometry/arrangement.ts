@@ -10,6 +10,47 @@ import type { Vec2 } from '@seamer/pattern-model/utils/patternGeometry';
 
 const RAD = 180 / Math.PI;
 
+/** GarmentCode's mesh generator calls rotation.py:euler_xyz_to_R: Rz * Ry * Rx.
+ * Its wrapper visualizer uses a different intrinsic XYZ convention; explicit matrix construction
+ * here preserves the generated dataset meshes for compound rotations as well as single axes. */
+export function garmentCodeWorldMatrix(
+  rotationDegrees: readonly number[],
+  translationMeters: readonly number[]
+): number[] {
+  if ([rotationDegrees, translationMeters].some((values) =>
+    values.length !== 3 || Array.from(values).some((value) => !Number.isFinite(value))
+  )) throw new Error('Panel rotation and translation must each contain three finite numbers');
+  const [x, y, z] = rotationDegrees.map((angle) => angle / RAD);
+  const cx = Math.cos(x), sx = Math.sin(x);
+  const cy = Math.cos(y), sy = Math.sin(y);
+  const cz = Math.cos(z), sz = Math.sin(z);
+  return [
+    cz * cy, sz * cy, -sy, 0,
+    cz * sy * sx - sz * cx, sz * sy * sx + cz * cx, cy * sx, 0,
+    cz * sy * cx + sz * sx, sz * sy * cx - cz * sx, cy * cx, 0,
+    ...translationMeters, 1
+  ];
+}
+
+/** Saved JSON may be malformed. Require a finite, affine, proper rigid transform so corrupt
+ * placement cannot introduce NaNs, projective division, or scale into the cloth's rest state. */
+function validSourcePlacement(source: PieceArrangement['sourcePlacement']): boolean {
+  if (!source || !Array.isArray(source.worldMatrix) || source.worldMatrix.length !== 16
+    || Array.from(source.worldMatrix).some((value) => typeof value !== 'number' || !Number.isFinite(Math.fround(value)))
+    || !source.layoutOffsetMm || !Number.isFinite(source.layoutOffsetMm.x)
+    || !Number.isFinite(source.layoutOffsetMm.y)) return false;
+  const m = source.worldMatrix;
+  const close = (value: number, expected: number) => Math.abs(value - expected) < 1e-5;
+  if (!close(m[3], 0) || !close(m[7], 0) || !close(m[11], 0) || !close(m[15], 1)) return false;
+  const dot = (a: number, b: number) => m[a] * m[b] + m[a + 1] * m[b + 1] + m[a + 2] * m[b + 2];
+  if (![0, 4, 8].every((start) => close(dot(start, start), 1))
+    || !close(dot(0, 4), 0) || !close(dot(0, 8), 0) || !close(dot(4, 8), 0)) return false;
+  const determinant = m[0] * (m[5] * m[10] - m[9] * m[6])
+    - m[4] * (m[1] * m[10] - m[9] * m[2])
+    + m[8] * (m[1] * m[6] - m[5] * m[2]);
+  return close(determinant, 1);
+}
+
 export interface ArrangeOptions {
   flipNormals?: boolean;
   /** deterministic jitter seed offset to break exact coincidences */
@@ -38,6 +79,20 @@ export function arrangeParticles(
 ): Float32Array {
   const out = new Float32Array(pts.length * 3);
   const jit = opts.jitter ?? 0;
+
+  // Source geometry remains y-up, in millimetres. Only its drafting-layout translation is undone;
+  // do not centre its bounding box, wrap a cylinder, or add the legacy coincident-plane jitter.
+  if (validSourcePlacement(arr.sourcePlacement)) {
+    const { worldMatrix: m, layoutOffsetMm: offset } = arr.sourcePlacement!;
+    for (let i = 0; i < pts.length; i++) {
+      const x = (pts[i].x - offset.x) / 1000;
+      const y = (pts[i].y - offset.y) / 1000;
+      out[i * 3] = m[0] * x + m[4] * y + m[12];
+      out[i * 3 + 1] = m[1] * x + m[5] * y + m[13];
+      out[i * 3 + 2] = m[2] * x + m[6] * y + m[14] + jit;
+    }
+    return out;
+  }
 
   if (arr.use2DPosition || !frame || !arr.cylinderName) {
     const z = arr.use2DPosition ? 0.3 : 0;

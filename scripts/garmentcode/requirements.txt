@@ -1,0 +1,10 @@
+# Geometry generation only; versions verified using Python 3.12 on Linux.
+# CairoSVG/matplotlib are imported by upstream VisPattern even without rendering.
+numpy==1.26.4
+scipy==1.17.1
+PyYAML==6.0.3
+svgwrite==1.4.3
+svgpathtools==1.8.0
+CairoSVG==2.9.1
+matplotlib==3.11.2
+psutil==7.2.2

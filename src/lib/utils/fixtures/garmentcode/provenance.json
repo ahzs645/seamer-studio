@@ -1,0 +1,9 @@
+{
+  "repository": "https://github.com/maria-korosteleva/Garment-Pattern-Generator",
+  "commit": "6b44100aeee3105709e434364b1a90bd1dea006e",
+  "license": "MIT",
+  "files": {
+    "legacy-tee.json": "data_generation/Patterns/basic tee/tee.json",
+    "legacy-skirt.json": "data_generation/Patterns/skirts/skirt_2_panels.json"
+  }
+}

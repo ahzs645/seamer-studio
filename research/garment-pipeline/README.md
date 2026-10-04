@@ -1,0 +1,13 @@
+# Isolated reviewed-source checkpoint
+
+This archive preserves the work completed so far as a source-only review checkpoint. It does not install or enable the optional SOURCE profile, promote body6 to a live profile, or turn unfinished prototypes into active production imports.
+
+Current status: seven fresh initial BODY/SELF guards passed; three targeted priority-ordering operator GPU cases passed; full-fit passes remain **0/7**. The fresh body6 preparation and mandatory rational-wrist QA handoffs are reviewed CPU work. New finite component contexts and the same-owner private geometry/numerical/anchor/engine-bridge composition are still pending. The body6 driver proposal is unfinished and rejects missing approvals before device entry.
+
+The checkpoint covers the latest body168, preparation273, QA373, adoption790, owner771, private factory2151, source169, checker578, priority491 and driver-proposal source work, plus the shared source/shader/math/ledger dependencies. The latest yielding SvelteKit delivery remains OFF-profile and retains its explicit post-freeze body164 review hold. The CPU browser yielding harness807 is included as diagnostic source; its results do not establish shipping UI responsiveness or fit.
+
+`reviewed-source-checkpoint.zip` contains human-readable source, shaders, tests, configuration, original licenses/NOTICE files, and small review manifests/criteria. Compiled bundles and vendor bundle duplicates, node_modules, native addon binaries, uploaded files, HARs, environment/credential files, large binary GPU states, screenshots and large context/output JSON are excluded. Runtime/model/evidence dependencies remain referenced by their original paths and frozen hashes. This is not a standalone production or test installation.
+
+`inventory.json` gives the archive digest, compact status and original manifest digests. Inside the ZIP, `checkpoint-metadata/full-path-inventory.json` indexes every captured original path, SHA-256 and size. Identical source copies share one canonical ZIP entry; the inventory maps every original snapshot path to that entry. `checkpoint-metadata/excluded-and-referenced-dependencies.json` records omitted runtime/evidence dependencies and reasons. Preserve those original epoch references; do not relabel old body5/613 results as body6 evidence.
+
+Every captured file was hashed before and after packaging, and its archived bytes were read back and checked against the inventory. No additional tests, browser session or GPU run was performed for packaging. Repository commit and push are handled by the root agent; this packaging step made no repository edits.

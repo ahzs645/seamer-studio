@@ -6,8 +6,9 @@
 // conservative arrangement/seam heuristics for other files.
 
 import { createEmptyPattern, type Pattern, type ConstrainablePoint, type ConstrainablePath, type Piece, type Material, type Seam, type PiecePath } from '@seamer/pattern-model';
-import { indexPaths, indexPoints, piecePathPolyline, pieceTransform } from '@seamer/pattern-model/utils/patternGeometry';
+import { indexPaths, indexPoints, pieceOutline, piecePathPolyline, pieceTransform, type Vec2 } from '@seamer/pattern-model/utils/patternGeometry';
 import { buildPieceCloth, computeSeamEdgeIntervals } from '@seamer/cloth-sim';
+import { simplifyPolyline } from '@atelier/geometry';
 
 type XY = [number, number];
 
@@ -46,18 +47,65 @@ export function isSimpleFormat(json: unknown): json is SimpleFile {
     !!(o.pieces[0] as Record<string, unknown>)?.boundary && !Array.isArray((o.pieces[0] as Record<string, unknown>)?.mainPaths);
 }
 
-/** Reject an import before it replaces the editor document when its enabled 3D pieces cannot be
- * triangulated. This uses the same boundary builder and seam interval allocation as the renderer. */
+/** Check the sampled perimeter before tolerant legacy triangulation can hide crossed edges. */
+function outlineSelfIntersects(outline: Vec2[]): boolean {
+  const epsilon = 1e-7;
+  const same = (a: Vec2, b: Vec2) => Math.hypot(a.x - b.x, a.y - b.y) < epsilon;
+  const distinct = outline.filter((point, index) => index === 0 || !same(point, outline[index - 1]));
+  // Remove redundant straight-line samples, including a sample exactly on a crossing.
+  // This numerical tolerance retains curved outline geometry.
+  const loop = simplifyPolyline(distinct, epsilon);
+  if (loop.length > 1 && same(loop[0], loop[loop.length - 1])) loop.pop();
+  const segments = loop.map((a, index) => {
+    const b = loop[(index + 1) % loop.length];
+    return { a, b, index, minX: Math.min(a.x, b.x), maxX: Math.max(a.x, b.x),
+      minY: Math.min(a.y, b.y), maxY: Math.max(a.y, b.y) };
+  }).sort((a, b) => a.minX - b.minX);
+  const orient = (a: Vec2, b: Vec2, c: Vec2) =>
+    (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+  for (let i = 0; i < segments.length; i++) {
+    const left = segments[i];
+    for (let j = i + 1; j < segments.length; j++) {
+      const right = segments[j];
+      // Sorted X bounds avoid comparing distant perimeter segments on large sampled curves.
+      if (right.minX > left.maxX + epsilon) break;
+      if (right.minY > left.maxY + epsilon || right.maxY < left.minY - epsilon) continue;
+      const gap = Math.abs(left.index - right.index);
+      if (gap === 1 || gap === loop.length - 1) continue;
+      const abC = orient(left.a, left.b, right.a), abD = orient(left.a, left.b, right.b);
+      const cdA = orient(right.a, right.b, left.a), cdB = orient(right.a, right.b, left.b);
+      if (((abC > epsilon && abD < -epsilon) || (abC < -epsilon && abD > epsilon)) &&
+        ((cdA > epsilon && cdB < -epsilon) || (cdA < -epsilon && cdB > epsilon))) {
+        // Native garment curves can overlap within the renderer's 1 mm endpoint-stitching
+        // tolerance (dart tips and nearly closed folds). Preserve those boundary slivers.
+        const leftT = cdA / (cdA - cdB), rightT = abC / (abC - abD);
+        const leftMargin = Math.min(leftT, 1 - leftT) * Math.hypot(left.b.x - left.a.x, left.b.y - left.a.y);
+        const rightMargin = Math.min(rightT, 1 - rightT) * Math.hypot(right.b.x - right.a.x, right.b.y - right.a.y);
+        if (leftMargin > 1 && rightMargin > 1) return true;
+      }
+    }
+  }
+  return false;
+}
+
+/** Reject an import before it replaces the editor document when its enabled 3D pieces have a
+ * crossed outline or cannot be triangulated. Uses the renderer's sampling and seam allocation. */
 export function assertPatternBuildable3d(pattern: Pattern): void {
   if (pattern.enable3d === false) return;
   const enabled = pattern.pieces.filter((piece) =>
     piece.type === 'dynamic' && piece.settings3d.enable3d !== false
   );
   if (enabled.length === 0) return;
+  const paths = indexPaths(pattern);
+  const points = indexPoints(pattern);
   const intervals = computeSeamEdgeIntervals(pattern);
   for (const piece of enabled) {
     let cloth;
     try {
+      const spacing = Math.min(4, (piece.settings3d.particleDistance ?? 10) / 2);
+      if (outlineSelfIntersects(pieceOutline(pattern, piece, paths, points, spacing))) {
+        throw new Error('Its boundary crosses itself.');
+      }
       cloth = buildPieceCloth(pattern, piece, undefined, intervals);
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);

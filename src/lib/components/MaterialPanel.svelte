@@ -100,15 +100,15 @@
   }
 </script>
 
-<div class="text-xs">
+<div class="material-panel text-xs">
   <h3 class="font-bold mb-2">Fabric</h3>
 
-  <div class="space-y-1 mb-2 max-h-72 overflow-y-auto">
+  <div class="material-list space-y-1 mb-2 max-h-72 overflow-y-auto">
     {#each currentPattern.materials as mat (mat.id)}
       {#if editingId === mat.id}
         <div class="bg-base-200 p-2 rounded space-y-1">
           <MaterialPreview3D material={mat} />
-          <input type="text" class="input input-bordered input-xs w-full" value={mat.name}
+          <input type="text" aria-label="Fabric name" class="input input-bordered input-xs w-full" value={mat.name}
             oninput={(e) => patch(mat.id, (m) => ({ ...m, name: e.currentTarget.value }))} />
           <label class="flex items-center gap-1">Color
             <input type="color" class="flex-1 h-6" value={swatch(mat)} oninput={(e) => setColor(mat.id, e.currentTarget.value)} />
@@ -187,13 +187,15 @@
         </div>
       {:else}
         <div role="button" tabindex="0" class="flex items-center gap-1 p-1 rounded hover:bg-base-200 cursor-pointer w-full text-left"
-          ondblclick={() => (editingId = mat.id)}
-          onkeydown={(e: KeyboardEvent) => { if (e.key === 'Enter') editingId = mat.id; }}>
+          onclick={() => (editingId = mat.id)}
+          onkeydown={(e: KeyboardEvent) => {
+            if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); editingId = mat.id; }
+          }}>
           <span class="w-3 h-3 rounded-full inline-block border" style="background: {swatch(mat)}"></span>
           <span class="flex-1 truncate">{mat.name}</span>
           <span class="text-xs opacity-50">↔{mat.stretchWarpValue}/{mat.stretchWeftValue}</span>
-          <button class="btn btn-xs btn-ghost px-1" onclick={(e: MouseEvent) => { e.stopPropagation(); editingId = mat.id; }}>✎</button>
-          <button class="btn btn-xs btn-ghost px-0.5 text-error" onclick={(e: MouseEvent) => { e.stopPropagation(); removeMaterial(mat.id); }}>&times;</button>
+          <button class="btn btn-xs btn-ghost px-1" aria-label={`Edit fabric ${mat.name}`} onclick={(e: MouseEvent) => { e.stopPropagation(); editingId = mat.id; }}>✎</button>
+          <button class="btn btn-xs btn-ghost px-0.5 text-error" aria-label={`Remove fabric ${mat.name}`} onclick={(e: MouseEvent) => { e.stopPropagation(); removeMaterial(mat.id); }}>&times;</button>
         </div>
       {/if}
     {/each}
@@ -204,3 +206,11 @@
 
   <button class="btn btn-xs btn-ghost w-full" onclick={addMaterial}>+ Add Fabric</button>
 </div>
+
+<style>
+  @media (max-width: 1023px) {
+    .material-list { max-height: none; overflow: visible; }
+    .material-panel :global(button), .material-panel :global([role="button"]) { min-height: 44px; min-width: 44px; }
+    .material-panel :global(input:not([type="checkbox"])) { min-height: 44px; font-size: 16px; }
+  }
+</style>

@@ -251,6 +251,14 @@ export interface PieceArrangement {
   positionChanged: boolean;
   matrixWorld: number[]; // 16-float column-major saved group transform (meters)
   position: number[]; // 3-float translation extracted from matrixWorld (meters)
+  /** Imported flat-panel placement, applied once before simulation. Drafting layout offsets do
+   * not move the panel in 3D. Absent on existing cylinder-arranged documents. */
+  sourcePlacement?: {
+    /** Column-major rigid transform from source-local metres to world metres. */
+    worldMatrix: number[];
+    /** Translation added to source-local 2D coordinates when packing the drafting layout (mm). */
+    layoutOffsetMm: { x: number; y: number };
+  };
 }
 
 export interface PieceSettings3D {
@@ -261,9 +269,29 @@ export interface PieceSettings3D {
   filterExternalCollisionsByClothNormal: boolean;
   collisionLayer: number;
   particleDistance?: number | null; // per-piece mesh resolution override (mm)
-  // flat per-particle cache of the settled rest state, stride 5: [x2d, y2d, x3d, y3d, z3d]
+  // Flat per-particle geometry cache, stride 5: [x2d, y2d, x3d, y3d, z3d]. Saving a
+  // checkpoint preserves the visible shape; it does not establish a settled rest state.
   // x2d/y2d in mm, x3d/y3d/z3d in meters.
   savedPositions: number[];
+  /** Checkpoints seed positions without holding particles to them. Missing metadata retains
+   * legacy native held-cache behaviour; imported source-placement caches default to checkpoint. */
+  savedDrapeState?: 'checkpoint' | 'held';
+  /** Source-body calibration used for these saved positions. Older source caches must be
+   * reassembled when body calibration changes. Native caches do not use this. */
+  savedBodyFitRevision?: number;
+  /** Source sewing seed/support policy used for this checkpoint. Native caches do not use it. */
+  savedAssemblyRevision?: number;
+  /** Actual baked authored source seam-stretch policy used for these saved positions.
+   * Missing or earlier source policies require fresh assembly; native caches do not use it. */
+  savedSourceStretchPolicy?: string;
+  /** True only for accepted source geometry with every stitch/part active, all stitch gaps at
+   * most 3mm, temporary supports released, and no XYZ holds. Partial/older source assembly
+   * caches reassemble; native caches do not use this resume-eligibility marker. */
+  savedSourceAssemblyComplete?: boolean;
+  /** Actual refined numerical topology binding; never grants resume eligibility by itself. */
+  /** Manual assembly must reopen using its original numerical stitch mesh. */
+  savedSourceGatherIntent?: 'manual';
+  savedSourceGatherPolicy?: { revision: 'source-free-gather-boundary-v1'; policySha256: string; sourceCutSha256: string };
   /** SeamScape v0.0.1's indexed mesh cache. Legacy imports retain this so the exact source face
    * topology can be rendered; current saves continue to use savedPositions above. */
   savedMeshSnapshot?: {
@@ -421,6 +449,9 @@ export interface Seam {
   label?: string | null;
   fromPaths: SeamRef[];
   toPaths: SeamRef[];
+  /** True when an interchange format specifies literal seam direction, including false/false
+   * references. Prevent geometry-based direction repair from changing that authored pairing. */
+  explicitOrientation?: boolean;
 }
 
 /** One step of the assembly order: a seam (or several sewn together) closing in one operation. */
@@ -484,6 +515,14 @@ export interface Body {
    * forcing the cached garment onto a different body. Editing a measurement clears this flag.
    */
   useLegacyDefaultAvatar?: boolean;
+  /** Resolved GarmentCode drafting measurements and the avatar inputs they calibrate.
+   * A later measurement/gender/unit edit invalidates the signature rather than overriding it. */
+  garmentCodeBody?: {
+    measurementsCm: Record<string, number>;
+    avatarSignature: string;
+    /** Source body variant selected by the generator; older imports leave this unspecified. */
+    legPose?: 'straight' | 'apart';
+  };
 }
 
 export interface Layer {
@@ -499,6 +538,8 @@ export interface PatternSettings3D {
   cameraFov: number;
   cameraPosition: [number, number, number];
   controlsTarget: [number, number, number];
+  /** Fresh source import requests a viewport fit. Omitted after an explicit camera choice/save. */
+  sourceCameraFraming?: 'viewport';
   gravity: [number, number, number];
   avatarEnabled: boolean;
   showAvatar: boolean;
@@ -619,6 +660,30 @@ export interface Pattern {
   description: string;
   /** Original library/item identifier when supplied by an imported interchange document. */
   sourceItemId?: string | null;
+  /** Source provenance; imported geometry remains editable and is not linked to these parameters. */
+  garmentCodeSource?: {
+    format: 'garmentcode-json';
+    unitsInMeter: number;
+    properties: Record<string, unknown>;
+    parameters?: unknown;
+    parameterOrder?: unknown;
+    constraints?: unknown;
+    constraintOrder?: unknown;
+    panelNames: string[];
+    /** Declarative integrity provenance. An uploaded claim does not authorize simulation refinement. */
+    /** Lossless original source specification: preserves panel order and signed zero for revalidation. */
+    gatherSourceDocument?: { encoding: 'lossless-ieee754-json-tree-v1'; value: unknown };
+    gatherProvenance?: { revision: 'garmentcode-resolved-gather-evidence-v1'; encoding: 'typed-json-ieee754-f64be-v1';
+      evidenceSha256: string; sourcePatternSha256: string; sourceCutSha256: string; programSetSha256: string;
+      upstreamRevision: string; origin: 'trusted-generator-response' | 'explicit-authored-import';
+      seams: { seamId: string; longSide: 0 | 1 }[] };
+    /** Original generator inputs, when created through the local GarmentCode service. */
+    generation?: {
+      preset: string;
+      body: Record<string, number>;
+      design: Record<string, unknown>;
+    };
+  };
   lengthUnit: 'inch' | 'cm' | 'mm';
   angleUnit: 'degrees' | 'radians';
   defaultNotchSize: number; // mm

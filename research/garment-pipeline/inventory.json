@@ -1,0 +1,209 @@
+{
+  "schema": "isolated-reviewed-source-checkpoint-inventory-summary-v1",
+  "createdUtc": "2026-10-04T17:43:37.261311+00:00",
+  "archive": "reviewed-source-checkpoint.zip",
+  "archiveSha256": "a826fe07482ae1d0f01690ec33b0eff871e24a974bbad2043d0d65fd95d7d729",
+  "archiveBytes": 7212428,
+  "indexedOriginalSourcePaths": 5806,
+  "canonicalSourceEntries": 1488,
+  "uncompressedIndexedSourceBytes": 59310435,
+  "fullPathInventory": {
+    "archiveEntry": "checkpoint-metadata/full-path-inventory.json",
+    "sha256": "4f4a606be897a0137cb8aed529b640826c53ca8d6c6e66ac0e4d38b90762fd24",
+    "byteLength": 2829744
+  },
+  "excludedReferenceIndex": {
+    "archiveEntry": "checkpoint-metadata/excluded-and-referenced-dependencies.json",
+    "sha256": "5cc77edf01d1b2e21a933963466132740dcbc26a431a047e26865432e4e9fcac",
+    "byteLength": 25082214
+  },
+  "originalFrozenManifests": [
+    {
+      "root": "/workspace/work/source-body6-calibration-owner-reseal-integration",
+      "manifest": "/workspace/work/source-body6-calibration-owner-reseal-integration/review-pins.json",
+      "sha256": "8f1b6d698d6f94ea9a31326661ea918c124094fa39aa1a6100c46b5a168ff3d2",
+      "byteLength": 36291,
+      "scope": "isolated-body6-source-checkpoint-worker-own-data-owner-reseal-v1",
+      "frozenReferenceOnlyNotNewApproval": true
+    },
+    {
+      "root": "/workspace/work/source-body6-seven-preparation-owner-resealed-candidate",
+      "manifest": "/workspace/work/source-body6-seven-preparation-owner-resealed-candidate/runtime-manifest.json",
+      "sha256": "f56ae7090b4b74ccbea528b348c78227286156d1311633059fc36e8566cd69be",
+      "byteLength": 64122,
+      "scope": "owned-fresh-body6-source-preparation-runtime-v1",
+      "frozenReferenceOnlyNotNewApproval": true
+    },
+    {
+      "root": "/workspace/work/source-seven-postframe-fit-qa-body6-owned-runtime",
+      "manifest": "/workspace/work/source-seven-postframe-fit-qa-body6-owned-runtime/review-pins.json",
+      "sha256": "8bc50b0f28107b3671d084cc8cdc1297145159457e473bc9f10d534d2899b781",
+      "byteLength": 72461,
+      "scope": "fresh-body6-owned-mandatory-rational-wrist-postframe-qa-review-v1",
+      "frozenReferenceOnlyNotNewApproval": true
+    },
+    {
+      "root": "/workspace/work/source-seven-postframe-fit-qa-body6-owned-runtime",
+      "manifest": "/workspace/work/source-seven-postframe-fit-qa-body6-owned-runtime/runtime-manifest.json",
+      "sha256": "e16b0c39755aa3f3f0ee5133d01eddb638a5d6192b41725d5576aa37d21cede6",
+      "byteLength": 255121,
+      "scope": "owned-source-preparation-runtime-v1",
+      "frozenReferenceOnlyNotNewApproval": true
+    },
+    {
+      "root": "/workspace/work/source-physical-app-main-adoption-yield-review",
+      "manifest": "/workspace/work/source-physical-app-main-adoption-yield-review/review-pins.json",
+      "sha256": "af057ad808a46dffe1253c6621b10ee3556c9abb13d111a25a426a674d098933",
+      "byteLength": 239221,
+      "scope": "Owned CPU main adoption yield candidate; Chromium all-phase responsiveness not yet validated",
+      "frozenReferenceOnlyNotNewApproval": true
+    },
+    {
+      "root": "/workspace/work/source-physical-app-owner-scoped-callback-sealed-review",
+      "manifest": "/workspace/work/source-physical-app-owner-scoped-callback-sealed-review/review-pins.json",
+      "sha256": "2ba2d855574e4c7336e46bc9712d259842be30c2b845a23ba614a4672f829aeb",
+      "byteLength": 154435,
+      "scope": "Frozen owned actual-scene owner lifecycle integration candidate; CPU host controls only",
+      "frozenReferenceOnlyNotNewApproval": true
+    },
+    {
+      "root": "/workspace/work/source169-body6-yielding-sveltekit-delivery-review",
+      "manifest": "/workspace/work/source169-body6-yielding-sveltekit-delivery-review/review-pins.json",
+      "sha256": "08f06ed92853610e5747c90a90f5d62da23dedbc4be2a9964f761ac6283ea147",
+      "byteLength": 210471,
+      "scope": "actual copied Kit source169/owner771 body6-private164 yielding790 router-renderer OFF-profile delivery; source physical profile OFF",
+      "frozenReferenceOnlyNotNewApproval": true
+    },
+    {
+      "root": "/workspace/work/source169-chromium-cpu-worker-harness-yielding-main-review",
+      "manifest": "/workspace/work/source169-chromium-cpu-worker-harness-yielding-main-review/review-pins.json",
+      "sha256": "782beb5f2940d144e6951ea9ef59ca4491d9dbb06fb1fbeda14686e5a03c43c5",
+      "byteLength": 151771,
+      "scope": "owned-body5-actual-Chromium-CPU-790-main-adoption-wholephase-retest-before-launch",
+      "frozenReferenceOnlyNotNewApproval": true
+    },
+    {
+      "root": "/workspace/work/source-seeded-finite895-component-bound-persistent-anchor-kernels",
+      "manifest": "/workspace/work/source-seeded-finite895-component-bound-persistent-anchor-kernels/review-pins.json",
+      "sha256": "a4d69889dbf63f0985e89aca11269669984fab544bc7762462501aa9510a8a1b",
+      "byteLength": 397319,
+      "scope": "NEW same private2078 graph extends exact compiled-object cache to three V2 anchor pipelines; no device/frame/fit/pressure authority",
+      "frozenReferenceOnlyNotNewApproval": true
+    },
+    {
+      "root": "/workspace/work/source-finite-feature-component-browser169-worker-contexts-candidate",
+      "manifest": "/workspace/work/source-finite-feature-component-browser169-worker-contexts-candidate/review-pins.json",
+      "sha256": "285090fcbac5d297119b92779f352167f2d59b9b75c3d8b8eb9c9daa1b597391",
+      "byteLength": 496354,
+      "scope": "actual-owned-source169-worker-app-context-extension-candidate-v1",
+      "frozenReferenceOnlyNotNewApproval": true
+    },
+    {
+      "root": "/workspace/work/source-all-phase-joint-engine-moving-sat-seams",
+      "manifest": "/workspace/work/source-all-phase-joint-engine-moving-sat-seams/review-pins.json",
+      "sha256": "4d24e74f43557d24ba98d0c2c138b39d7e542fd091b09bd17b4deb3e4a06c99c",
+      "byteLength": 29543,
+      "scope": "NEW exact original USED seam SAT and genuine original indexedpoint dynamic-plane fallback in actual source Worker; retained actual11 rejected3 CPU replay only, no retropublication",
+      "frozenReferenceOnlyNotNewApproval": true
+    },
+    {
+      "root": "/workspace/work/source-frame-commit-portable-validator-moving-sat",
+      "manifest": "/workspace/work/source-frame-commit-portable-validator-moving-sat/review-pins.json",
+      "sha256": "f469149249aaeba2c771fe6da9741d68b0192829c114a3532e25e054d0ff3a99",
+      "byteLength": 96474,
+      "scope": null,
+      "frozenReferenceOnlyNotNewApproval": true
+    },
+    {
+      "root": "/workspace/work/source-pressure-friction-whole-provider-priority-ordering-body-bounded-capture",
+      "manifest": "/workspace/work/source-pressure-friction-whole-provider-priority-ordering-body-bounded-capture/review-pins.json",
+      "sha256": "3eaae1d04026e13e0531e45425e8bafa4083d2dafdf1f6add2b997109c71b7ff",
+      "byteLength": 97320,
+      "scope": "captured-SI-SELF-and-declared-genuine-SI-coupled-BODY-friction-priority-operator-v1",
+      "frozenReferenceOnlyNotNewApproval": true
+    },
+    {
+      "root": "/workspace/work/physical-frame-receipt-portable",
+      "manifest": "/workspace/work/physical-frame-receipt-portable/review-pins.json",
+      "sha256": "62b6bab1ebf49a523e518b0dd10a4b6c75a6a30bac79c3ed5603f95db52e1942",
+      "byteLength": 488,
+      "scope": null,
+      "frozenReferenceOnlyNotNewApproval": true
+    },
+    {
+      "root": "/workspace/work/source-physical-anchor-arena-review-progress3",
+      "manifest": "/workspace/work/source-physical-anchor-arena-review-progress3/review-pins.json",
+      "sha256": "b2beb6dcbc4c6abcb0bed9cc3e856acdee9e1112d3cd0468384ec76e9e1a882b",
+      "byteLength": 2021,
+      "scope": "source-physical-anchor-arena-cpu-review-only",
+      "frozenReferenceOnlyNotNewApproval": true
+    },
+    {
+      "root": "/workspace/work/source-joint-executed-topology-anchor-integration",
+      "manifest": "/workspace/work/source-joint-executed-topology-anchor-integration/review-pins.json",
+      "sha256": "05379f015d969c30ed15271ee33b0e45dc2907eacb170e463ca83b9d86c51981",
+      "byteLength": 32400,
+      "scope": "CPU implementation and preparation/reflection only; new integration not device validated",
+      "frozenReferenceOnlyNotNewApproval": true
+    },
+    {
+      "root": "/workspace/work/source-moving-original-seam-plane-reference",
+      "manifest": "/workspace/work/source-moving-original-seam-plane-reference/review-pins.json",
+      "sha256": "c8ccab622605e3790d727091af17a128ccf4e3911fce3c4331bc7eacb5f3875e",
+      "byteLength": 2952,
+      "scope": "NEW CPU-only complete finite moving-plane support theorem and exact original USED paired-tube wrapper; no source/Worker/guard integration yet",
+      "frozenReferenceOnlyNotNewApproval": true
+    },
+    {
+      "root": "/workspace/work/source-moving-original-seam-sat-reference",
+      "manifest": "/workspace/work/source-moving-original-seam-sat-reference/review-pins.json",
+      "sha256": "4b09c9accfb22dac554a2dfdbcc8dd29be4e83ed25d29eff06fe78e3a8572bcf",
+      "byteLength": 3163,
+      "scope": "NEW CPU-only exact strict-interior moving-SAT and corresponding-original-used-edge endpoint reference; source159/actual11 rejection preserved",
+      "frozenReferenceOnlyNotNewApproval": true
+    },
+    {
+      "root": "/workspace/work/source-moving-indexed-point-plane-reference",
+      "manifest": "/workspace/work/source-moving-indexed-point-plane-reference/review-pins.json",
+      "sha256": "8c0b2c78192c39e2a91c98830f00b853d981b82591fc783dcb9e58dbcd2c9573",
+      "byteLength": 3047,
+      "scope": "NEW CPU-only dynamic plane proof confining complete finite intersection to one genuine original physical indexed point; no seam or geometric coincidence authority",
+      "frozenReferenceOnlyNotNewApproval": true
+    },
+    {
+      "root": "/workspace/work/source-final-native-hand-cuff-rational-reference",
+      "manifest": "/workspace/work/source-final-native-hand-cuff-rational-reference/review-pins.json",
+      "sha256": "4028cf6cd50a65c6403d8197389bff652f20eae7af83043c18eb870b5e3cb1ea",
+      "byteLength": 4396,
+      "scope": "pure-supplemental-native-anatomy-cpu-only",
+      "frozenReferenceOnlyNotNewApproval": true
+    },
+    {
+      "root": "/workspace/work/source-seven-postframe-fit-qa-native-wrist-runtime",
+      "manifest": "/workspace/work/source-seven-postframe-fit-qa-native-wrist-runtime/review-pins.json",
+      "sha256": "a7e4603ca1724f8ed425d0ab79000a2faeb5658e038473df62cd4e8a13db08dc",
+      "byteLength": 35748,
+      "scope": "mandatory-owned-exact-rational-native-wrist-QA-successor-v1",
+      "frozenReferenceOnlyNotNewApproval": true
+    },
+    {
+      "root": "/workspace/work/source-seven-postframe-fit-qa-native-wrist-runtime",
+      "manifest": "/workspace/work/source-seven-postframe-fit-qa-native-wrist-runtime/runtime-manifest.json",
+      "sha256": "f97a37cc536650459bca8701ea8143a6e680882359f3837cd0f2086218c7a60c",
+      "byteLength": 207046,
+      "scope": "owned-source-preparation-runtime-v1",
+      "frozenReferenceOnlyNotNewApproval": true
+    }
+  ],
+  "beforeAfterSourceHashesEqual": true,
+  "zipContentsReloadHashesEqual": true,
+  "sourceOnly": true,
+  "notStandaloneProduction": true,
+  "body6Live": false,
+  "newFiniteContextAndSameOwnerBridgePending": true,
+  "fullFitPasses": 0,
+  "requiredGarments": 7,
+  "initialBodySelfGuardsPassed": 7,
+  "targetedOperatorGpuCasesPassed": 3,
+  "latestDelivery164PostFreezeHoldPreserved": true
+}

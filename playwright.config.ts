@@ -1,12 +1,13 @@
 import { defineConfig, devices } from '@playwright/test';
 
-const baseURL = 'http://127.0.0.1:4173';
+const baseURL = process.env.PLAYWRIGHT_BASE_URL || 'http://127.0.0.1:4173';
+const executablePath = process.env.CHROMIUM_PATH || undefined;
 const webgpuLaunchArgs = [
 	'--enable-unsafe-webgpu',
 	...(process.platform === 'darwin'
 		? ['--use-angle=metal']
 		: process.platform === 'linux'
-			? ['--enable-features=Vulkan']
+			? ['--use-webgpu-adapter=swiftshader', '--enable-unsafe-swiftshader']
 			: [])
 ];
 
@@ -29,25 +30,33 @@ export default defineConfig({
 	projects: [
 		{
 			name: 'chromium',
-			testIgnore: '**/webgpu-drape.spec.ts',
+			testIgnore: ['**/webgpu-drape.spec.ts', '**/garmentcode-drape.spec.ts', '**/self-collision-webgpu.spec.ts', '**/cloth-contact-webgpu.spec.ts', '**/cloth-surface-webgpu.spec.ts', '**/cloth-self-surface-webgpu.spec.ts', '**/cloth-diagnostic-copy-webgpu.spec.ts', '**/source-worker-webgpu.spec.ts', '**/workspace-mobile.spec.ts'],
 			use: {
 				...devices['Desktop Chrome'],
-				launchOptions: { args: ['--enable-unsafe-swiftshader'] }
+				launchOptions: { executablePath, args: ['--enable-unsafe-swiftshader'] }
+			}
+		},
+		{
+			name: 'mobile-chromium',
+			testMatch: '**/workspace-mobile.spec.ts',
+			use: {
+				...devices['Pixel 7'],
+				launchOptions: { executablePath, args: ['--enable-unsafe-swiftshader'] }
 			}
 		},
 		{
 			name: 'webgpu',
-			testMatch: '**/webgpu-drape.spec.ts',
+			testMatch: ['**/webgpu-drape.spec.ts', '**/garmentcode-drape.spec.ts', '**/self-collision-webgpu.spec.ts', '**/cloth-contact-webgpu.spec.ts', '**/cloth-surface-webgpu.spec.ts', '**/cloth-self-surface-webgpu.spec.ts', '**/cloth-diagnostic-copy-webgpu.spec.ts', '**/source-worker-webgpu.spec.ts'],
 			use: {
 				...devices['Desktop Chrome'],
-				launchOptions: { args: webgpuLaunchArgs }
+				launchOptions: { executablePath, args: webgpuLaunchArgs }
 			}
 		}
 	],
 	webServer: {
-		command: 'pnpm dev --host 127.0.0.1 --port 4173 --strictPort',
+		command: 'node node_modules/vite/bin/vite.js dev --host 127.0.0.1 --port 4173 --strictPort',
 		url: baseURL,
-		reuseExistingServer: false,
+		reuseExistingServer: !process.env.CI,
 		timeout: 120_000
 	}
 });

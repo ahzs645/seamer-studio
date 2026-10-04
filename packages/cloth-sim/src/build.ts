@@ -12,6 +12,10 @@
 import type { Pattern, Material, SeamRef, PiecePath } from '@seamer/pattern-model';
 import { resolveAssembly } from '@seamer/pattern-model/utils/assembly';
 import type { PieceCloth } from './geometry/boundary';
+import type { AssemblySupportData } from './assembly';
+import type { SourceStagingPlan } from './sourceStaging';
+import type { SourceGatherRefinement, GatherCollisionGeometry } from './sourceGatherRefinement';
+import { GARMENT_CODE_SOURCE_STRETCH_POLICY, sourceStretchPolicyApplies } from './sourceStretchPolicy';
 import type { Vec2 } from '@seamer/pattern-model/utils/patternGeometry';
 import {
   stretchScaleToCompliance,
@@ -42,8 +46,27 @@ export interface SimData {
   particleCount: number;
   positions: Float32Array; // vec4: x,y,z, invMass (initial = cached/arranged drape)
   arrangedPositions: Float32Array; // vec4: flat-on-body placement (pre-drape), for "Arrange"
+  /** Unmodified imported flat-panel seed, before source-only assembly clearance/interface mapping. */
+  sourceArrangedPositions?: Float32Array;
   positions2d: Float32Array; // vec4: x2d(m), y2d(m), pieceIndex, 0
   anchors: Float32Array; // vec4: anchor xyz (initial), w = anchor weight (1 = hold to saved drape)
+  /** Source-only temporary sewing support; independent of saved XYZ anchors. */
+  assemblySupport?: AssemblySupportData;
+  /** Fresh source semantic assembly graph; absent for native/manual/cache fallback. */
+  sourceStaging?: SourceStagingPlan;
+  /** Derived source mesh policy; original cut/stitch knots remain authoritative. */
+  sourceGatherRefinement?: SourceGatherRefinement;
+  sourceGatherCollisionGeometry?: GatherCollisionGeometry;
+  /** Inactive free implicit source template, selected only for a fresh arrangement restart. */
+  arrangementSourceStaging?: SourceStagingPlan;
+  /** Actual baked source-rest policy, independent of material/contact settings. */
+  sourceStretchPolicy?: {
+    policy: typeof GARMENT_CODE_SOURCE_STRETCH_POLICY;
+    sewingSolver: 'sequential-stretch-sewing-v1' | 'interleaved-stretch-sewing-v1';
+    sourcePieceIds: string[];
+    retainedSeamStretchEdges: number;
+    legacySoftenedSeamStretchEdges: number;
+  };
   stretchColors: ColorGroup[];
   bendColors: ColorGroup[];
   seams: Int32Array; // particleCount * 4, init -1
@@ -83,7 +106,7 @@ export interface ArrangedPiece {
   cloth: PieceCloth;
   positions3d: Float32Array; // arranged, length cloth.mesh.points.length*3 (m)
   frozen: boolean;
-  fromSaved: boolean; // initial positions came from the original settled drape (anchor to them)
+  fromSaved: boolean; // initial positions came from a geometry cache; cache policy controls anchors
   boundaryLocal?: number[]; // local indices of boundary particles (saved-drape pieces) for seam linking
   arranged3d?: Float32Array; // flat-on-body placement for the same particles (pre-drape); defaults to positions3d
 }
@@ -240,9 +263,12 @@ export function buildSimData(pattern: Pattern, arranged: ArrangedPiece[], option
   // `${pieceId}::${edgeKey}` -> global particle indices (for seams). edgeKey is a PiecePath id,
   // optionally suffixed `#M` for the reflected (mirrored) copy of that edge.
   const edgeParticlesGlobal = new Map<string, number[]>();
+  const stitchEdgeParticlesGlobal = new Map<string, number[]>();
   const key = (pieceId: string, edgeKey: string) => `${pieceId}::${edgeKey}`;
   const instBoundaryGlobals: number[][] = []; // global boundary particle indices per instance (saved pieces)
 
+  const sourceRestParticles = new Uint8Array(total);
+  const sourceRestPieceIds: string[] = [];
   let offset = 0;
   for (let ii = 0; ii < instances.length; ii++) {
     const inst = instances[ii];
@@ -257,6 +283,18 @@ export function buildSimData(pattern: Pattern, arranged: ArrangedPiece[], option
     const bendA = clampBendAlpha(bendScaleToCompliance(mat?.bendValue ?? 0));
 
     const piece = pattern.pieces.find((p) => p.id === ap.cloth.pieceId)!;
+    // SourcePlacement is the imported panel's explicit provenance. Native additions to a
+    // source document have no such marker; renaming an imported panel keeps its cut physics.
+    const sourceRest = sourceStretchPolicyApplies(pattern, piece);
+    if (sourceRest) {
+      sourceRestParticles.fill(1, offset, offset + n);
+      sourceRestPieceIds.push(inst.mirror ? `${piece.id}#M` : piece.id);
+    }
+    // Source placement and in-progress save checkpoints are geometry seeds, not validated rest
+    // states. Holding them here prevents a saved unassembled GarmentCode garment from sewing.
+    // Legacy native caches keep their original hold policy unless explicitly marked checkpoint.
+    const holdSavedDrape = ap.fromSaved && piece.settings3d.savedDrapeState !== 'checkpoint'
+      && (piece.settings3d.savedDrapeState === 'held' || !piece.settings3d.arrangement?.sourcePlacement);
     const gl = Math.hypot(piece.grainVector.x, piece.grainVector.y) || 1;
     const xHat = { x: piece.grainVector.x / gl, y: piece.grainVector.y / gl };
     const yHat = { x: -xHat.y, y: xHat.x };
@@ -275,7 +313,7 @@ export function buildSimData(pattern: Pattern, arranged: ArrangedPiece[], option
       anchors[g * 4] = positions[g * 4];
       anchors[g * 4 + 1] = positions[g * 4 + 1];
       anchors[g * 4 + 2] = positions[g * 4 + 2];
-      anchors[g * 4 + 3] = ap.fromSaved ? 1 : 0;
+      anchors[g * 4 + 3] = holdSavedDrape ? 1 : 0;
       positions2d[g * 4] = mesh.points[i].x / 1000;
       positions2d[g * 4 + 1] = mesh.points[i].y / 1000;
       positions2d[g * 4 + 2] = 0;
@@ -310,6 +348,12 @@ export function buildSimData(pattern: Pattern, arranged: ArrangedPiece[], option
       stretchRest.push(len2d / 1000);
       stretchCompliance.push(alpha);
       stretchLong.push(0);
+      // Child law is transferred after the original clamp; reclamping alpha/2 changes serial law.
+      const child = ap.cloth.gatherAxialOverrides?.find(row => row.from === a && row.to === b || row.from === b && row.to === a);
+      if (child) {
+        stretchRest[stretchRest.length - 1] = child.restLengthM;
+        stretchCompliance[stretchCompliance.length - 1] = child.compliance;
+      }
     }
 
     // Bending: one constraint per interior mesh edge shared by two triangles. The two opposite
@@ -426,6 +470,9 @@ export function buildSimData(pattern: Pattern, arranged: ArrangedPiece[], option
     for (const [edgeKey, locals] of ap.cloth.edgeParticles) {
       edgeParticlesGlobal.set(key(ap.cloth.pieceId, inst.mirror ? `${edgeKey}#M` : edgeKey), locals.map((li) => offset + li));
     }
+    for (const [edgeKey, locals] of ap.cloth.stitchEdgeParticles ?? ap.cloth.edgeParticles) {
+      stitchEdgeParticlesGlobal.set(key(ap.cloth.pieceId, inst.mirror ? `${edgeKey}#M` : edgeKey), locals.map((li) => offset + li));
+    }
     instBoundaryGlobals.push((ap.boundaryLocal ?? []).map((li) => offset + li));
 
     // triangle winding flipped on mirror so face normals stay outward
@@ -453,6 +500,17 @@ export function buildSimData(pattern: Pattern, arranged: ArrangedPiece[], option
     const combined = 1 / (1 / w + kg);
     positions[g * 4 + 3] = combined;
     arrangedPositions[g * 4 + 3] = combined;
+  }
+
+  // Refined model mass comes from the captured baseline, not a second inverse-area sum.
+  for (const sp of simPieces) {
+    const captured = arranged.find(ap => ap.cloth.pieceId === sp.pieceId)?.cloth.capturedInverseMass;
+    if (!captured) continue;
+    if (captured.length !== sp.count || captured.some(w => !Number.isFinite(w) || w <= 0)) throw new Error('Invalid captured source mass override');
+    for (let local = 0; local < sp.count; local++) {
+      positions[(sp.start + local) * 4 + 3] = captured[local];
+      arrangedPositions[(sp.start + local) * 4 + 3] = captured[local];
+    }
   }
 
   // Seams.
@@ -495,7 +553,7 @@ export function buildSimData(pattern: Pattern, arranged: ArrangedPiece[], option
     }
     ownerByPath.set(reference.id, owner);
     const edgeKey = reference.mirrored ? `${reference.id}#M` : reference.id;
-    const particles = edgeParticlesGlobal.get(key(owner.id, edgeKey));
+    const particles = stitchEdgeParticlesGlobal.get(key(owner.id, edgeKey));
     if (!particles) {
       console.warn(`Seam ${seamId}: edge ${edgeKey} of piece "${owner.name}" has no particles in the sim mesh — dropped`);
       return null;
@@ -592,7 +650,8 @@ export function buildSimData(pattern: Pattern, arranged: ArrangedPiece[], option
     // that endpoint-complete result for this schema (where PiecePaths are the sub-segment unit).
     const n = Math.max(fromChain.length, toChain.length);
     const hasExplicitOrientation =
-      seam.fromPaths.some((r) => r.reversed) || seam.toPaths.some((r) => r.reversed);
+      seam.explicitOrientation === true
+      || seam.fromPaths.some((r) => r.reversed) || seam.toPaths.some((r) => r.reversed);
     const hasCachedDrape = [...fromChain, ...toChain]
       .every((particle) => anchors[particle * 4 + 3] > 0);
     // Raw SeamScape JSON flattens mirrored pieces into explicit perimeter geometry. The paired
@@ -614,7 +673,8 @@ export function buildSimData(pattern: Pattern, arranged: ArrangedPiece[], option
       }
       return c;
     };
-    const shouldAutoAlign = hasCachedDrape || !hasExplicitOrientation || hasFlattenedLegacyOutline;
+    const shouldAutoAlign = seam.explicitOrientation !== true
+      && (hasCachedDrape || !hasExplicitOrientation || hasFlattenedLegacyOutline);
     const rev = shouldAutoAlign && alignCost(true) < alignCost(false);
     const pairList: number[] = [];
     for (let k = 0; k < n; k++) {
@@ -677,14 +737,19 @@ export function buildSimData(pattern: Pattern, arranged: ArrangedPiece[], option
   }
   const stitchCount = stitch;
 
-  // Soften BOTH stretch and bend across seams (matching the original's setupStretchingEdges +
-  // setupBendingEdges): a stiff spring/fold spanning a seam fights the seam solver pulling the two
-  // edges together, so disable compliance for edges whose endpoints are both seam particles.
+  // Legacy native documents soften stretch/bend at sewn boundaries. Each fabric stretch edge
+  // above belongs to ONE panel: its rest length defines that panel's cut, even when both corners
+  // sew to another panel. Measured source panels retain that authored stretch compliance, so a
+  // shorter waistband gathers the longer skirt rather than silently stretching its own cut.
+  // Source bending retains the existing policy pending separate physical validation.
   const isSeam = new Uint8Array(total);
   for (let i = 0; i < total; i++) if (seams[i * 4] !== -1) isSeam[i] = 1;
+  let retainedSeamStretchEdges = 0, legacySoftenedSeamStretchEdges = 0;
   for (let i = 0; i < allStretchEdges.length; i++) {
     const [a, b] = allStretchEdges[i];
-    if (isSeam[a] && isSeam[b]) stretchCompliance[i] = DISABLED_COMPLIANCE;
+    if (!isSeam[a] || !isSeam[b]) continue;
+    if (sourceRestParticles[a] && sourceRestParticles[b]) retainedSeamStretchEdges++;
+    else { stretchCompliance[i] = DISABLED_COMPLIANCE; legacySoftenedSeamStretchEdges++; }
   }
   // A bend constraint is disabled when EITHER the opposite-vertex pair OR the hinge pair lies fully
   // on a seam (the original checks both: `t.has(f.a)&&t.has(f.b) || t.has(m)&&t.has(P)`), zeroing
@@ -779,6 +844,11 @@ export function buildSimData(pattern: Pattern, arranged: ArrangedPiece[], option
 
   return {
     particleCount: total, positions, arrangedPositions, positions2d, anchors,
+    ...(sourceRestPieceIds.length ? { sourceStretchPolicy: {
+      policy: GARMENT_CODE_SOURCE_STRETCH_POLICY, sourcePieceIds: sourceRestPieceIds,
+      sewingSolver: 'sequential-stretch-sewing-v1' as const,
+      retainedSeamStretchEdges, legacySoftenedSeamStretchEdges
+    } } : {}),
     stretchColors, bendColors, seams, pieces: simPieces,
     triangles, triangleCount: triCount, particleLayers, neighborIndices,
     incidentTriangles, maxIncidentTrianglesPerParticle: MAX_INCIDENT,

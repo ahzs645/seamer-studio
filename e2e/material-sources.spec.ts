@@ -1,10 +1,16 @@
 import { expect, test } from '@playwright/test';
+import { readFile } from 'node:fs/promises';
 
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('seamer.welcomeSeen', '1'));
 });
 
 test('material maps can remain URL-only, download an offline copy, or upload a file', async ({ page }) => {
+  // Keep URL download coverage independent of the captured application's asset host.
+  const texture = await readFile(new URL('../static/textures/69db4cec-026c-44e3-b5f5-cf088e1aca43.jpg', import.meta.url));
+  await page.route(/69db4cec-026c-44e3-b5f5-cf088e1aca43\.jpg(?:\?.*)?$/, route =>
+    route.fulfill({ status: 200, contentType: 'image/jpeg', body: texture })
+  );
   await page.goto('/studio', { waitUntil: 'domcontentloaded' });
   await expect(page.getByTestId('pattern-name-input')).toHaveValue('Pencil skirt - 3D');
 

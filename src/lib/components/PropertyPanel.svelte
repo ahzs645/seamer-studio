@@ -279,7 +279,7 @@
     updateMainPath(pp.id, { notches: (pp.notches ?? []).filter((n) => n.id !== notchId) }, 'Remove notch');
   }
   function updateArrangement(field: keyof PieceArrangement, value: string | number) {
-    updatePiece((p) => ({ ...p, settings3d: { ...p.settings3d, arrangement: { ...p.settings3d.arrangement, [field]: value } } }));
+    updatePiece((p) => ({ ...p, settings3d: { ...p.settings3d, savedPositions: [], savedMeshSnapshot: undefined, arrangement: { ...p.settings3d.arrangement, sourcePlacement: undefined, [field]: value } } }));
   }
   function selectPath(pp: PiecePath) {
     editor.setSelection(editor.selection.replace('path', [pp.path]));

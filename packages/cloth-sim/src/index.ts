@@ -8,9 +8,17 @@ import {
 import { ClothSimulation, type PreparedCloth } from './simulator';
 
 export * from './config';
+export * from './contactConfig';
+export * from './sourceStretchPolicy';
 export * from './build';
 export * from './simulator';
 export * from './refit';
+export * from './collisionGuard';
+export * from './finalizeSourceGatherGeometry';
+export * from './continuousCollisionGuard';
+export * from './assembly';
+export { buildSourceStagingPlan, SourceStagingController } from './sourceStaging';
+export type { SourceStagingPlan, SourceStagingSnapshot, SourceAssemblyState } from './sourceStaging';
 export * from './cylinderRefit';
 export * from './geometry/boundary';
 export * from './geometry/arrangement';
@@ -63,3 +71,7 @@ export const clothSolverPlugin: SolverPlugin<PreparedCloth, ClothSolverState> = 
     return new ClothSolverHandle(new ClothSimulation(device, input));
   }
 };
+
+export {sourceGatherIdentity, refineSourceGatherArrangement} from './sourceGatherRefinement';
+export type {ApprovedGatherEvidence, GatherBuildScope, SourceGatherRefinement, GatherCollisionGeometry} from './sourceGatherRefinement';
+export {physicalSeamStitchIndices} from './webgpu/seamGate';

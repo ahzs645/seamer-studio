@@ -1,8 +1,10 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import type { Editor } from '@atelier/core';
   import { editorState } from '@atelier/svelte';
   import type { Pattern } from '@seamer/pattern-model';
   import { selectedTool } from '$lib/stores/pattern';
+  import { canUseDrawingShortcut, isDialogKeyboardTarget } from '$lib/utils/keyboard';
 
   let { editor }: { editor: Editor<Pattern> } = $props();
   // svelte-ignore state_referenced_locally -- PatternCanvas2D is keyed by Editor identity
@@ -48,13 +50,80 @@
     { id: 'measure', label: 'Measure (point to point)', hotkey: 'M', icon: 'straighten', gap: true }
   ];
 
+  const instanceId = $props.id();
+  let toolbar: HTMLDivElement;
+  let openGroup = $state<string | null>(null);
+  let flyoutPosition = $state({ top: 0, right: 0 });
+
+  function openFlyout(id: string) {
+    const trigger = toolbar?.querySelector<HTMLButtonElement>(`[aria-controls="${id}"]`);
+    if (!trigger) return;
+    const rect = trigger.getBoundingClientRect();
+    flyoutPosition = {
+      top: Math.max(8, rect.top),
+      right: Math.max(8, window.innerWidth - rect.left + 4)
+    };
+    openGroup = id;
+    // The actual row size also includes theme borders and spacing. Measure the
+    // rendered flyout so short landscape viewports keep every tool reachable.
+    void tick().then(() => {
+      if (openGroup !== id) return;
+      const flyout = document.getElementById(id)?.getBoundingClientRect();
+      if (!flyout) return;
+      flyoutPosition = {
+        top: Math.max(8, Math.min(rect.top, window.innerHeight - flyout.height - 8)),
+        right: Math.max(8, Math.min(window.innerWidth - rect.left + 4, window.innerWidth - flyout.width - 8))
+      };
+    });
+  }
+
+  function toggleGroup(id: string) {
+    if (openGroup === id) closeGroup();
+    else openFlyout(id);
+  }
+
+  function chooseTool(id: string) {
+    selectedTool.set(id);
+    openGroup = null;
+  }
+
+  function closeGroup(restoreFocus = false) {
+    if (restoreFocus && openGroup) {
+      const trigger = toolbar?.querySelector<HTMLButtonElement>(`[aria-controls="${openGroup}"]`);
+      trigger?.focus();
+    }
+    openGroup = null;
+  }
+
+  function handleFlyoutKeydown(ev: KeyboardEvent) {
+    if (openGroup && ev.key === 'Escape' && !ev.defaultPrevented && !isDialogKeyboardTarget(ev.target)) {
+      ev.preventDefault();
+      ev.stopImmediatePropagation();
+      closeGroup(true);
+    }
+  }
+
+  function handleOutsidePointer(ev: PointerEvent) {
+    if (openGroup && ev.target instanceof Node && !toolbar?.contains(ev.target)) closeGroup();
+  }
+
+  function handleGroupKeydown(ev: KeyboardEvent, id: string) {
+    if (ev.key === 'ArrowLeft' || ev.key === 'ArrowDown') {
+      ev.preventDefault();
+      openFlyout(id);
+      // Focus after rendering and applying the measured viewport clamp.
+      void tick().then(() => tick()).then(() => {
+        if (openGroup === id) document.getElementById(id)?.querySelector<HTMLButtonElement>('button')?.focus();
+      });
+    }
+  }
+
   const groupActive = (e: Entry) => !!e.sub?.some((s) => s.id === $selectedTool);
 
   function handleKeydown(ev: KeyboardEvent) {
-    if (ev.target instanceof HTMLInputElement || ev.target instanceof HTMLTextAreaElement) return;
-    if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
+    if (!canUseDrawingShortcut(ev)) return;
     // Shift+S (multi seam) before plain S
-    if (ev.shiftKey && ev.key.toLowerCase() === 's') { ev.preventDefault(); selectedTool.set('seam-multi'); return; }
+    if (ev.shiftKey && ev.key.toLowerCase() === 's') { ev.preventDefault(); chooseTool('seam-multi'); return; }
     // Other shifted keys belong to app-level bindings (Shift+V variables, Shift+M mirror-Y).
     if (ev.shiftKey) return;
     // M doubles as "mirror selection" (studio page handler) — an active selection wins over the tool.
@@ -63,25 +132,37 @@
     const all: Item[] = [];
     for (const e of entries) { if (e.id) all.push(e as Item); if (e.sub) all.push(...e.sub); }
     const t = all.find((x) => x.hotkey && !x.hotkey.includes('+') && x.hotkey.toLowerCase() === ev.key.toLowerCase());
-    if (t) { ev.preventDefault(); selectedTool.set(t.id); }
+    if (t) { ev.preventDefault(); chooseTool(t.id); }
   }
 
   $effect(() => {
     window.addEventListener('keydown', handleKeydown);
-    return () => window.removeEventListener('keydown', handleKeydown);
+    window.addEventListener('keydown', handleFlyoutKeydown, true);
+    window.addEventListener('pointerdown', handleOutsidePointer, true);
+    const onResize = () => closeGroup();
+    window.addEventListener('resize', onResize);
+    return () => {
+      window.removeEventListener('keydown', handleKeydown);
+      window.removeEventListener('keydown', handleFlyoutKeydown, true);
+      window.removeEventListener('pointerdown', handleOutsidePointer, true);
+      window.removeEventListener('resize', onResize);
+    };
   });
 </script>
 
-{#snippet toolBtn(item: Item, active: boolean)}
+{#snippet toolBtn(item: Item, active: boolean, showLabel = false)}
   <button
     type="button"
     title="{item.label}{item.hotkey ? ` (${item.hotkey})` : ''}"
     aria-label={item.label}
-    class="group/btn relative flex items-center h-9 justify-center btn btn-primary p-0 my-0.5 overflow-hidden transition-all self-end hover:aspect-auto aspect-square shadow"
+    aria-pressed={active}
+    class="tool-button relative shrink-0 flex items-center h-9 justify-center btn btn-primary p-0 my-0.5 overflow-hidden transition-all self-end shadow"
+    class:aspect-square={!showLabel}
+    class:aspect-auto={showLabel}
     class:!btn-accent={active}
-    onclick={() => selectedTool.set(item.id)}
+    onclick={() => chooseTool(item.id)}
   >
-    <span class="min-w-0 hidden group-hover/btn:inline">
+    <span class="tool-label min-w-0" class:visible-label={showLabel}>
       <span class="text-xs pl-2 pr-1 whitespace-nowrap inline-flex items-center gap-1">
         {item.label}{#if item.hotkey}<span class="kbd kbd-xs">{item.hotkey}</span>{/if}
       </span>
@@ -93,31 +174,56 @@
   </button>
 {/snippet}
 
-<div class="flex flex-col m-2 absolute right-0 top-0 z-10 items-end" data-tour-id="tour-drawing-tools">
-  {#each entries as e}
-    {#if e.gap}<div class="h-4"></div>{/if}
+<div bind:this={toolbar} class="flex flex-col m-2 absolute right-0 top-0 z-20 items-end overflow-y-auto overscroll-contain" style="max-height: calc(100% - 1rem); scrollbar-gutter: stable;" onscroll={() => closeGroup()} data-tour-id="tour-drawing-tools">
+  {#each entries as e, index}
+    {#if e.gap}<div class="h-4 shrink-0"></div>{/if}
     {#if e.sub}
-      <!-- group with a hover flyout of sub-tools -->
-      <div class="group/grp relative flex items-center self-end">
-        <div class="absolute right-full mr-1 top-0 hidden group-hover/grp:flex flex-col items-end bg-base-200/95 rounded-box p-1 shadow-lg">
-          {#each e.sub as s}{@render toolBtn(s, $selectedTool === s.id)}{/each}
-        </div>
+      {@const flyoutId = `${instanceId}-drawing-group-${index}`}
+      <div class="relative shrink-0 flex items-center self-end">
         <button
           type="button"
           title={e.group}
           aria-label={e.group}
-          class="flex items-center h-9 justify-center btn btn-primary p-0 my-0.5 aspect-square shadow"
+          aria-expanded={openGroup === flyoutId}
+          aria-controls={flyoutId}
+          class="tool-group-button flex items-center h-9 justify-center btn btn-primary p-0 my-0.5 aspect-square shadow"
           class:!btn-accent={groupActive(e)}
-          onclick={() => e.sub && selectedTool.set(e.sub[0].id)}
+          onclick={() => toggleGroup(flyoutId)}
+          onkeydown={(ev) => handleGroupKeydown(ev, flyoutId)}
         >
           <span class="block aspect-square h-full flex items-center justify-center">
             {#if e.icon}<span class="material-symbols-rounded" aria-hidden="true">{e.icon}</span>
             {:else if e.svg}{@html e.svg}{/if}
           </span>
         </button>
+        <div
+          id={flyoutId}
+          role="group"
+          aria-label={e.group}
+          hidden={openGroup !== flyoutId}
+          class="fixed z-20 flex flex-col items-end bg-base-200/95 rounded-box p-1 shadow-lg max-w-[calc(100vw-1rem)] max-h-[calc(100dvh-1rem)] overflow-y-auto"
+          style:top={`${flyoutPosition.top}px`}
+          style:right={`${flyoutPosition.right}px`}
+          class:!hidden={openGroup !== flyoutId}
+        >
+          {#each e.sub as s}{@render toolBtn(s, $selectedTool === s.id, true)}{/each}
+        </div>
       </div>
     {:else}
       {@render toolBtn(e as Item, $selectedTool === e.id)}
     {/if}
   {/each}
 </div>
+
+<style>
+  .tool-label { display: none; }
+  .tool-label.visible-label { display: inline; }
+  @media (max-width: 1023px) {
+    .tool-button, .tool-group-button { height: 2.75rem; min-width: 2.75rem; }
+  }
+  /* Expand labels on a desktop pointer without shifting touch targets in a narrow pane. */
+  @media (hover: hover) and (min-width: 1024px) {
+    .tool-button:hover { aspect-ratio: auto; }
+    .tool-button:hover .tool-label { display: inline; }
+  }
+</style>

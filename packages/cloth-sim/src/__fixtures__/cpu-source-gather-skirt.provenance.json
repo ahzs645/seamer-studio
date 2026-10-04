@@ -1,0 +1,29 @@
+{
+  "purpose": "Immutable CPU snapshot restore fixture. Collision-clear initial assembly geometry; not a simulated or accepted garment fit.",
+  "origin": "Actual source-derived skirt-170 refined preparation, cpu-refined-prepared.finalized.json",
+  "sourceSha256": "a62d9c81ccaf289d873ebaa60e547e7d1ab370222be821dfd197d6a82ee328ec",
+  "jsonSha256": "d1ee9369922638d29b3df4d68f170d11f8d3d3f77890cf1e3b2490cfefc65b52",
+  "gzipSha256": "44ec309a33916b597b0a5cc0d9751372eaca29ac8c6330ca478e5304c549d707",
+  "jsonBytes": 1800235,
+  "gzipBytes": 561573,
+  "particleCount": 3639,
+  "bodyVertexCount": 12302,
+  "bodyTriangleCount": 24600,
+  "clothTriangleCount": 6727,
+  "stitchCount": 176,
+  "selection": [
+    "bodyPositions",
+    "bodyIndices",
+    "clothPositions",
+    "particleCount",
+    "clothTriangles",
+    "seams",
+    "seamOrder",
+    "seamPairs",
+    "stitchCount",
+    "sourceStaging",
+    "sourceGatherRefinement",
+    "sourceGatherCollisionGeometry"
+  ],
+  "selectionPolicy": "Only fields consumed by these public snapshot controls. Every original numeric array and refinement policy/material field is retained without coordinate, ordering, or value edits."
+}

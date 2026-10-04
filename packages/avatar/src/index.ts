@@ -7,3 +7,4 @@ export * from './skinnedAvatar';
 export * from './avatarController';
 export * from './silhouette';
 export * from './bodyMeasurements3d';
+export * from './garmentCodeFit';

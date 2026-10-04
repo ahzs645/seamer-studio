@@ -16,8 +16,8 @@ export interface CustomTemplate {
 const KEY = 'seamer.customTemplates';
 
 function load(): CustomTemplate[] {
-  if (typeof localStorage === 'undefined') return [];
   try {
+    if (typeof localStorage === 'undefined') return [];
     const raw = localStorage.getItem(KEY);
     const list = raw ? (JSON.parse(raw) as CustomTemplate[]) : [];
     return Array.isArray(list) ? list : [];

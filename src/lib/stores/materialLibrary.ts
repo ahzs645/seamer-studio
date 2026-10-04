@@ -22,8 +22,8 @@ export interface LibraryItem {
 }
 
 function load(): LibraryItem[] {
-  if (typeof localStorage === 'undefined') return [];
   try {
+    if (typeof localStorage === 'undefined') return [];
     const raw = localStorage.getItem(STORAGE_KEY);
     return raw ? (JSON.parse(raw) as LibraryItem[]) : [];
   } catch {
@@ -32,8 +32,8 @@ function load(): LibraryItem[] {
 }
 
 function persist(items: LibraryItem[]) {
-  if (typeof localStorage === 'undefined') return;
   try {
+    if (typeof localStorage === 'undefined') return;
     localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
   } catch {
     /* quota / private mode — keep the in-memory store usable */

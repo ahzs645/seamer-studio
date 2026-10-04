@@ -12,6 +12,7 @@
     "typecheck": "pnpm check",
     "test": "pnpm test:unit",
     "test:e2e": "playwright test --project=chromium",
+    "test:e2e:mobile": "playwright test --project=mobile-chromium",
     "test:e2e:webgpu": "playwright test --project=webgpu",
     "test:unit": "vitest run",
     "test:unit:watch": "vitest",

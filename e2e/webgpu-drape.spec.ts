@@ -41,6 +41,7 @@ test.beforeEach(async ({ page }) => {
 });
 
 test('runs the default cloth drape on WebGPU and updates particle positions', async ({ page }) => {
+	test.setTimeout(600_000);
 	const pageErrors: string[] = [];
 	const deviceLostConsoleErrors: string[] = [];
 	page.on('pageerror', (error) => pageErrors.push(error.message));
@@ -96,23 +97,25 @@ test('runs the default cloth drape on WebGPU and updates particle positions', as
 				&& state.particleCount > 0
 				&& state.positionHash !== null
 				&& state.positionsFinite;
-		}, { message: 'WebGPU solver did not acquire a device and produce finite particle frames' })
+		}, { message: 'WebGPU solver did not acquire a device and produce finite particle frames', timeout: 120_000 })
 		.toBe(true);
 
 	const baseline = await readDrapeState(page);
 	expect(baseline, 'drape debug state disappeared after simulation startup').not.toBeNull();
 	if (!baseline) throw new Error('drape debug state disappeared after simulation startup');
 
-	// Keep the live solver under observation long enough to catch asynchronous device loss or a
-	// runner that silently stops after its first dispatch.
-	await page.waitForTimeout(5_000);
+	// Observe actual completed frames; software adapters can take longer than five seconds
+	// per frame. This still rejects a runner that stops after its first dispatch.
+	await expect.poll(async () => (await readDrapeState(page))?.frameCount ?? 0, {
+		message: 'The native solver stopped advancing', timeout: 120_000
+	}).toBeGreaterThan(baseline.frameCount + 1);
 
 	const finalState = await readDrapeState(page);
 	expect(finalState, 'drape debug state disappeared while simulation was running').not.toBeNull();
 	if (!finalState) throw new Error('drape debug state disappeared while simulation was running');
 	expect(finalState.running).toBe(true);
 	expect(finalState.frameCount).toBeGreaterThan(baseline.frameCount);
-	expect(finalState.positionHash, 'GPU-read particle positions did not change over five seconds')
+	expect(finalState.positionHash, 'GPU-read particle positions did not change over advancing frames')
 		.not.toBe(baseline.positionHash);
 	expect(finalState.positionsFinite).toBe(true);
 	expect(finalState.deviceLostReason).toBeNull();
@@ -122,7 +125,7 @@ test('runs the default cloth drape on WebGPU and updates particle positions', as
 	).not.toBeNull();
 	expect(
 		finalState.waistbandMaxSeamPairDistanceMm!,
-		'waistband remained detached from the skirt after five seconds'
+		'waistband remained detached from the skirt after advancing frames'
 	).toBeLessThan(30);
 	expect(finalState.particleBounds, 'live particle bounds were not exposed').not.toBeNull();
 	expect(finalState.avatarBounds, 'avatar bounds were not exposed').not.toBeNull();
@@ -146,6 +149,7 @@ test('runs the default cloth drape on WebGPU and updates particle positions', as
 });
 
 test('imports, drapes, pauses, and resets the legacy pencil skirt', async ({ page }) => {
+	test.setTimeout(600_000);
 	const pageErrors: string[] = [];
 	page.on('pageerror', (error) => pageErrors.push(error.message));
 
@@ -179,10 +183,13 @@ test('imports, drapes, pauses, and resets the legacy pencil skirt', async ({ pag
 				&& state.particleCount > 0
 				&& state.positionHash !== null
 				&& state.positionsFinite;
-		}, { message: 'the imported legacy skirt did not produce finite WebGPU frames' })
+		}, { message: 'the imported legacy skirt did not produce finite WebGPU frames', timeout: 120_000 })
 		.toBe(true);
 
-	await page.waitForTimeout(3_000);
+	const importedBaseline = await readDrapeState(page);
+	await expect.poll(async () => (await readDrapeState(page))?.frameCount ?? 0, {
+		message: 'The legacy solver stopped advancing', timeout: 120_000
+	}).toBeGreaterThan((importedBaseline?.frameCount ?? 0) + 1);
 	const running = await readDrapeState(page);
 	expect(running?.maxSeamPairDistanceMm, 'legacy explicit seams were not built').not.toBeNull();
 	expect(running?.maxSeamPairDistanceMm ?? Infinity, 'legacy pieces did not remain sewn together').toBeLessThan(35);

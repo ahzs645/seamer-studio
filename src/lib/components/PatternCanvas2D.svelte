@@ -23,6 +23,7 @@
     type SeamPick
   } from '@seamer/pattern-model';
   import { buildSilhouette, type Silhouette } from '@seamer/avatar';
+  import { isAppShortcutBlocked, scene3dOwnsKeyboard } from '$lib/utils/keyboard';
   import { isDarkTheme, onThemeChange } from '$lib/utils/theme';
   import DrawingTools from '$lib/components/DrawingTools.svelte';
   import ContextMenu, { type MenuItem } from '$lib/components/ContextMenu.svelte';
@@ -743,9 +744,9 @@
       render();
     });
     const onKey = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (isAppShortcutBlocked(e) || scene3dOwnsKeyboard()) return;
       const drawing = isDrawingTool($selectedTool);
-      if (e.key === 'Enter') {
+      if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
         if (penDraft.length > 0) { e.preventDefault(); finishDraft(); }
         else if ($selectedTool === 'seam-multi' && (seamFromPicks.length || seamToPicks.length)) { e.preventDefault(); advanceSeamPhase(); }
       } else if (e.key === 'Escape') {
@@ -753,7 +754,7 @@
         if (calibrating) { e.preventDefault(); calibrating = null; render(); return; }
         if ($pendingPaste) { e.preventDefault(); pendingPaste.set(null); render(); return; }
         if (penDraft.length || seamFromPicks.length || seamToPicks.length || measureFrom || measureChain.length || drawing) { e.preventDefault(); cancelOperation(); }
-      } else if ((e.key === 'v' || e.key === 'V') && drawing && !e.metaKey && !e.ctrlKey) {
+      } else if ((e.key === 'v' || e.key === 'V') && drawing && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
         // 'V' returns to select and cancels the in-progress operation (like the source)
         e.preventDefault(); cancelOperation();
       } else if ((e.metaKey || e.ctrlKey) && e.key === '0') {
@@ -838,11 +839,17 @@
     const w = Math.max(1, maxX - minX);
     const h = Math.max(1, maxY - minY);
     const pad = 1.2;
-    const sx = canvasW / (w * pad * currentPattern.graphicsScale);
-    const sy = canvasH / (h * pad * currentPattern.graphicsScale);
+    // The drawing rail and top controls overlay the canvas. Fit the geometry into the remaining
+    // drawing area so an imported sleeve cannot disappear behind its editing tools.
+    const rail = canvasEl?.parentElement?.querySelector<HTMLElement>('[data-tour-id="tour-drawing-tools"]');
+    const reservedRight = rail ? Math.min(canvasW * 0.35, Math.min(80, rail.getBoundingClientRect().width) + 16) : 0;
+    const reservedLeft = Math.min(16, canvasW * 0.05);
+    const reservedTop = Math.min(40, canvasH * 0.2);
+    const sx = Math.max(1, canvasW - reservedRight - reservedLeft) / (w * pad * currentPattern.graphicsScale);
+    const sy = Math.max(1, canvasH - reservedTop) / (h * pad * currentPattern.graphicsScale);
     viewOffset = { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
     zoom.set(Math.max(0.05, Math.min(20, Math.min(sx, sy))));
-    panOffset.set({ x: 0, y: 0 });
+    panOffset.set({ x: (reservedLeft - reservedRight) / 2, y: reservedTop / 2 });
   }
 
   /**

@@ -1,11 +1,16 @@
 <script lang="ts">
+  import { sourceGatherRegistry, type SourceGatherCacheMarker } from "$lib/utils/sourceGatherPreparation";
+  import { encodeOriginalGatherDocument } from "$lib/utils/sourceGatherEvidence";
+  import { PINNED_GATHER_PROGRAMS } from "$lib/utils/pinnedGatherPrograms";
   import { base } from '$app/paths';
   import { onMount } from 'svelte';
   import { page } from '$app/stores';
   import { replaceState } from '$app/navigation';
   import PatternCanvas2D from '$lib/components/PatternCanvas2D.svelte';
+  import { frozenReadOnlyAutomation } from '$lib/scene/frozenAppRender';
   import PatternScene3D from '$lib/components/PatternScene3D.svelte';
   import GlobeLanternDialog from '$lib/components/GlobeLanternDialog.svelte';
+  import GarmentCodeDialog from '$lib/components/GarmentCodeDialog.svelte';
   import StudioToolbar from '$lib/components/StudioToolbar.svelte';
   import PropertyPanel from '$lib/components/PropertyPanel.svelte';
   import LayerPanel from '$lib/components/LayerPanel.svelte';
@@ -18,6 +23,13 @@
   import type { Selection } from '@atelier/core';
   import type { EditorState } from '@atelier/svelte';
   import { loadPattern, savePattern as saveToDB } from '$lib/stores/localDB';
+  import { createDocumentSaver } from '$lib/utils/documentSave';
+  import {importExplicitSourceGather} from '$lib/utils/explicitSourceGatherImport';
+  import { convertGarmentCodePattern, isGarmentCodeFormat } from '$lib/utils/importGarmentCode';
+  import { GARMENTCODE_EXAMPLES, GARMENTCODE_PRESETS, type GarmentCodeRequest } from '$lib/data/garmentCode';
+  import { attachGarmentCodeBody, unitKind } from '@seamer/avatar';
+  import { compatibleSourceBodyCheckpoint, capturedSourceStretchPolicy, capturedSourceAssemblyComplete, SOURCE_BODY_FIT_REVISION, GARMENT_CODE_ASSEMBLY_REVISION } from '$lib/scene/sourceBodyCheckpoint';
+  import { isAppShortcutBlocked, scene3dOwnsKeyboard } from '$lib/utils/keyboard';
   import {
     EMPTY_PATTERN,
     deletePath,
@@ -80,6 +92,7 @@
   import { get } from 'svelte/store';
   import { autoSaveSeconds } from '$lib/stores/pattern';
   import { referenceSspTemplates } from '$lib/data/referenceSspTemplates';
+  import PatternLibrary from '$lib/components/PatternLibrary.svelte';
 
   let showCommandPalette = $state(false);
   let showBugReport = $state(false);
@@ -93,10 +106,22 @@
   let showCuttingRoom = $state(false);
   let showVersions = $state(false);
   let showSettings = $state(false);
+  let showGarmentCode = $state(false);
   let showTour = $state(false);
   /** successful saves this session — drives the review prompt */
   let saveCount = $state(0);
 
+  let frozenDiagnosticActive = $state(false);
+  let restoreFrozenAutomation: (() => void) | null = null;
+  function handleFrozenDiagnostic(active: boolean) {
+    frozenDiagnosticActive = active;
+    restoreFrozenAutomation?.(); restoreFrozenAutomation = null;
+    if (import.meta.env.DEV && active && window.seamer) {
+      const original = window.seamer, readonly = frozenReadOnlyAutomation(original);
+      window.seamer = readonly;
+      restoreFrozenAutomation = () => { if (window.seamer === readonly) window.seamer = original; };
+    }
+  }
   let currentPattern = $state<Pattern>(structuredClone(EMPTY_PATTERN));
   let editorView = $state<EditorState<Pattern> | null>(null);
   const selection = $derived(editorView?.selection ?? getPatternEditor().selection);
@@ -108,8 +133,32 @@
     editor.setSelection(update(editor.selection));
   }
   let saved = $state(true);
+  let documentRevision = 0;
+  const documentSaver = createDocumentSaver<Pattern>(saveToDB);
+  let autosaving = false;
+  let autosaveErrorShown = false;
+
+  function markUnsaved() {
+    documentRevision += 1;
+    saved = false;
+  }
+
+  async function persistCurrentPattern() {
+    if (frozenDiagnosticActive) throw new Error('Exit the read-only diagnostic before saving.');
+    const receipt = await documentSaver.save($state.snapshot(currentPattern) as Pattern, documentRevision);
+    if (receipt.isCurrent(currentPattern.id, documentRevision)) {
+      saved = true;
+      syncPatternRoute(receipt.documentId);
+    }
+    autosaveErrorShown = false;
+    return receipt;
+  }
   let viewMode = $state<'2d' | '3d' | 'both'>('both');
   type Project3DCapture = {
+    sourceStretchPolicy: Parameters<typeof capturedSourceStretchPolicy>[1];
+    sourceAssemblyComplete: boolean | null;
+    sourceGatherPolicy?: SourceGatherCacheMarker;
+    sourceGatherIntent?: 'manual';
     savedByPiece: Record<string, number[]>;
     cameraPosition: [number, number, number];
     controlsTarget: [number, number, number];
@@ -117,10 +166,104 @@
     lightingMode: string;
     previewDataUrl: string | null;
   };
-  let scene3d = $state<{ captureProjectState: () => Project3DCapture | null } | null>(null);
+  let scene3d = $state<{ captureProjectState: () => Project3DCapture | null; beginCameraDocument: () => void } | null>(null);
   let leftTab = $state<'layers' | 'body' | 'materials' | 'seams'>('layers');
   let showRightPanel = $state(true);
   let showLeftPanel = $state(true);
+  let workspaceWidth = $state(1280);
+  const narrowWorkspace = $derived(workspaceWidth < 1024);
+  let mobilePanel = $state<'left' | 'right' | null>(null);
+  let showMoreActions = $state(false);
+  let moreActionsTrigger: HTMLButtonElement;
+  let moreActionsElement: HTMLDivElement;
+  let showImportMenu = $state(false);
+  let importMenuElement: HTMLDivElement;
+  let importMenuTrigger: HTMLButtonElement;
+  let showExportMenu = $state(false);
+  let exportMenuElement: HTMLDivElement;
+  let exportMenuTrigger: HTMLButtonElement;
+  function finishExportActions() {
+    showExportMenu = false;
+    if (showMoreActions) closeMoreActions(true);
+    else exportMenuTrigger?.focus({ preventScroll: true });
+  }
+  function closeMoreActions(restoreFocus = false) {
+    showMoreActions = false;
+    showExportMenu = false;
+    if (restoreFocus) moreActionsTrigger?.focus({ preventScroll: true });
+  }
+  let panelsBefore3d: { left: boolean; right: boolean } | null = null;
+  let panelTrigger: HTMLElement | null = null;
+  let leftPanelElement = $state<HTMLElement | null>(null);
+  let rightPanelElement = $state<HTMLElement | null>(null);
+
+  function openWorkspacePanel(side: 'left' | 'right') {
+    if (narrowWorkspace) {
+      if (showMoreActions && moreActionsElement.contains(document.activeElement)) {
+        panelTrigger = moreActionsTrigger;
+        closeMoreActions();
+      } else panelTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      mobilePanel = side;
+    } else if (side === 'left') showLeftPanel = true;
+    else showRightPanel = true;
+  }
+
+  function closeWorkspacePanel(side?: 'left' | 'right') {
+    if (narrowWorkspace) {
+      mobilePanel = null;
+      panelTrigger?.focus();
+    } else if (side === 'left') showLeftPanel = false;
+    else if (side === 'right') showRightPanel = false;
+  }
+
+  function toggleWorkspacePanel(side: 'left' | 'right') {
+    if (narrowWorkspace) {
+      if (mobilePanel === side) closeWorkspacePanel();
+      else openWorkspacePanel(side);
+    } else if (side === 'left') showLeftPanel = !showLeftPanel;
+    else showRightPanel = !showRightPanel;
+  }
+
+  function handleWorkspacePanelKeydown(event: KeyboardEvent) {
+    if (!narrowWorkspace || !mobilePanel) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      closeWorkspacePanel();
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const panel = mobilePanel === 'left' ? leftPanelElement : rightPanelElement;
+    const controls = Array.from(panel?.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex="0"]') ?? [])
+      .filter((control) => control.getClientRects().length > 0);
+    const first = controls[0], last = controls.at(-1);
+    if (!first || !last) return;
+    if (event.shiftKey && (document.activeElement === first || !panel?.contains(document.activeElement))) {
+      event.preventDefault(); last.focus();
+    } else if (!event.shiftKey && (document.activeElement === last || !panel?.contains(document.activeElement))) {
+      event.preventDefault(); first.focus();
+    }
+  }
+
+  $effect(() => {
+    const panel = mobilePanel === 'left' ? leftPanelElement : mobilePanel === 'right' ? rightPanelElement : null;
+    if (narrowWorkspace && panel) panel.querySelector<HTMLElement>('button, [tabindex="0"]')?.focus();
+    if (!narrowWorkspace && mobilePanel) mobilePanel = null;
+  });
+
+  function applyWorkspaceView(mode: '2d' | '3d' | 'both') {
+    if (mode === '3d' && viewMode !== '3d') {
+      panelsBefore3d = { left: showLeftPanel, right: showRightPanel };
+      showLeftPanel = false;
+      showRightPanel = false;
+    } else if (mode !== '3d' && viewMode === '3d' && panelsBefore3d) {
+      showLeftPanel = panelsBefore3d.left;
+      showRightPanel = panelsBefore3d.right;
+      panelsBefore3d = null;
+    }
+    mobilePanel = null;
+    viewMode = mode;
+  }
   let patternName = $state('New Pattern');
   let labelDisplay = $state<'off' | 'billboard' | 'flat'>('flat'); // projected-on-fabric, like the source
   let showObjectBrowser = $state(false);
@@ -129,29 +272,19 @@
   let showAlterations = $state(false);
 
   function setViewMode(mode: '2d' | '3d' | 'both') {
-    viewMode = mode;
+    applyWorkspaceView(mode);
     if (currentPattern.viewMode !== mode) {
       currentPattern = { ...currentPattern, viewMode: mode, hasChanged: true };
       pattern.set(currentPattern);
-      saved = false;
-    }
-    // Match the reference Studio's focused 3D workspace on entry. The top-bar panel toggles remain
-    // available when someone explicitly wants properties or layers beside the garment.
-    if (mode === '3d') {
-      showLeftPanel = false;
-      showRightPanel = false;
+      markUnsaved();
     }
   }
 
   function restoreWorkspace(patternData: Pattern) {
-    viewMode = patternData.viewMode ?? 'both';
+    applyWorkspaceView(patternData.viewMode ?? 'both');
     // A pattern that turns piece names off means it in 3D too — names baked across the cloth are
     // an aid on a garment and clutter on a lantern.
     labelDisplay = patternData.showPieceNames === false ? 'off' : 'flat';
-    if (viewMode === '3d') {
-      showLeftPanel = false;
-      showRightPanel = false;
-    }
   }
   // Alteration edit mode: while active, the canvas shows the (driver-specific) formula BASE with
   // alterations suppressed and live re-drafting frozen, so dragging points sticks. Saving a sample
@@ -183,6 +316,7 @@
     const points = currentPattern.points.map((p) => (base[p.id] ? { ...p, x: base[p.id].x, y: base[p.id].y } : p));
     alterationEdit = { ...alterationEdit, driverValue, base };
     currentPattern = { ...currentPattern, points };
+    markUnsaved();
     pattern.set(currentPattern);
   }
   function startAlterationEdit(trackId: string, driverValue: number) {
@@ -216,6 +350,7 @@
       return { ...t, samples };
     });
     currentPattern = { ...currentPattern, gradingProfile: { ...(currentPattern.gradingProfile ?? { sizes: [] }), alterationTracks: tracks } };
+    markUnsaved();
     pattern.set(currentPattern);
     const n = Object.keys(delta.points).length + Object.keys(delta.handles).length;
     toastSuccess(`Saved sample at ${driverValue} (${n} point${n === 1 ? '' : 's'})`);
@@ -229,7 +364,7 @@
     let next = { ...currentPattern, points: canonicalPoints, paths: canonicalPaths, gradingProfile: gp, hasChanged: true } as Pattern;
     if (hasConstraints(next)) next = redraft(next);
     alterationEdit = null;
-    currentPattern = next; saved = false; pattern.set(next);
+    currentPattern = next; markUnsaved(); pattern.set(next);
   }
 
   const draftingTemplates = [
@@ -261,7 +396,11 @@
   onMount(() => {
     const disposeCommandApi = installSeamerAutomation();
     const unsubscribeEditor = pattern.subscribe((next) => {
-      if (JSON.stringify(next) !== JSON.stringify(currentPattern)) currentPattern = next;
+      if (JSON.stringify(next) !== JSON.stringify(currentPattern)) {
+        currentPattern = next;
+        patternName = next.name;
+        markUnsaved();
+      }
     });
     // MCP pattern session: external agents read the snapshot we push on each /sync and queue ops —
     // full-pattern replacements land in the undo history as 'External edit', command ops run through
@@ -269,7 +408,7 @@
     const disposeMcpSession = configureMcpSession({
       getPattern: getPatternSnapshot,
       applyPattern: (next) => handlePatternUpdate(next, 'External edit'),
-      executeCommand: (name, payload) => { getPatternEditor().execute(name, payload); }
+      executeCommand: (name, payload) => { if (frozenDiagnosticActive) throw new Error('Exit the read-only diagnostic before editing.'); getPatternEditor().execute(name, payload); }
     });
     (async () => {
       // Pattern id lives in the URL path (/studio/<id>), with ?id= kept for older links.
@@ -283,7 +422,9 @@
           } catch { /* offline — fall through to blank editor */ }
         }
         if (loaded) {
+          documentRevision += 1;
           currentPattern = loaded; patternName = loaded.name; restoreWorkspace(loaded);
+          saved = true;
           pattern.set(currentPattern);
           // Editor restores this pattern's persisted undo/redo asynchronously.
           await restoreHistory(id);
@@ -298,7 +439,16 @@
     const startAutosave = (seconds: number) => {
       clearInterval(autoSaveTimer);
       autoSaveTimer = setInterval(async () => {
-        if (!saved) { await saveToDB(currentPattern); saved = true; }
+        if (saved || autosaving || frozenDiagnosticActive) return;
+        autosaving = true;
+        try {
+          await persistCurrentPattern();
+        } catch {
+          if (!autosaveErrorShown) toastError('Autosave failed. Your edits are still unsaved; try Save again.');
+          autosaveErrorShown = true;
+        } finally {
+          autosaving = false;
+        }
       }, Math.max(2, seconds) * 1000);
     };
     startAutosave(get(autoSaveSeconds));
@@ -311,6 +461,7 @@
   });
 
   function handlePatternUpdate(updated: Pattern, label = 'Edit') {
+    if (frozenDiagnosticActive) return;
     if (JSON.stringify(currentPattern) !== JSON.stringify(updated)) pushUndo($state.snapshot(currentPattern) as Pattern, label);
     // live re-draft: recompute formula-constrained points from variables/measurements.
     // Frozen during alteration edit mode so manual point drags stick (they become the captured delta).
@@ -322,43 +473,59 @@
     }
     // linked paths follow their source's shape (cheap no-op when the pattern has none)
     if (!alterationEdit) updated = syncLinkedPaths(updated);
-    currentPattern = updated; saved = false; pattern.set(updated);
+    currentPattern = updated; markUnsaved(); pattern.set(updated);
   }
 
-  // A user-run drape settled: persist the freshly-settled per-piece savedPositions so re-opening shows
-  // the result instantly and body re-fits chain off the latest drape. Not an undo-able user edit, so
+  // Cache the latest user-run drape for reopening. A saved checkpoint does not certify fit
+  // or seam closure. Not an undo-able user edit, so
   // no pushUndo; savedPositions isn't in the 3D patternKey, so this won't trigger a re-drape. Mark
   // unsaved and let the 5s autosave (or an explicit save) write it.
-  function handleDrapeSettled(savedByPiece: Record<string, number[]>) {
+  function handleDrapeSettled(savedByPiece: Record<string, number[]>, sourceStretchPolicy: Parameters<typeof capturedSourceStretchPolicy>[1], sourceAssemblyComplete: boolean | null, sourceGatherPolicy?: SourceGatherCacheMarker, sourceGatherIntent?: 'manual') {
     let changed = false;
-    const pieces = currentPattern.pieces.map((p) => {
+    const compatible = compatibleSourceBodyCheckpoint(currentPattern);
+    const pieces = currentPattern.pieces.map((p, index) => {
       const sp = savedByPiece[p.id];
       if (!sp) return p;
       changed = true;
-      return { ...p, settings3d: { ...p.settings3d, savedPositions: sp } };
+      return { ...p, settings3d: { ...p.settings3d, savedPositions: sp,
+        ...(currentPattern.garmentCodeSource ? { savedDrapeState: compatible.pieces[index].settings3d.savedDrapeState === 'held' ? 'held' as const : 'checkpoint' as const,
+          savedBodyFitRevision: SOURCE_BODY_FIT_REVISION, savedAssemblyRevision: GARMENT_CODE_ASSEMBLY_REVISION,
+          savedSourceStretchPolicy: capturedSourceStretchPolicy(p.id, sourceStretchPolicy),
+          savedSourceGatherPolicy: sourceGatherPolicy, savedSourceGatherIntent: sourceGatherIntent, savedSourceAssemblyComplete: capturedSourceAssemblyComplete(p.id, sourceStretchPolicy, sourceAssemblyComplete) } : {}) } };
     });
     if (!changed) return;
     currentPattern = { ...currentPattern, pieces };
     pattern.set(currentPattern);
-    saved = false;
+    markUnsaved();
   }
 
   // Camera write-back from the 3D view (debounced upstream). Not an undo-able edit — like a
   // settled drape, it just persists so reload restores the same view.
   function handleCameraChange(pos: [number, number, number], target: [number, number, number], fov: number) {
-    currentPattern = { ...currentPattern, settings3d: { ...currentPattern.settings3d, cameraPosition: pos, controlsTarget: target, cameraFov: fov } };
+    if (frozenDiagnosticActive) return;
+    currentPattern = { ...currentPattern, settings3d: { ...currentPattern.settings3d, cameraPosition: pos, controlsTarget: target, cameraFov: fov, sourceCameraFraming: undefined } };
     pattern.set(currentPattern);
-    saved = false;
+    markUnsaved();
   }
 
   async function handleSave() {
+    if (frozenDiagnosticActive) return;
+    const camera = currentPattern.settings3d.sourceCameraFraming ? scene3d?.captureProjectState() : null;
+    if (camera) currentPattern = { ...currentPattern, settings3d: { ...currentPattern.settings3d,
+      cameraPosition: camera.cameraPosition, controlsTarget: camera.controlsTarget,
+      cameraFov: camera.cameraFov, sourceCameraFraming: undefined } };
     // refresh the list thumbnail from the live 2D geometry (best effort — null keeps the old one)
     const thumb = patternThumbnail($state.snapshot(currentPattern) as Pattern);
     currentPattern = { ...currentPattern, name: patternName, thumbnailUrl: thumb ?? currentPattern.thumbnailUrl ?? null };
-    await saveToDB(currentPattern); saved = true; saveCount += 1;
-    // keep the pattern id in the URL so a reload reopens this pattern
-    syncPatternRoute(currentPattern.id);
-    toastSuccess('Pattern saved');
+    pattern.set(currentPattern);
+    markUnsaved();
+    try {
+      const receipt = await persistCurrentPattern();
+      saveCount += 1;
+      if (receipt.isCurrent(currentPattern.id, documentRevision)) toastSuccess('Pattern saved');
+    } catch {
+      toastError('Could not save the pattern. Your edits are still unsaved.');
+    }
   }
 
   /** Keep refresh/deep links attached to the document currently shown in the editor. */
@@ -369,9 +536,11 @@
   }
 
   async function handleExport() {
+    if (frozenDiagnosticActive) return;
     const blob = new Blob([JSON.stringify(currentPattern, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob); const a = document.createElement('a');
     a.href = url; a.download = `${patternName.replace(/\s+/g, '_')}.seamer.json`; a.click(); URL.revokeObjectURL(url);
+    finishExportActions();
   }
 
   function exportAs(fmt: 'svg' | 'svg2' | 'dxf' | 'csv') {
@@ -380,6 +549,7 @@
     else if (fmt === 'svg2') downloadText(`${base}.svg`, patternToSVG2(currentPattern), 'image/svg+xml');
     else if (fmt === 'dxf') downloadText(`${base}.dxf`, patternToDXF(currentPattern), 'application/dxf');
     else downloadText(`${base}.csv`, patternToCSV(currentPattern), 'text/csv');
+    finishExportActions();
     toastSuccess(`Exported ${fmt === 'svg2' ? 'SVG 2' : fmt.toUpperCase()}`);
   }
 
@@ -388,12 +558,14 @@
     const blob = await patternToPNG(currentPattern);
     if (!blob) { toastError('Nothing to export'); return; }
     downloadBlob(`${base}.png`, blob);
+    finishExportActions();
     toastSuccess('Exported PNG');
   }
   async function exportHPGL() {
     const base = patternName.replace(/\s+/g, '_') || 'pattern';
     try {
       downloadText(`${base}.hpgl`, await patternToHPGL(currentPattern), 'application/vnd.hp-hpgl');
+      finishExportActions();
       toastSuccess('Exported HPGL');
     } catch (e) { toastError('HPGL export failed'); }
   }
@@ -402,6 +574,7 @@
     const base = patternName.replace(/\s+/g, '_') || 'pattern';
     try {
       downloadText(`${base}.smis`, await bodyToSeamlyMe(currentPattern.body), 'application/xml');
+      finishExportActions();
       toastSuccess('Exported SeamlyMe measurements');
     } catch (e) { toastError((e as Error)?.message || 'SeamlyMe export failed'); }
   }
@@ -418,6 +591,7 @@
       : coStr.startsWith('convex') ? 'convexHull'
       : coStr.startsWith('concave') ? 'concaveHull' : 'none';
     downloadText(`${base}_marker.svg`, markerToSVG(layout, cutOff), 'image/svg+xml');
+    finishExportActions();
     toastSuccess(`Marker: ${layout.placements.length} pieces · ${Math.round(layout.usedLengthMm)}mm long`);
   }
   function doPrintMarker() {
@@ -437,7 +611,8 @@
     return canonicalPencilSkirtPromise;
   }
 
-  async function convertImportedJson(raw: unknown): Promise<Pattern> {
+  async function convertImportedJson(raw: unknown, name?: string): Promise<Pattern> {
+    if (isGarmentCodeFormat(raw)) return convertGarmentCodePattern(raw, name);
     if (!isSimpleFormat(raw)) return raw as Pattern;
     const canonical = isCanonicalPencilSkirtExport(raw) ? await loadCanonicalPencilSkirt() : undefined;
     return convertSimplePattern(raw, canonical);
@@ -450,20 +625,60 @@
     if (ext === 'cut') return cutToPattern(text, name);
     if (ext === 'val' || ext === 'sm2d' || ext === 'xml') return seamlyToPattern(text, name);
     const raw = JSON.parse(text);
-    return convertImportedJson(raw);
+    return convertImportedJson(raw, name);
+  }
+
+  async function loadGarmentCodeExample(file: string, label: string, signal?: AbortSignal) {
+    const response = await fetch(`${base}/examples/garmentcode/${file}`, { signal });
+    if (!response.ok) throw new Error('The GarmentCode example is unavailable.');
+    const specification = await response.json();
+    if (signal?.aborted) return;
+    await applyImported(convertGarmentCodePattern(specification, label));
+  }
+
+  async function applyGeneratedGarmentCode(specification: unknown, request: GarmentCodeRequest) {
+    const label = GARMENTCODE_PRESETS.find(preset => preset.id === request.preset)?.label ?? request.preset;
+    const generated = convertGarmentCodePattern(specification, `GarmentCode ${label}`);
+    if (generated.garmentCodeSource) generated.garmentCodeSource.generation = structuredClone(request);
+    const imperial = currentPattern.body.unitType !== 'metric';
+    const fields = Object.fromEntries(Object.entries(currentPattern.body.fields).map(([key, value]) => [key,
+      imperial && unitKind(key) === 'weight' ? value * 0.453592 : imperial && unitKind(key) === 'length' ? value * 2.54 : value
+    ]));
+    const sourceMeasurements = generated.body.garmentCodeBody?.measurementsCm;
+    const mappings = { height: 'height', bust: 'chestGirth', waist: 'waistGirth', hips: 'hipGirth', arm_length: 'armLength' };
+    for (const [key, target] of Object.entries(mappings)) {
+      const value = sourceMeasurements?.[key] ?? request.body[key];
+      if (Number.isFinite(value)) fields[target] = value;
+    }
+    const body = { ...currentPattern.body, unitType: 'metric', fields, useLegacyDefaultAvatar: false, garmentCodeBody: undefined };
+    generated.body = sourceMeasurements ? attachGarmentCodeBody(body, sourceMeasurements) : body;
+    const gatherProvenance = await sourceGatherRegistry.register(specification, generated, {
+      origin: 'trusted-generator-response', ...PINNED_GATHER_PROGRAMS
+    });
+    if (gatherProvenance && generated.garmentCodeSource) {
+      generated.garmentCodeSource.gatherProvenance = gatherProvenance;
+      generated.garmentCodeSource.gatherSourceDocument = encodeOriginalGatherDocument(specification);
+    }
+    await applyImported(generated);
   }
 
   async function applyImported(data: Pattern) {
+    if (frozenDiagnosticActive) return;
     // Build the candidate cloth topology before touching canonical editor state. A failed import
     // therefore leaves both the 2D document and the renderer on the same last-valid pattern.
     assertPatternBuildable3d(data);
+    scene3d?.beginCameraDocument();
     currentPattern = data;
     patternName = data.name;
     restoreWorkspace(data);
     pattern.set(data);
-    saved = false;
+    markUnsaved();
     syncPatternRoute(data.id);
     toastSuccess(`Imported "${data.name}"`);
+    if (showImportMenu) {
+      showImportMenu = false;
+      importMenuTrigger?.focus({ preventScroll: true });
+    }
 
     // An import opens/replaces a document; it must not inherit the previous document's undo stack.
     // Clearing an existing stack for the same id is important when re-importing a corrected legacy
@@ -481,7 +696,10 @@
     handlePatternUpdate(data, 'Restore version');
   }
 
+  let rawSourceImportRevision=0;
   function handleImport() {
+    const revision=++rawSourceImportRevision,capturedDocument=currentPattern,documentBefore=JSON.stringify($state.snapshot(currentPattern));
+    const stillCurrent=()=>revision===rawSourceImportRevision&&!frozenDiagnosticActive&&currentPattern===capturedDocument&&JSON.stringify($state.snapshot(currentPattern))===documentBefore;
     const input = document.createElement('input'); input.type = 'file'; input.accept = '.json,.seamer.json,.ssp,.dxf,.svg,.cut,.val,.sm2d,.xml,.rul';
     input.onchange = async (e) => {
       const file = (e.target as HTMLInputElement).files?.[0]; if (!file) return;
@@ -493,7 +711,16 @@
         if (ext === 'dxf') { dxfPending = { text, name }; return; } // import options dialog first
         if (ext === 'svg') { svgPending = { text, name }; return; } // import options dialog first
         if (ext === 'rul') { rulDialog = { table: parseRul(text) }; return; } // pick a size, then apply
-        await applyImported(await parseImport(text, ext, name));
+        let imported:Pattern|null=await parseImport(text, ext, name),explicitGatherImport=false;
+        if(!['dxf','svg','cut','val','sm2d','xml'].includes(ext??'')) {
+          const raw=JSON.parse(text);
+          explicitGatherImport=isGarmentCodeFormat(raw)&&raw.properties?.garmentcode_gather_evidence!==undefined;
+          imported=await importExplicitSourceGather(raw,imported,{stillCurrent,confirmImport:confirm});
+        }
+        if(imported){
+          if(explicitGatherImport&&!stillCurrent())throw Error('The document changed during source import. Choose the file again.');
+          await applyImported(imported);
+        }
       } catch (err) { toastError((err as Error)?.message || 'Could not import file'); }
     };
     input.click();
@@ -575,7 +802,7 @@
             }],
             hasChanged: true
           };
-          currentPattern = next; pushUndo($state.snapshot(currentPattern) as Pattern, 'Import background image'); pattern.set(next); saved = false;
+          currentPattern = next; pushUndo($state.snapshot(currentPattern) as Pattern, 'Import background image'); pattern.set(next); markUnsaved();
           toastSuccess(`Imported background image "${file.name}"`);
           return;
         }
@@ -616,17 +843,23 @@
   }
 
   async function exportSSP() {
+    if (frozenDiagnosticActive) return;
     try {
       let project = structuredClone($state.snapshot(currentPattern) as Pattern);
       const capture = scene3d?.captureProjectState() ?? null;
       if (capture) {
+        const compatible = compatibleSourceBodyCheckpoint(project);
         project = {
           ...project,
-          pieces: project.pieces.map((piece) => ({
+          pieces: project.pieces.map((piece, index) => ({
             ...piece,
             settings3d: {
               ...piece.settings3d,
-              savedPositions: capture.savedByPiece[piece.id] ?? piece.settings3d.savedPositions
+              savedPositions: capture.savedByPiece[piece.id] ?? piece.settings3d.savedPositions,
+              ...(project.garmentCodeSource && capture.savedByPiece[piece.id] ? { savedDrapeState: compatible.pieces[index].settings3d.savedDrapeState === 'held' ? 'held' as const : 'checkpoint' as const,
+                savedBodyFitRevision: SOURCE_BODY_FIT_REVISION, savedAssemblyRevision: GARMENT_CODE_ASSEMBLY_REVISION,
+                savedSourceStretchPolicy: capturedSourceStretchPolicy(piece.id, capture.sourceStretchPolicy),
+                savedSourceGatherPolicy: capture.sourceGatherPolicy, savedSourceGatherIntent: capture.sourceGatherIntent, savedSourceAssemblyComplete: capturedSourceAssemblyComplete(piece.id, capture.sourceStretchPolicy, capture.sourceAssemblyComplete) } : {})
             }
           })),
           settings3d: {
@@ -634,6 +867,7 @@
             cameraPosition: capture.cameraPosition,
             controlsTarget: capture.controlsTarget,
             cameraFov: capture.cameraFov,
+            sourceCameraFraming: undefined,
             lightingMode: capture.lightingMode
           },
           viewMode
@@ -644,6 +878,7 @@
       const previewDataUrl = capture?.previewDataUrl ?? patternThumbnail(project);
       const { blob, manifest } = await createSSPArchive(project, { previewDataUrl, basePath: base });
       downloadBlob(`${patternName.replace(/\s+/g, '_') || 'pattern'}.ssp`, blob);
+      finishExportActions();
       if (manifest.unresolvedAssets.length) {
         toast(`Exported SSP v2 with ${manifest.unresolvedAssets.length} linked asset${manifest.unresolvedAssets.length === 1 ? '' : 's'} that could not be embedded`, 'info', 6000);
       } else {
@@ -706,7 +941,7 @@
       if (!ok) return;
     }
     pushUndo($state.snapshot(currentPattern) as Pattern, 'New pattern');
-    currentPattern = structuredClone(EMPTY_PATTERN); patternName = 'New Pattern'; restoreWorkspace(currentPattern); pattern.set(currentPattern); saved = true;
+    currentPattern = { ...structuredClone(EMPTY_PATTERN), id: crypto.randomUUID(), versionId: crypto.randomUUID() }; patternName = 'New Pattern'; restoreWorkspace(currentPattern); pattern.set(currentPattern); markUnsaved();
     toastSuccess('Scene cleared');
   }
 
@@ -735,7 +970,7 @@
     restoreWorkspace(data);
     pattern.set(data);
     await restoreHistory(data.id);
-    saved = false;
+    markUnsaved();
   }
 
   async function loadTemplate(key: string) {
@@ -754,10 +989,10 @@
       data = normalizePattern(data);
       // recover parametric constructions from the baked template (no-op if already constrained / not recoverable)
       data = makeParametric(data);
-      currentPattern = data; patternName = tpl.name || data.name; restoreWorkspace(data); pattern.set(data); await restoreHistory(data.id); saved = true;
+      currentPattern = data; patternName = tpl.name || data.name; restoreWorkspace(data); pattern.set(data); markUnsaved(); await restoreHistory(data.id);
     } catch {
-      currentPattern = { ...EMPTY_PATTERN, name: tpl.name, description: tpl.description, enable3d: true, viewMode: 'both' };
-      patternName = tpl.name; restoreWorkspace(currentPattern); pattern.set(currentPattern); await restoreHistory(currentPattern.id); saved = true;
+      currentPattern = { ...structuredClone(EMPTY_PATTERN), id: crypto.randomUUID(), versionId: crypto.randomUUID(), name: tpl.name, description: tpl.description, enable3d: true, viewMode: 'both' };
+      patternName = tpl.name; restoreWorkspace(currentPattern); pattern.set(currentPattern); markUnsaved(); await restoreHistory(currentPattern.id);
     }
   }
 
@@ -768,28 +1003,32 @@
     setSelection((current) => current.replace('piece', id ? [id] : []).clear('point').clear('path'));
   }
 
-  function handleUndo() { const prev = undo($state.snapshot(currentPattern) as Pattern); if (prev) { currentPattern = prev; patternName = prev.name; restoreWorkspace(prev); pattern.set(prev); saved = false; } }
-  function handleRedo() { const next = redo($state.snapshot(currentPattern) as Pattern); if (next) { currentPattern = next; patternName = next.name; restoreWorkspace(next); pattern.set(next); saved = false; } }
+  function handleUndo() { const prev = undo($state.snapshot(currentPattern) as Pattern); if (prev) { currentPattern = prev; patternName = prev.name; restoreWorkspace(prev); pattern.set(prev); markUnsaved(); } }
+  function handleRedo() { const next = redo($state.snapshot(currentPattern) as Pattern); if (next) { currentPattern = next; patternName = next.name; restoreWorkspace(next); pattern.set(next); markUnsaved(); } }
 
   function handleKeydown(e: KeyboardEvent) {
-    const t = e.target;
-    if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement || (t instanceof HTMLElement && t.isContentEditable)) return;
+    if (frozenDiagnosticActive) return;
+    if (isAppShortcutBlocked(e)) return;
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); e.shiftKey ? handleRedo() : handleUndo(); }
     if ((e.metaKey || e.ctrlKey) && e.key === 's') { e.preventDefault(); handleSave(); }
     if ((e.metaKey || e.ctrlKey) && (e.key === 'd' || e.key === 'D')) { e.preventDefault(); duplicateSelectedPiece(); }
     if ((e.metaKey || e.ctrlKey) && (e.key === 'c' || e.key === 'C')) { e.preventDefault(); handleCopy(); }
     if ((e.metaKey || e.ctrlKey) && (e.key === 'v' || e.key === 'V')) { e.preventDefault(); handlePaste(e.shiftKey); } // Shift = "Paste as copy"
     if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); showCommandPalette = !showCommandPalette; }
-    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && (e.key === 'b' || e.key === 'B')) { e.preventDefault(); showRightPanel = !showRightPanel; }
+    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && (e.key === 'b' || e.key === 'B')) { e.preventDefault(); toggleWorkspacePanel('right'); }
     if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'l' || e.key === 'L')) {
       e.preventDefault();
-      if (showLeftPanel && leftTab === 'layers') showLeftPanel = false;
-      else { showLeftPanel = true; leftTab = 'layers'; }
+      if ((narrowWorkspace ? mobilePanel === 'left' : showLeftPanel) && leftTab === 'layers') closeWorkspacePanel('left');
+      else { openWorkspacePanel('left'); leftTab = 'layers'; }
     }
     if (!e.metaKey && !e.ctrlKey && !e.altKey && e.shiftKey && (e.key === 'V' || e.key === 'v')) {
-      e.preventDefault(); showRightPanel = true; panelRequest.set({ section: 'sizes' });
+      e.preventDefault(); openWorkspacePanel('right'); panelRequest.set({ section: 'sizes' });
     }
     if (e.key === '?' && !e.metaKey && !e.ctrlKey) { e.preventDefault(); showShortcuts = !showShortcuts; }
+    // The scene handles its own keys. It leaves M unconsumed for a selected
+    // pattern's mirror command when it is not arranging pieces.
+    const selectedMirror = e.key.toLowerCase() === 'm' && (pointIds.size || pathIds.size || pieceIds.size);
+    if (!e.metaKey && !e.ctrlKey && scene3dOwnsKeyboard() && !selectedMirror) return;
     // Selection batch transforms (no modifier): arrows nudge, [ ] rotate, < > scale, M mirror.
     {
       const hasSel = pointIds.size || pathIds.size || pieceIds.size;
@@ -883,68 +1122,57 @@
   <EditorStateBridge editor={$patternEditor} onstate={(state) => (editorView = state)} />
 {/key}
 
-<svelte:window onkeydown={handleKeydown} />
+<svelte:window bind:innerWidth={workspaceWidth}
+  onpointerdown={(event) => {
+    if (!(event.target instanceof Element)) return;
+    if (showExportMenu && !exportMenuElement.contains(event.target)) showExportMenu = false;
+    if (showImportMenu && !importMenuElement.contains(event.target)) showImportMenu = false;
+    if (!narrowWorkspace || !showMoreActions) return;
+    if (!moreActionsElement.contains(event.target) && !moreActionsTrigger.contains(event.target)
+      && !event.target.closest('dialog, [role="dialog"]')) closeMoreActions();
+  }}
+  onkeydown={(event) => {
+    if (showImportMenu && event.key === 'Escape') {
+      event.preventDefault(); showImportMenu = false; importMenuTrigger?.focus({ preventScroll: true });
+    } else if (showExportMenu && event.key === 'Escape') {
+      event.preventDefault(); showExportMenu = false; exportMenuTrigger?.focus({ preventScroll: true });
+    } else if (narrowWorkspace && showMoreActions && event.key === 'Escape' && event.target instanceof Node
+      && (moreActionsElement.contains(event.target) || event.target === moreActionsTrigger)) {
+      event.preventDefault(); closeMoreActions(true);
+    }
+    handleWorkspacePanelKeydown(event); if (!event.defaultPrevented) handleKeydown(event);
+  }} />
 
-<div class="flex flex-col h-screen overflow-hidden">
-  <div class="flex items-center justify-between px-3 py-1.5 bg-base-200 border-b shrink-0">
-    <div class="flex items-center gap-2">
-      <a href="{base}/" class="btn btn-ghost btn-xs">&larr;</a>
+<div class="studio-shell flex flex-col h-screen overflow-hidden">
+  <div inert={frozenDiagnosticActive} class="studio-topbar flex items-center justify-between px-3 py-1.5 bg-base-200 border-b shrink-0">
+    <div class="studio-home flex items-center gap-2">
+      <a href="{base}/" class="btn btn-ghost btn-xs" aria-label="Back to patterns">&larr;</a>
       <span class="text-sm font-lexend font-semibold hidden lg:inline">Pattern Studio</span>
     </div>
-    <div class="flex items-center gap-2">
-      <input type="text" class="input input-bordered input-xs w-40 lg:w-56" placeholder="Pattern name..." bind:value={patternName}
-        oninput={(e) => { currentPattern = { ...currentPattern, name: e.currentTarget.value }; pattern.set(currentPattern); saved = false; }}
+    <div class="studio-document flex items-center gap-2">
+      <input type="text" aria-label="Pattern name" class="input input-bordered input-xs w-40 lg:w-56" placeholder="Pattern name..." bind:value={patternName}
+        oninput={(e) => { currentPattern = { ...currentPattern, name: e.currentTarget.value }; pattern.set(currentPattern); markUnsaved(); }}
         data-testid="pattern-name-input" />
-      <div class="dropdown dropdown-end">
-        <div role="button" tabindex="0" class="btn btn-xs btn-ghost" data-testid="templates-menu-trigger">Templates</div>
-        <ul class="dropdown-content menu bg-base-200 rounded-box z-50 mt-1 max-h-[80vh] w-80 flex-nowrap overflow-y-auto p-2 shadow-xl">
-          <li class="menu-title"><span>Complete SSP samples ({referenceSspTemplates.length})</span></li>
-          {#each referenceSspTemplates as tpl}
-            <li>
-              <button
-                class="w-full items-start gap-2 py-2 text-left"
-                onclick={() => loadTemplate(tpl.key)}
-                data-testid={`template-${tpl.key}`}
-                title={`${tpl.description} By ${tpl.author}. ${tpl.pieces} pieces, ${tpl.seams} seams, ${tpl.materials} materials.`}
-              >
-                <span class={`badge badge-xs mt-0.5 shrink-0 ${tpl.dimension === '3D' ? 'badge-accent' : 'badge-ghost'}`}>{tpl.dimension}</span>
-                <span class="min-w-0">
-                  <span class="block truncate text-sm font-medium">{tpl.name}</span>
-                  <span class="block truncate text-xs opacity-55">{tpl.author} · {tpl.pieces} pieces · {tpl.seams} seams</span>
-                </span>
-              </button>
-            </li>
-          {/each}
-          <li class="menu-title pt-2"><span>Generators</span></li>
-          <li>
-            <button class="w-full text-left" onclick={() => (showGlobeLantern = true)} data-testid="template-globe-lantern">
-              <span class="block truncate text-sm font-medium">Globe lantern…</span>
-              <span class="block truncate text-xs opacity-55">Wire-in-seam sphere from a coiled strip — helix or stacked rings</span>
-            </button>
-          </li>
-          <li class="menu-title pt-2"><span>Drafting examples</span></li>
-          {#each draftingTemplates as tpl}
-            <li>
-              <button class="w-full text-left" onclick={() => loadTemplate(tpl.key)} data-testid={`template-${tpl.key}`}>
-                <span class="block truncate text-sm font-medium">{tpl.name}</span>
-                <span class="block truncate text-xs opacity-55">{tpl.description}</span>
-              </button>
-            </li>
-          {/each}
-        </ul>
-      </div>
-      <div class="join join-horizontal" data-tour-id="tour-view-mode">
-        <button class="join-item btn btn-xs" class:btn-active={viewMode === '2d'} onclick={() => setViewMode('2d')}>2D</button>
-        <button class="join-item btn btn-xs" class:btn-active={viewMode === 'both'} onclick={() => setViewMode('both')}>Both</button>
-        <button class="join-item btn btn-xs" class:btn-active={viewMode === '3d'} onclick={() => setViewMode('3d')}>3D</button>
+      <PatternLibrary {draftingTemplates} ontemplate={(key) => { void loadTemplate(key); }}
+        ongarmentcode={() => (showGarmentCode = true)} onglobe={() => (showGlobeLantern = true)}
+        onexample={async (file, label) => {
+          try { await loadGarmentCodeExample(file, label); }
+          catch (error) { toastError(error instanceof Error ? error.message : 'Could not open the garment.'); }
+        }}
+        onfabric={() => { leftTab = 'materials'; openWorkspacePanel('left'); }} />
+      <div class="studio-view-mode join join-horizontal" role="group" aria-label="Workspace view" data-tour-id="tour-view-mode">
+        <button class="join-item btn btn-xs" class:btn-active={viewMode === '2d'} aria-pressed={viewMode === '2d'} onclick={() => setViewMode('2d')}>2D</button>
+        <button class="join-item btn btn-xs" class:btn-active={viewMode === 'both'} aria-pressed={viewMode === 'both'} onclick={() => setViewMode('both')}>Both</button>
+        <button class="join-item btn btn-xs" class:btn-active={viewMode === '3d'} aria-pressed={viewMode === '3d'} onclick={() => setViewMode('3d')}>3D</button>
       </div>
     </div>
-    <div class="flex items-center gap-1">
-      <button class="btn btn-ghost btn-xs" onclick={handleUndo} disabled={!$undoLabel} title={$undoLabel ? `Undo ${$undoLabel} (Ctrl+Z)` : 'Nothing to undo'}>&#x21A9;</button>
-      <button class="btn btn-ghost btn-xs" onclick={handleRedo} disabled={!$redoLabel} title={$redoLabel ? `Redo ${$redoLabel} (Ctrl+Shift+Z)` : 'Nothing to redo'}>&#x21AA;</button>
-      <div class="dropdown dropdown-end">
-        <div role="button" tabindex="0" class="btn btn-ghost btn-xs" data-testid="import-menu-trigger">Import</div>
-        <ul class="dropdown-content menu bg-base-200 rounded-box z-50 w-60 p-2 shadow text-sm">
+    <div class="studio-actions flex items-center gap-1">
+      <div class="dropdown dropdown-end" bind:this={importMenuElement} class:dropdown-open={showImportMenu}
+        onfocusout={(event) => { if (event.relatedTarget instanceof Node && !importMenuElement.contains(event.relatedTarget)) showImportMenu = false; }}>
+        <button class="btn btn-ghost btn-xs" data-testid="import-menu-trigger" bind:this={importMenuTrigger}
+          aria-expanded={showImportMenu} aria-controls="studio-import-menu" onclick={() => showImportMenu = !showImportMenu}>Import</button>
+        {#if showImportMenu}
+        <ul id="studio-import-menu" class="dropdown-content menu bg-base-200 rounded-box z-50 w-60 p-2 shadow text-sm">
           <li class="menu-title">SeamScape importers</li>
           <li><button onclick={handleLegacySourcePair}>Project + Raw JSON (complete)…</button></li>
           <li><button onclick={() => handleSourceImport('image')}>Background image…</button></li>
@@ -961,11 +1189,35 @@
           {#each importSamples as s}
             <li><button onclick={() => importSample(s.file)} data-testid={`import-sample-${s.file}`}>{s.label}</button></li>
           {/each}
+          <li class="menu-title pt-2">GarmentCode examples</li>
+          {#each GARMENTCODE_EXAMPLES as example}
+            <li><button data-testid={`garmentcode-example-${example.file}`} onclick={async () => {
+              try { await loadGarmentCodeExample(example.file, example.label); }
+              catch (error) { toastError(error instanceof Error ? error.message : 'Could not open the garment.'); }
+            }}>{example.label}</button></li>
+          {/each}
         </ul>
+        {/if}
       </div>
-      <div class="dropdown dropdown-end">
-        <div role="button" tabindex="0" class="btn btn-ghost btn-xs">Export</div>
-        <ul class="dropdown-content menu bg-base-200 rounded-box z-50 w-72 p-2 shadow text-sm">
+      <button class="btn btn-xs" class:btn-accent={!saved} class:btn-ghost={saved} onclick={handleSave} data-tour-id="tour-save">{saved ? 'Saved' : 'Save'}</button>
+      <button class="btn btn-ghost btn-xs" onclick={(e) => { e.currentTarget.focus(); toggleWorkspacePanel('left'); }} title="Toggle layers and body panel" aria-label="Layers and body panel" aria-expanded={(narrowWorkspace ? mobilePanel === 'left' : showLeftPanel) ? 'true' : 'false'} aria-controls="studio-left-panel"><span class="studio-desktop-label" aria-hidden="true">&#x2630;</span><span class="studio-mobile-label">Panels</span></button>
+      <button class="studio-fabric-toggle btn btn-ghost btn-xs" aria-label="Fabric" onclick={(event) => { event.currentTarget.focus(); leftTab = 'materials'; openWorkspacePanel('left'); }}>Fabric</button>
+      <button class="studio-more-toggle btn btn-ghost btn-xs" bind:this={moreActionsTrigger} aria-expanded={showMoreActions} aria-controls="studio-more-actions" onclick={() => showMoreActions = !showMoreActions}>More</button>
+      <div id="studio-more-actions" class="studio-more-actions" bind:this={moreActionsElement} class:expanded={showMoreActions}>
+      <div class="studio-mobile-actions-heading"><strong>Studio actions</strong><button class="btn btn-ghost btn-xs" aria-label="Close studio actions" onclick={() => { showMoreActions = false; moreActionsTrigger?.focus(); }}>Close ✕</button></div>
+      <div class="studio-landscape-actions">
+        <button class="btn btn-ghost btn-xs" aria-label="Layers and body panel" aria-controls="studio-left-panel"
+          aria-expanded={mobilePanel === 'left'} onclick={(event) => { event.currentTarget.focus(); toggleWorkspacePanel('left'); }}>Panels</button>
+        <button class="btn btn-ghost btn-xs" aria-label="Fabric" onclick={(event) => { event.currentTarget.focus(); leftTab = 'materials'; openWorkspacePanel('left'); }}>Fabric</button>
+      </div>
+      <button class="btn btn-ghost btn-xs" aria-label="Undo" onclick={handleUndo} disabled={!$undoLabel} title={$undoLabel ? `Undo ${$undoLabel} (Ctrl+Z)` : 'Nothing to undo'}>&#x21A9;</button>
+      <button class="btn btn-ghost btn-xs" aria-label="Redo" onclick={handleRedo} disabled={!$redoLabel} title={$redoLabel ? `Redo ${$redoLabel} (Ctrl+Shift+Z)` : 'Nothing to redo'}>&#x21AA;</button>
+      <div class="dropdown dropdown-end" bind:this={exportMenuElement} class:dropdown-open={showExportMenu}
+        onfocusout={(event) => { if (!(event.relatedTarget instanceof Node) || !exportMenuElement.contains(event.relatedTarget)) showExportMenu = false; }}>
+        <button class="btn btn-ghost btn-xs" bind:this={exportMenuTrigger} aria-expanded={showExportMenu}
+          aria-controls="studio-export-menu" onclick={() => showExportMenu = !showExportMenu}>Export</button>
+        {#if showExportMenu}
+        <ul id="studio-export-menu" class="dropdown-content menu bg-base-200 rounded-box z-50 w-72 p-2 shadow text-sm">
           <li><button onclick={handleExport}>JSON (.seamer.json)</button></li>
           <li><button onclick={exportSSP}>Seamer Project — 2D + 3D (.ssp)</button></li>
           <li><button onclick={() => exportAs('svg')}>SVG</button></li>
@@ -983,12 +1235,12 @@
           <li><button onclick={() => (showPrintDialog = true)}>Print pattern (tiled)…</button></li>
           <li><button onclick={doPrint}>Print (single page)…</button></li>
         </ul>
+        {/if}
       </div>
       <button class="btn btn-ghost btn-xs" onclick={handleNew}>New</button>
-      <button class="btn btn-xs" class:btn-accent={!saved} class:btn-ghost={saved} onclick={handleSave} data-tour-id="tour-save">{saved ? 'Saved' : 'Save'}</button>
-      <button class="btn btn-ghost btn-xs" onclick={() => showLeftPanel = !showLeftPanel} title="Toggle left panel">&#x2630;</button>
-      <button class="btn btn-ghost btn-xs" onclick={() => showRightPanel = !showRightPanel} title="Toggle right panel">&#x25B6;</button>
-      <button class="btn btn-xs" class:btn-active={showObjectBrowser} onclick={() => showObjectBrowser = !showObjectBrowser} title="Toggle object browser" data-testid="object-browser-toggle">
+      <button class="btn btn-ghost btn-xs" onclick={(e) => { e.currentTarget.focus(); toggleWorkspacePanel('right'); }} title="Toggle properties panel" aria-label="Properties panel" aria-expanded={(narrowWorkspace ? mobilePanel === 'right' : showRightPanel) ? 'true' : 'false'} aria-controls="studio-right-panel"><span class="studio-desktop-label" aria-hidden="true">&#x25B6;</span><span class="studio-mobile-label">Properties</span></button>
+
+      <button class="btn btn-xs" aria-label="Object browser" class:btn-active={showObjectBrowser} onclick={() => showObjectBrowser = !showObjectBrowser} title="Toggle object browser" data-testid="object-browser-toggle">
         <span class="material-symbols-rounded notranslate align-middle" style="font-size:18px">view_list</span>
       </button>
       {#key $patternEditor}<ErrorsPanel {currentPattern} editor={$patternEditor} />{/key}
@@ -997,7 +1249,7 @@
         <span class="material-symbols-rounded notranslate align-middle" style="font-size:18px">history</span>
       </button>
       <ThemeToggle size="xs" />
-      <button class="btn btn-ghost btn-xs" onclick={() => showSettings = true} title="Settings" aria-label="Settings">
+      <button class="btn btn-ghost btn-xs" onclick={(e) => { e.currentTarget.focus(); showSettings = true; }} title="Settings" aria-label="Settings">
         <span class="material-symbols-rounded notranslate align-middle" style="font-size:18px">settings</span>
       </button>
       <button class="btn btn-ghost btn-xs" onclick={() => showCommandPalette = true} title="Command palette (⌘K)" aria-label="Command palette">
@@ -1012,12 +1264,20 @@
       <button class="btn btn-ghost btn-xs" onclick={() => showShortcuts = true} title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">
         <span class="material-symbols-rounded notranslate align-middle" style="font-size:18px">keyboard</span>
       </button>
+      </div>
     </div>
   </div>
 
-  <div class="flex-1 flex overflow-hidden">
-    {#if showLeftPanel}
-      <div class="w-56 border-r bg-base-100 flex flex-col shrink-0 overflow-hidden" data-tour-id="tour-left-panel">
+  <div class="studio-workspace flex-1 flex overflow-hidden">
+    {#if narrowWorkspace && mobilePanel}
+      <button class="studio-panel-backdrop" aria-label="Close panel" tabindex="-1" onclick={() => closeWorkspacePanel()}></button>
+    {/if}
+    {#if showLeftPanel || mobilePanel === 'left'}
+      <aside inert={frozenDiagnosticActive} id="studio-left-panel" bind:this={leftPanelElement} class="studio-left-panel w-56 border-r bg-base-100 flex flex-col shrink-0 overflow-hidden" class:mobile-open={mobilePanel === 'left'} role={narrowWorkspace ? 'dialog' : undefined} aria-modal={narrowWorkspace && mobilePanel === 'left' ? true : undefined} aria-label="Layers, body, fabric and seams" data-tour-id="tour-left-panel">
+        <div class="studio-drawer-header border-b px-2 bg-base-200">
+          <span class="font-semibold text-sm">Pattern panels</span>
+          <button class="btn btn-ghost btn-xs" aria-label="Close pattern panels" onclick={() => closeWorkspacePanel('left')}>✕</button>
+        </div>
         <div class="tabs tabs-boxed tabs-xs bg-base-200 px-1 pt-1">
           <button class="tab" class:tab-active={leftTab === 'layers'} onclick={() => leftTab = 'layers'}>Layers</button>
           <button class="tab" class:tab-active={leftTab === 'body'} onclick={() => leftTab = 'body'}>Body</button>
@@ -1031,32 +1291,34 @@
           {:else if leftTab === 'seams'}<SeamPanel {currentPattern} onchange={handlePatternUpdate} />
           {/if}
         </div>
-      </div>
+      </aside>
     {/if}
 
-    <div class="flex-1 min-w-0 flex overflow-hidden">
+    <div class="studio-canvases flex-1 min-w-0 flex overflow-hidden" class:split-view={viewMode === 'both'}>
       {#if viewMode === 'both'}
-        <div class="w-1/2 min-w-0 border-r relative" data-tour-id="tour-canvas-2d">{#key $patternEditor}<PatternCanvas2D {currentPattern} editor={$patternEditor} onchange={handlePatternUpdate} />{/key}</div>
-        <div class="w-1/2 min-w-0 relative" data-tour-id="tour-canvas-3d"><PatternScene3D bind:this={scene3d} {currentPattern} selectedPieceId={[...pieceIds][0] ?? null} onpieceselect={handlePieceSelect} ondrapesettled={handleDrapeSettled} onpatternupdate={handlePatternUpdate} oncamerachange={handleCameraChange} {labelDisplay} onlabeldisplaychange={(v) => (labelDisplay = v)} /></div>
+        <div class="studio-canvas w-1/2 min-w-0 border-r relative" data-tour-id="tour-canvas-2d" inert={frozenDiagnosticActive}>{#key $patternEditor}<PatternCanvas2D {currentPattern} editor={$patternEditor} onchange={handlePatternUpdate} />{/key}</div>
+        <div class="studio-canvas w-1/2 min-w-0 relative" data-tour-id="tour-canvas-3d"><PatternScene3D onfrozendiagnosticchange={handleFrozenDiagnostic} bind:this={scene3d} {currentPattern} selectedPieceId={[...pieceIds][0] ?? null} onpieceselect={handlePieceSelect} ondrapesettled={handleDrapeSettled} onpatternupdate={handlePatternUpdate} oncamerachange={handleCameraChange} {labelDisplay} onlabeldisplaychange={(v) => (labelDisplay = v)} /></div>
       {:else if viewMode === '2d'}
-        <div class="flex-1 min-w-0 relative" data-tour-id="tour-canvas-2d">{#key $patternEditor}<PatternCanvas2D {currentPattern} editor={$patternEditor} onchange={handlePatternUpdate} />{/key}</div>
+        <div class="flex-1 min-w-0 relative" data-tour-id="tour-canvas-2d" inert={frozenDiagnosticActive}>{#key $patternEditor}<PatternCanvas2D {currentPattern} editor={$patternEditor} onchange={handlePatternUpdate} />{/key}</div>
       {:else}
-        <div class="flex-1 min-w-0 relative" data-tour-id="tour-canvas-3d"><PatternScene3D bind:this={scene3d} {currentPattern} selectedPieceId={[...pieceIds][0] ?? null} onpieceselect={handlePieceSelect} ondrapesettled={handleDrapeSettled} onpatternupdate={handlePatternUpdate} oncamerachange={handleCameraChange} {labelDisplay} onlabeldisplaychange={(v) => (labelDisplay = v)} /></div>
+        <div class="flex-1 min-w-0 relative" data-tour-id="tour-canvas-3d"><PatternScene3D onfrozendiagnosticchange={handleFrozenDiagnostic} bind:this={scene3d} {currentPattern} selectedPieceId={[...pieceIds][0] ?? null} onpieceselect={handlePieceSelect} ondrapesettled={handleDrapeSettled} onpatternupdate={handlePatternUpdate} oncamerachange={handleCameraChange} {labelDisplay} onlabeldisplaychange={(v) => (labelDisplay = v)} /></div>
       {/if}
     </div>
 
-    {#if showRightPanel}
-      {#key $patternEditor}<PropertyPanel {currentPattern} editor={$patternEditor} onchange={handlePatternUpdate} onclose={() => (showRightPanel = false)} {labelDisplay} onlabeldisplaychange={(v) => (labelDisplay = v)} ongrading={() => (showGrading = true)} onalterations={() => (showAlterations = true)} />{/key}
+    {#if showRightPanel || mobilePanel === 'right'}
+      <aside inert={frozenDiagnosticActive} id="studio-right-panel" bind:this={rightPanelElement} class="studio-right-panel" class:mobile-open={mobilePanel === 'right'} role={narrowWorkspace ? 'dialog' : undefined} aria-modal={narrowWorkspace && mobilePanel === 'right' ? true : undefined} aria-label="Properties">
+      {#key $patternEditor}<PropertyPanel {currentPattern} editor={$patternEditor} onchange={handlePatternUpdate} onclose={() => closeWorkspacePanel('right')} {labelDisplay} onlabeldisplaychange={(v) => (labelDisplay = v)} ongrading={() => (showGrading = true)} onalterations={() => (showAlterations = true)} />{/key}
+      </aside>
     {/if}
   </div>
 
   {#if viewMode !== '3d'}
-    <div class="h-10 border-t bg-base-200 shrink-0" data-tour-id="tour-toolbar">
-      {#key $patternEditor}<StudioToolbar {currentPattern} editor={$patternEditor} onchange={handlePatternUpdate} />{/key}
+    <div class="studio-toolbar h-10 border-t bg-base-200 shrink-0" data-tour-id="tour-toolbar">
+      <div inert={frozenDiagnosticActive}>{#key $patternEditor}<StudioToolbar {currentPattern} editor={$patternEditor} onchange={handlePatternUpdate} />{/key}</div>
     </div>
   {/if}
 
-  {#key $patternEditor}<StatusBar {currentPattern} {saved} editor={$patternEditor} />{/key}
+  <div class="studio-status">{#key $patternEditor}<StatusBar {currentPattern} {saved} editor={$patternEditor} />{/key}</div>
 
   {#if showObjectBrowser}
     {#key $patternEditor}<ObjectBrowser {currentPattern} editor={$patternEditor} onchange={handlePatternUpdate} bind:open={showObjectBrowser} />{/key}
@@ -1072,7 +1334,8 @@
 {#if showBugReport}<BugReportModal {currentPattern} onclose={() => (showBugReport = false)} />{/if}
 {#if showCuttingRoom}<CuttingRoomModal {currentPattern} onchange={handlePatternUpdate} onclose={() => (showCuttingRoom = false)} />{/if}
 {#if showVersions}<VersionsModal {currentPattern} onrestore={applyRestoredVersion} onchange={handlePatternUpdate} onclose={() => (showVersions = false)} />{/if}
-{#if showSettings}<SettingsModal onclose={() => (showSettings = false)} />{/if}
+{#if showSettings}<SettingsModal {currentPattern} onchange={handlePatternUpdate} onclose={() => (showSettings = false)} />{/if}
+{#if showGarmentCode}<GarmentCodeDialog {currentPattern} ongenerate={applyGeneratedGarmentCode} onexample={loadGarmentCodeExample} onclose={() => (showGarmentCode = false)} />{/if}
 <GlobeLanternDialog
   open={showGlobeLantern}
   ongenerate={(p) => void adoptGeneratedPattern(p)}
@@ -1098,3 +1361,87 @@
     onendedit={endAlterationEdit}
   />
 {/if}
+
+
+<style>
+  .studio-shell { height: 100dvh; min-width: 0; }
+  .studio-topbar { gap: 0.5rem; flex-wrap: wrap; }
+  .studio-topbar :global(.dropdown-content) { max-height: calc(100dvh - 7rem); overflow-y: auto; flex-wrap: nowrap; }
+  .studio-actions :global(.dropdown-content) { left: 0; right: auto; }
+  .studio-document { min-width: 0; }
+  .studio-actions, .studio-more-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 0.25rem; }
+  .studio-more-toggle, .studio-drawer-header, .studio-mobile-label, .studio-mobile-actions-heading, .studio-fabric-toggle { display: none; }
+  .studio-landscape-actions { display: none; }
+  .studio-workspace { position: relative; min-height: 0; }
+  .studio-canvases, .studio-canvas { min-height: 0; }
+  .studio-right-panel { display: flex; min-height: 0; flex-shrink: 0; }
+  .studio-status { min-width: 0; overflow-x: auto; overflow-y: hidden; flex-shrink: 0; }
+  .studio-status :global(> div) { min-width: max-content; }
+  .studio-panel-backdrop { position: absolute; inset: 0; z-index: 30; background: rgb(0 0 0 / 0.35); cursor: default; }
+
+  @media (max-width: 1023px) {
+    .studio-topbar { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 0.25rem 0.5rem; padding: 0.25rem 0.5rem; }
+    .studio-home { align-self: start; }
+    .studio-document { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.25rem; }
+    .studio-document > input { grid-column: 1 / -1; width: 100%; min-width: 0; height: 44px; }
+    .studio-view-mode { grid-column: 2; justify-self: end; }
+    .studio-actions { grid-column: 1 / -1; }
+    .studio-topbar :global(.btn), .studio-topbar :global([role="button"]) { min-height: 44px; height: auto; min-width: 44px; }
+    .studio-topbar :global(.dropdown-content) { position: fixed; left: 0.5rem; right: 0.5rem; top: 96px; width: auto; max-height: calc(100dvh - 112px); overflow-y: auto; }
+    .studio-more-toggle, .studio-fabric-toggle { display: inline-flex; }
+    .studio-actions { justify-content: space-between; flex-wrap: nowrap; }
+    .studio-actions > :global(.btn), .studio-actions > :global(.dropdown) > :global(.btn) { padding-inline: 0.5rem; }
+    .studio-more-actions { display: none; }
+    .studio-more-actions.expanded { display: flex; position: fixed; top: 152px; left: 0.5rem; right: 0.5rem; z-index: 60; max-height: calc(100dvh - 168px); overflow-y: auto; overscroll-behavior: contain; padding: 0.5rem; background: oklch(var(--b2)); border-radius: 0.75rem; box-shadow: 0 4px 16px rgb(0 0 0 / 0.2); }
+    .studio-more-actions :global(button[aria-label]:not([aria-label="Properties panel"]):not([aria-label="Close studio actions"]))::after { content: attr(aria-label); font-size: 0.75rem; }
+    .studio-more-actions :global(.btn-square) { width: auto; max-width: 100%; aspect-ratio: auto; }
+    .studio-more-actions :global(button[title="Pattern errors & warnings"])::after { content: attr(title); font-size: 0.75rem; }
+    .studio-mobile-actions-heading { display: flex; align-items: center; justify-content: space-between; flex-basis: 100%; position: sticky; top: -0.5rem; background: oklch(var(--b2)); z-index: 1; padding-block: 0.25rem; }
+    .studio-mobile-label { display: inline; }
+    .studio-desktop-label { display: none; }
+    .studio-left-panel, .studio-right-panel { display: none; }
+    .studio-left-panel.mobile-open, .studio-right-panel.mobile-open { display: flex; position: absolute; top: 0; bottom: 0; z-index: 40; width: min(340px, calc(100% - 32px)); box-shadow: 0 8px 24px rgb(0 0 0 / 0.2); }
+    .studio-left-panel.mobile-open { left: 0; }
+    .studio-right-panel.mobile-open { right: 0; }
+    .studio-right-panel :global(> div) { width: 100%; min-width: 0; }
+    .studio-right-panel :global(button[aria-label="Close properties"]) { min-height: 44px; min-width: 44px; padding: 0; }
+    .studio-drawer-header { display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; }
+    .studio-drawer-header :global(button), .studio-left-panel :global(.tab) { min-height: 44px; min-width: 44px; }
+    .studio-toolbar { height: 48px; }
+    .studio-toolbar :global(button) { min-height: 44px; min-width: 44px; }
+  }
+
+  @media (max-width: 767px) and (orientation: portrait) {
+    .studio-canvases.split-view { flex-direction: column; }
+    .studio-canvases.split-view > .studio-canvas { width: 100%; height: 50%; border-right: 0; }
+    .studio-canvases.split-view > .studio-canvas:first-child { border-bottom: 1px solid hsl(var(--bc) / 0.15); }
+  }
+
+  /* Short touch screens need two rows rather than a portrait header above a small canvas. */
+  @media (max-width: 1023px) and (max-height: 500px) and (orientation: landscape) and (pointer: coarse) {
+    .studio-topbar { grid-template-columns: 44px minmax(0, 1fr) auto; }
+    .studio-home { grid-row: 1; grid-column: 1; }
+    .studio-document { display: contents; }
+    .studio-document > input { grid-row: 1; grid-column: 2; }
+    .studio-view-mode { grid-row: 1; grid-column: 3; }
+    .studio-document :global(.library-dropdown) { grid-row: 2; grid-column: 1 / 3; justify-self: start; }
+    .studio-actions { grid-row: 2; grid-column: 2 / 4; justify-content: flex-end; gap: 0.5rem; }
+    .studio-actions > button[aria-label="Layers and body panel"], .studio-actions > .studio-fabric-toggle { display: none; }
+    .studio-landscape-actions { display: flex; flex-wrap: wrap; gap: 0.25rem; flex-basis: 100%; }
+    .studio-more-actions.expanded { top: 104px; max-height: calc(100dvh - 120px); }
+  }
+
+  /* One row where short touch screens have room for every existing primary action.
+     Narrower landscape screens retain the two-row layout above. */
+  @media (min-width: 660px) and (max-width: 1023px) and (max-height: 500px) and (orientation: landscape) and (pointer: coarse) {
+    .studio-topbar { grid-template-columns: 44px auto minmax(64px, 1fr) auto auto; column-gap: 0.25rem; }
+    .studio-home { grid-row: 1; grid-column: 1; }
+    .studio-document :global(.library-dropdown) { grid-row: 1; grid-column: 2; }
+    .studio-document > input { grid-row: 1; grid-column: 3; }
+    .studio-view-mode { grid-row: 1; grid-column: 4; }
+    .studio-actions { grid-row: 1; grid-column: 5; gap: 0.25rem; }
+    .studio-topbar .studio-actions :global(.dropdown-content),
+    .studio-topbar .studio-document :global(.library-panel) { top: 56px; }
+    .studio-more-actions.expanded { top: 56px; max-height: calc(100dvh - 72px); }
+  }
+</style>

@@ -1,0 +1,17 @@
+Source surface geodesic attribution and provenance
+
+This TypeScript translation follows pmp::geodesics, the triangulated fast-marching solver with unfolded virtual edges used by the pinned GarmentMeasurements measurement program. It is not the heat-method solver and does not reconstruct original SMPL landmark assignments.
+
+GarmentMeasurements repository commit: 04e9197c37197c5b05c1c86abf5ac503864e0d8f
+Checked-in external/pmp-library tree: 5af8892e2530729ea07b8b20dca52f1be7afde29
+pmp CMake version: 2.0.1 (the dependency is checked in; it has no separate submodule commit here).
+geodesics.cpp SHA-256: 793e40aedc01fca2f7912a73fb77b661df693c37b09d6acd5bc5d775daa4686f
+geodesics.h SHA-256: 6d0824a084c38b590c315de0c4cb8e60ac6d00f6d41faaa0de696776cff90fa2
+Upstream URL: https://github.com/maria-korosteleva/GarmentMeasurements
+Method reference: R. Kimmel and J. A. Sethian, Computing Geodesic Paths on Manifolds, PNAS 1998.
+
+Copyright 2011–2020 the Polygon Mesh Processing Library developers.
+Copyright 2001–2005 Computer Graphics Group, RWTH Aachen.
+Distributed under the upstream MIT License with employer disclaimer. The full applicable copyright, permission and disclaimer text accompanies this source as surfaceGeodesic.LICENSE; retain it in distributed substantial copies.
+
+The port uses JavaScript double arithmetic on the same Float32 coordinates; the upstream Scalar implementation uses float. Actual seven-body, two-sided baseline/candidate comparisons against the pinned compiled C++ solver agree within 0.000103 mm. This is numerical-method agreement on native FBX topology, not evidence of exact SMPL landmarks or a garment fit certificate.

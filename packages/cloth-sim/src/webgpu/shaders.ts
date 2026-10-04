@@ -3,6 +3,57 @@
 // vec4 storage (the .w lane is padding) to avoid vec3 array-stride pitfalls.
 
 import type { SimConfig } from '../config';
+import { finiteContactsWGSL } from './finiteContacts';
+import { seamGateWGSL, type SeamGateLayout } from './seamGate';
+
+// Closest point on a finite triangle (Ericson's Voronoi-region tests). Shared by body and
+// self collision so both kernels agree at faces, edges, vertices and degenerate triangles.
+export const closestPointOnTriangleWGSL = /* wgsl */ `
+fn getClosestPointOnSegment(start: vec3f, end: vec3f, point: vec3f) -> vec3f {
+  let edge = end - start;
+  let lengthSq = dot(edge, edge);
+  if (lengthSq <= 1e-20) { return start; }
+  return start + edge * clamp(dot(point - start, edge) / lengthSq, 0.0, 1.0);
+}
+
+fn getClosestPointOnTriangle(p0: vec3f, p1: vec3f, p2: vec3f, point: vec3f) -> vec3f {
+  let ab = p1 - p0; let ac = p2 - p0;
+  let normal = cross(ab, ac);
+  if (dot(normal, normal) <= 1e-7 * max(dot(ab, ab) * dot(ac, ac), 1e-20)) {
+    let a = getClosestPointOnSegment(p0, p1, point);
+    let b = getClosestPointOnSegment(p0, p2, point);
+    let c = getClosestPointOnSegment(p1, p2, point);
+    let da = dot(point - a, point - a);
+    let db = dot(point - b, point - b);
+    let dc = dot(point - c, point - c);
+    if (da <= db && da <= dc) { return a; }
+    if (db <= dc) { return b; }
+    return c;
+  }
+  let ap = point - p0;
+  let d1 = dot(ab, ap); let d2 = dot(ac, ap);
+  if (d1 <= 0.0 && d2 <= 0.0) { return p0; }
+  let bp = point - p1;
+  let d3 = dot(ab, bp); let d4 = dot(ac, bp);
+  if (d3 >= 0.0 && d4 <= d3) { return p1; }
+  let vc = d1 * d4 - d3 * d2;
+  if (vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0) {
+    return p0 + ab * (d1 / (d1 - d3));
+  }
+  let cp = point - p2;
+  let d5 = dot(ab, cp); let d6 = dot(ac, cp);
+  if (d6 >= 0.0 && d5 <= d6) { return p2; }
+  let vb = d5 * d2 - d1 * d6;
+  if (vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0) {
+    return p0 + ac * (d2 / (d2 - d6));
+  }
+  let va = d3 * d6 - d5 * d4;
+  if (va <= 0.0 && d4 - d3 >= 0.0 && d5 - d6 >= 0.0) {
+    return p1 + (p2 - p1) * ((d4 - d3) / (d4 - d3 + d5 - d6));
+  }
+  let inverse = 1.0 / (va + vb + vc);
+  return p0 + ab * (vb * inverse) + ac * (vc * inverse);
+}`;
 
 const WG = 64;
 export const WORKGROUP_SIZE = WG;
@@ -15,7 +66,7 @@ export function integrateWGSL(cfg: SimConfig): string {
 @group(0) @binding(2) var<storage, read_write> lastPositions: array<vec4f>;
 @group(0) @binding(3) var<storage, read_write> positionCorrection: array<vec4f>;
 @group(0) @binding(4) var<storage, read> anchors: array<vec4f>;
-struct SimParams { anchorScale: f32, p0: f32, p1: f32, p2: f32 };
+struct SimParams { anchorScale: f32, gravityScale: f32, p1: f32, p2: f32 };
 @group(0) @binding(5) var<uniform> simParams: SimParams;
 @group(0) @binding(6) var<storage, read> positions2d: array<vec4f>;
 struct DynamicConfig { grabbing: f32, grabIndex: f32, dragInfluenceRadius: f32, _pad: f32, grabPosition: vec3f, _pad2: f32 };
@@ -34,7 +85,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   lastPositions[index] = vec4f(pos, 0.0);
   positionCorrection[index] = vec4f(0.0);
   let invMass = positions[index].w;
-  var vel = velocities[index].xyz + gravity * deltaT;
+  var vel = velocities[index].xyz + gravity * simParams.gravityScale * deltaT;
   if (invMass <= 0.0) { vel = vec3f(0.0); }
   velocities[index] = vec4f(vel, 0.0);
   pos += vel * deltaT;
@@ -200,26 +251,23 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
 }`;
 }
 
-/** Seam attraction: pull a particle toward each linked partner, accumulate into corrections. */
-export function seamWGSL(cfg: SimConfig, maxDisplacementSq: number): string {
+/** Jacobi sewing: both endpoints read the same positions and receive their inverse-mass
+ * share of the gap. Doubling this share swaps an isolated pair instead of closing it. */
+export function seamWGSL(cfg: SimConfig, maxDisplacementSq: number, gateLayout?: SeamGateLayout,
+  closedRestoration?: { maximumSq: number; previousGapSq: number }): string {
   return /* wgsl */ `
 @group(0) @binding(0) var<storage, read> positions: array<vec4f>;
 @group(0) @binding(1) var<storage, read> seams: array<i32>;
 @group(0) @binding(2) var<storage, read_write> positionCorrection: array<vec4f>;
 @group(0) @binding(3) var<storage, read> seamOrder: array<i32>;
-@group(0) @binding(4) var<uniform> gate: SeamGate;
+@group(0) @binding(4) var<uniform> gate: SeamGate;${closedRestoration ? '\n@group(0) @binding(5) var<storage, read> lastPositions: array<vec4f>;' : ''}
 
-struct SeamGate {
-  // Links whose stitch index is below this are sewn; the rest are still loose. Held at the total
-  // stitch count unless an assembly recording is driving it, so ungated behaviour is the default.
-  sewnUpTo: i32,
-  pad0: i32,
-  pad1: i32,
-  pad2: i32,
-};
+${seamGateWGSL('SeamGate', gateLayout)}
 
 const stiffness = ${cfg.seamStrength}f;
-const maxDisplacementSq = ${maxDisplacementSq}f;
+const maxDisplacementSq = ${maxDisplacementSq}f;${closedRestoration ? `
+const closedRestorationMaxDisplacementSq = ${closedRestoration.maximumSq}f;
+const closedGapSq = ${closedRestoration.previousGapSq}f;` : ''}
 
 @compute @workgroup_size(${WG})
 fn main(@builtin(global_invocation_id) gid: vec3u) {
@@ -234,6 +282,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
       // continue, not break: a gated-out link must not hide the links in later slots.
       if (connected < 0 || u32(connected) == index) { continue; }
       if (seamOrder[index * 4u + j] >= gate.sewnUpTo) { continue; }
+      if (!activeSourceStitch(seamOrder[index * 4u + j])) { continue; }
       let ci = u32(connected);
       let invMass2 = positions[ci].w;
       let totalInvMass = invMass1 + invMass2;
@@ -241,19 +290,24 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
       let delta = positions[ci].xyz - positions[index].xyz;
       let weight = invMass1 / totalInvMass;
       var correction = delta * stiffness * weight;
-      if (dot(correction, correction) > maxDisplacementSq) {
-        correction = normalize(correction) * sqrt(maxDisplacementSq);
+${closedRestoration ? `      // This history is immutable for all sewing iterations in the physical substep.
+      let previousGap = lastPositions[ci].xyz - lastPositions[index].xyz;
+      let correctionMaximumSq = select(maxDisplacementSq, closedRestorationMaxDisplacementSq,
+        dot(previousGap, previousGap) <= closedGapSq);
+` : ''}      if (dot(correction, correction) > ${closedRestoration ? 'correctionMaximumSq' : 'maxDisplacementSq'}) {
+        correction = normalize(correction) * sqrt(${closedRestoration ? 'correctionMaximumSq' : 'maxDisplacementSq'});
       }
       totalCorrection += correction;
       count += 1.0;
     }
   }
-  positionCorrection[index] += vec4f(totalCorrection * 2.0, count);
+  positionCorrection[index] += vec4f(totalCorrection, count);
 }`;
 }
 
 /** External (body) collision gather — ported from the original's InitExternalCollisionsShader.
- *  Once per frame: walk the GPU spatial hash over body-triangle centres and record up to
+ *  At the configured substep cadence: walk the body-triangle hash around each particle sweep,
+ *  recording up to
  *  numExternalCollisionConstraintsPerParticle nearby body triangles per particle (within
  *  externalStaticCollisionRadius of the triangle centre). Indices are stored +2 so 0 means
  *  "no triangle" (matching the self-collision encoding; the external list carries no sideness sign). */
@@ -264,6 +318,7 @@ export function initExternalCollisionWGSL(cfg: SimConfig, hashTableSize: number)
 @group(0) @binding(2) var<storage, read> hashTable: array<u32>;
 @group(0) @binding(3) var<storage, read> hashPositions: array<u32>;
 @group(0) @binding(4) var<storage, read> triangleCenters: array<vec4f>;
+@group(0) @binding(5) var<storage, read> lastPositions: array<vec4f>;
 ${hashFunctions(hashTableSize, cfg.externalHashSpacing)}
 const maxDist = ${cfg.externalStaticCollisionRadius}f;
 const maxDist2 = maxDist * maxDist;
@@ -277,9 +332,15 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     nearTriangles[index * numCollisionConstraintsPerParticle + i] = 0;
   }
   let pos = positions[index].xyz;
-  let x0 = intCoord(pos.x - maxDist); let y0 = intCoord(pos.y - maxDist); let z0 = intCoord(pos.z - maxDist);
-  let x1 = intCoord(pos.x + maxDist); let y1 = intCoord(pos.y + maxDist); let z1 = intCoord(pos.z + maxDist);
+  let previous = lastPositions[index].xyz;
+  let motion = pos - previous;
+  let motionLengthSq = dot(motion, motion);
+  let low = min(pos, previous) - vec3f(maxDist);
+  let high = max(pos, previous) + vec3f(maxDist);
+  let x0 = intCoord(low.x); let y0 = intCoord(low.y); let z0 = intCoord(low.z);
+  let x1 = intCoord(high.x); let y1 = intCoord(high.y); let z1 = intCoord(high.z);
   var num : u32 = 0u;
+  var distances: array<f32, ${cfg.numExternalCollisionConstraintsPerParticle}>;
   for (var xi = x0; xi <= x1; xi++) {
     for (var yi = y0; yi <= y1; yi++) {
       for (var zi = z0; zi <= z1; zi++) {
@@ -290,12 +351,30 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
           let triangleIndex = hashPositions[i];
           if (triangleIndex >= arrayLength(&triangleCenters)) { continue; }
           let trianglePosition = triangleCenters[triangleIndex].xyz;
-          let distVec = pos - trianglePosition;
-          if (dot(distVec, distVec) > maxDist2) { continue; }
+          var closest = pos;
+          if (motionLengthSq > 1e-20) {
+            closest = previous + motion * clamp(dot(trianglePosition - previous, motion) / motionLengthSq, 0.0, 1.0);
+          }
+          let distVec = closest - trianglePosition;
+          let distanceSq = dot(distVec, distVec);
+          if (distanceSq > maxDist2) { continue; }
           let encodedIndex : i32 = i32(triangleIndex) + 2i; // +2 so 0 means "no triangle"
-          nearTriangles[index * numCollisionConstraintsPerParticle + num] = encodedIndex;
-          num++;
-          if (num >= numCollisionConstraintsPerParticle) { return; }
+          var duplicate = false;
+          var farthest = 0u;
+          for (var slot = 0u; slot < num; slot++) {
+            if (nearTriangles[index * numCollisionConstraintsPerParticle + slot] == encodedIndex) { duplicate = true; }
+            if (distances[slot] > distances[farthest]) { farthest = slot; }
+          }
+          if (duplicate) { continue; }
+          if (num < numCollisionConstraintsPerParticle) {
+            nearTriangles[index * numCollisionConstraintsPerParticle + num] = encodedIndex;
+            distances[num] = distanceSq;
+            num++;
+          } else if (distanceSq < distances[farthest]) {
+            // A full candidate budget keeps the closest surfaces, not the first hash cells visited.
+            nearTriangles[index * numCollisionConstraintsPerParticle + farthest] = encodedIndex;
+            distances[farthest] = distanceSq;
+          }
         }
       }
     }
@@ -304,7 +383,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
 }
 
 /** External (body) collision solve — ported from the original's SolveExternalCollisionsShader.
- *  Per substep: against the frozen per-frame gather list, pick the best contact (preferring body
+ *  Per substep: against the latest gathered candidates, pick the best contact (preferring body
  *  surfaces whose normal faces the particle), then push out along the normal with friction.
  *  The per-piece cloth-normal filter (incidentTriangles flag) rejects cavity backfaces (crotch,
  *  armpit); flag sign flips the cloth normal for flipNormals pieces. 8 storage buffers — fits the
@@ -327,32 +406,7 @@ const frictionCoefficient = ${cfg.externalCollisionFriction}f;
 const maxIncidentTrianglesPerParticle = ${maxIncident}u;
 const incidentStride = ${incidentStride}u;
 
-fn getClosestPointOnTriangle(p0: vec3f, p1: vec3f, p2: vec3f, point: vec3f) -> vec3f {
-  let edge0 = p1 - p0; let edge1 = p2 - p0; let v0 = point - p0;
-  let a = dot(edge0, edge0); let b = dot(edge0, edge1); let c = dot(edge1, edge1);
-  let d = dot(edge0, v0); let e = dot(edge1, v0);
-  let det = a * c - b * b;
-  var s = b * e - c * d; var t = b * d - a * e;
-  if (s + t < det) {
-    if (s < 0.0) {
-      if (t < 0.0) {
-        if (d < 0.0) { s = clamp(-d / a, 0.0, 1.0); t = 0.0; }
-        else { s = 0.0; t = clamp(-e / c, 0.0, 1.0); }
-      } else { s = 0.0; t = clamp(-e / c, 0.0, 1.0); }
-    } else if (t < 0.0) { s = clamp(-d / a, 0.0, 1.0); t = 0.0; }
-    else { let invDet = 1.0 / det; s *= invDet; t *= invDet; }
-  } else {
-    if (s < 0.0) {
-      let tmp0 = b + d; let tmp1 = c + e;
-      if (tmp1 > tmp0) { let numer = tmp1 - tmp0; let denom = a - 2.0 * b + c; s = clamp(numer / denom, 0.0, 1.0); t = 1.0 - s; }
-      else { t = clamp(-e / c, 0.0, 1.0); s = 0.0; }
-    } else if (t < 0.0) {
-      if (a + d > b + e) { let numer = c + e - b - d; let denom = a - 2.0 * b + c; s = clamp(numer / denom, 0.0, 1.0); t = 1.0 - s; }
-      else { s = clamp(-e / c, 0.0, 1.0); t = 0.0; }
-    } else { let numer = c + e - b - d; let denom = a - 2.0 * b + c; s = clamp(numer / denom, 0.0, 1.0); t = 1.0 - s; }
-  }
-  return p0 + s * edge0 + t * edge1;
-}
+${closestPointOnTriangleWGSL}
 
 fn computeClothNormal(particleIndex: u32) -> vec3f {
   if (maxIncidentTrianglesPerParticle == 0u || incidentStride == 0u) { return vec3f(0.0); }
@@ -423,6 +477,8 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   var bestNormal = vec3f(0.0);
   var hasContact = false;
   var bestWasPositive = false;
+  var bestWasSwept = false;
+  var bestCrossingTime = 2.0;
 
   for (var collisionIndex = 0u; collisionIndex < numCollisionConstraintsPerParticle; collisionIndex++) {
     let encodedTriangleIndex = nearTriangles[index * numCollisionConstraintsPerParticle + collisionIndex];
@@ -445,17 +501,35 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     let offset = pos - closestPoint;
     let dist2 = dot(offset, offset);
     let planeDistance = dot(pos - p0, triNormal);
-    // Discard triangles well behind the particle (prevents getting pulled by cavity backfaces).
-    if (planeDistance < -thickness) { continue; }
+    let previousPlaneDistance = dot(particleLast - p0, triNormal);
+    var sweptContact = false;
+    var crossingTime = 2.0;
+    if (previousPlaneDistance >= 0.0 && planeDistance < 0.0) {
+      crossingTime = previousPlaneDistance / (previousPlaneDistance - planeDistance);
+      let crossing = particleLast + particleDelta * crossingTime;
+      let closestCrossing = getClosestPointOnTriangle(p0, p1, p2, crossing);
+      let crossingOffset = crossing - closestCrossing;
+      sweptContact = dot(crossingOffset, crossingOffset) <= 1e-10;
+    }
+    // Accept a contact only near the finite triangle, or after crossing its actual face. Testing
+    // only the endpoint would silently discard a particle that tunneled deeper than thickness.
+    if (!sweptContact && (dist2 >= thickness * thickness || planeDistance < -thickness)) { continue; }
     // Prefer surfaces where the particle is on the positive side of the normal; otherwise fall back
     // to the nearest triangle that passed the backface test.
     let isPositiveSide = planeDistance >= 0.0;
     var shouldChoose = false;
-    if (isPositiveSide) {
-      if (!bestWasPositive || dist2 < bestDistance2) { shouldChoose = true; bestWasPositive = true; }
-    } else if (!bestWasPositive && dist2 < bestDistance2) { shouldChoose = true; }
+    if (sweptContact) {
+      shouldChoose = !bestWasSwept || crossingTime < bestCrossingTime;
+    } else if (!bestWasSwept) {
+      if (isPositiveSide) {
+        shouldChoose = !bestWasPositive || dist2 < bestDistance2;
+      } else if (!bestWasPositive && dist2 < bestDistance2) { shouldChoose = true; }
+    }
     if (shouldChoose) {
       bestDistance2 = dist2;
+      bestWasPositive = isPositiveSide;
+      bestWasSwept = sweptContact;
+      bestCrossingTime = crossingTime;
       bestPlaneDistance = planeDistance;
       bestNormal = triNormal;
       hasContact = true;
@@ -466,7 +540,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   if (bestWasPositive) { shouldApplyContact = shouldApplyContact && bestPlaneDistance >= 0.0; }
   // Only collide when moving into the surface; avoids jitter when already separating.
   if (shouldApplyContact && dot(particleDelta, bestNormal) >= 0.0) { shouldApplyContact = false; }
-  if (shouldApplyContact && wantsFilter) {
+  if (shouldApplyContact && wantsFilter && !bestWasSwept) {
     let clothNormalLength = length(clothNormal);
     if (clothNormalLength > 1e-5) { shouldApplyContact = dot(clothNormal, bestNormal) >= 0.0; }
   }
@@ -480,6 +554,268 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
       positionCorrection[index] += vec4f(correction, 1.0);
     }
   }
+}`;
+}
+
+/** Gather body surfaces around each finite cloth face, including its interior. Particle gathers
+ * cannot see a hand crossing a coarse face when all three cloth vertices remain outside. */
+export function initExternalSurfaceCollisionWGSL(cfg: SimConfig, hashTableSize: number, bodyTriangleRadius: number): string {
+  return /* wgsl */ `
+@group(0) @binding(0) var<storage, read> positions: array<vec4f>;
+@group(0) @binding(1) var<storage, read> clothTriangles: array<vec4u>;
+@group(0) @binding(2) var<storage, read_write> candidates: array<i32>;
+@group(0) @binding(3) var<storage, read> hashTable: array<u32>;
+@group(0) @binding(4) var<storage, read> hashPositions: array<u32>;
+@group(0) @binding(5) var<storage, read> bodyCenters: array<vec4f>;
+@group(0) @binding(6) var<storage, read> bodyTriangles: array<vec4u>;
+@group(0) @binding(7) var<storage, read> bodyPositions: array<vec4f>;
+${hashFunctions(hashTableSize, cfg.externalHashSpacing)}
+${closestPointOnTriangleWGSL}
+${finiteContactsWGSL}
+const padding = ${bodyTriangleRadius + cfg.simulationThickness}f;
+const budget = ${cfg.numExternalSurfaceCollisionConstraints ?? cfg.numExternalCollisionConstraintsPerParticle}u;
+@compute @workgroup_size(${WG})
+fn main(@builtin(global_invocation_id) gid: vec3u) {
+  let index = gid.x;
+  if (index >= arrayLength(&clothTriangles)) { return; }
+  for (var slot = 0u; slot < budget; slot++) { candidates[index * budget + slot] = 0; }
+  let tri = clothTriangles[index];
+  let a = positions[tri.x].xyz; let b = positions[tri.y].xyz; let c = positions[tri.z].xyz;
+  let low = min(a, min(b, c)) - vec3f(padding);
+  let high = max(a, max(b, c)) + vec3f(padding);
+  var count = 0u;
+  var distances: array<f32, ${cfg.numExternalSurfaceCollisionConstraints ?? cfg.numExternalCollisionConstraintsPerParticle}>;
+  for (var x = intCoord(low.x); x <= intCoord(high.x); x++) {
+    for (var y = intCoord(low.y); y <= intCoord(high.y); y++) {
+      for (var z = intCoord(low.z); z <= intCoord(high.z); z++) {
+        let cell = hashCoords(x, y, z);
+        for (var at = hashTable[cell]; at < hashTable[cell + 1]; at++) {
+          let bodyIndex = hashPositions[at];
+          if (bodyIndex >= arrayLength(&bodyCenters)) { continue; }
+          let center = bodyCenters[bodyIndex].xyz;
+          let nearest = getClosestPointOnTriangle(a, b, c, center);
+          let offset = center - nearest;
+          var distanceSq = dot(offset, offset);
+          // The hash query uses the largest body radius for complete coverage; this
+          // precise per-face bound avoids admitting hundreds of unrelated fine skin faces.
+          let localPadding = bodyCenters[bodyIndex].w + ${cfg.simulationThickness}f;
+          if (distanceSq > localPadding * localPadding) { continue; }
+          let body = bodyTriangles[bodyIndex];
+          if (finiteTrianglesCross(a,b,c,bodyPositions[body.x].xyz,bodyPositions[body.y].xyz,bodyPositions[body.z].xyz)) {
+            // An actual finite crossing wins over nearby centers from densely tessellated skin.
+            distanceSq = -1.0;
+          }
+          let encoded = i32(bodyIndex) + 2;
+          var duplicate = false; var farthest = 0u;
+          for (var slot = 0u; slot < count; slot++) {
+            if (candidates[index * budget + slot] == encoded) { duplicate = true; }
+            if (distances[slot] > distances[farthest]) { farthest = slot; }
+          }
+          if (duplicate) { continue; }
+          if (count < budget) {
+            candidates[index * budget + count] = encoded;
+            distances[count] = distanceSq; count++;
+          } else if (distanceSq < distances[farthest]) {
+            candidates[index * budget + farthest] = encoded;
+            distances[farthest] = distanceSq;
+          }
+        }
+      }
+    }
+  }
+}`;
+}
+
+/** One invocation owns a cloth triangle's three correction slots. Body vertices that project onto
+ * its finite surface generate a unilateral outward constraint, shared by barycentric inverse-mass
+ * weights. A later vertex gather avoids float atomics and preserves the eight-buffer baseline. */
+export function solveExternalSurfaceCollisionWGSL(cfg: SimConfig): string {
+  return /* wgsl */ `
+@group(0) @binding(0) var<storage, read> positions: array<vec4f>;
+@group(0) @binding(1) var<storage, read> clothTriangles: array<vec4u>;
+@group(0) @binding(2) var<storage, read> candidates: array<i32>;
+@group(0) @binding(3) var<storage, read> bodyTriangles: array<vec4u>;
+@group(0) @binding(4) var<storage, read> bodyPositions: array<vec4f>;
+@group(0) @binding(5) var<storage, read_write> corrections: array<vec4f>;
+@group(0) @binding(6) var<storage, read> previous: array<vec4f>;
+${closestPointOnTriangleWGSL}
+${finiteContactsWGSL}
+const thickness = ${cfg.simulationThickness}f;
+const maxCorrection = ${cfg.maxSurfaceCorrection ?? 0.005}f;
+const searchDepth = ${cfg.externalStaticCollisionRadius}f;
+const budget = ${cfg.numExternalSurfaceCollisionConstraints ?? cfg.numExternalCollisionConstraintsPerParticle}u;
+fn barycentric(a: vec3f, b: vec3f, c: vec3f, point: vec3f) -> vec3f {
+  let ab = b - a; let ac = c - a; let ap = point - a;
+  let aa = dot(ab, ab); let bc = dot(ab, ac); let cc = dot(ac, ac);
+  let pa = dot(ap, ab); let pc = dot(ap, ac);
+  let inverse = 1.0 / (aa * cc - bc * bc);
+  let y = (cc * pa - bc * pc) * inverse;
+  let z = (aa * pc - bc * pa) * inverse;
+  return max(vec3f(1.0 - y - z, y, z), vec3f(0.0));
+}
+@compute @workgroup_size(${WG})
+fn main(@builtin(global_invocation_id) gid: vec3u) {
+  let index = gid.x;
+  if (index >= arrayLength(&clothTriangles)) { return; }
+  for (var slot = 0u; slot < 3u; slot++) { corrections[index * 3u + slot] = vec4f(0.0); }
+  let tri = clothTriangles[index];
+  let a = positions[tri.x]; let b = positions[tri.y]; let c = positions[tri.z];
+  let rawNormal = cross(b.xyz - a.xyz, c.xyz - a.xyz);
+  let area = length(rawNormal);
+  if (area < 1e-6) { return; }
+  var normal = rawNormal / area;
+  if ((tri.w & 0x80000000u) != 0u) { normal = -normal; }
+  var bestDepth = 0.0;
+  var bestWeights = vec3f(0.0);
+  var bestNormal = normal;
+  var bestPriority = 6u;
+  var bestKind=2u;
+  let previousCenter = (previous[tri.x].xyz+previous[tri.y].xyz+previous[tri.z].xyz)/3.0;
+  for (var slot = 0u; slot < budget; slot++) {
+    let encoded = candidates[index * budget + slot];
+    if (encoded < 2) { break; }
+    let bodyIndex = u32(encoded - 2);
+    if (bodyIndex >= arrayLength(&bodyTriangles)) { continue; }
+    let body = bodyTriangles[bodyIndex];
+    let p0 = bodyPositions[body.x].xyz; let p1 = bodyPositions[body.y].xyz; let p2 = bodyPositions[body.z].xyz;
+    let bodyNormal = cross(p1 - p0, p2 - p0);
+    let bodyArea = length(bodyNormal);
+    if (bodyArea < 1e-7) { continue; }
+    let outward = bodyNormal / bodyArea;
+    let alignment = dot(outward,normal);
+    // A perpendicular body face can still cut a cloth edge. Resolve that finite contact
+    // along its outward direction; the cloth-plane projection has no useful normal there.
+    let contactNormal = select(normal * select(-1.0,1.0,alignment>=0.0), outward, abs(alignment)<=0.05);
+    var priority = select(1u,0u,dot(previousCenter-p0,outward)>=-thickness);
+    // An already intersecting diagnostic seed has no outside history. Preserve its material
+    // outside direction as a deterministic tie-break; valid trajectories use actual outside history.
+    if(priority>0u && dot(outward,normal)<0.0) { priority=2u; }
+    // Prefer an established face-normal escape when available. Perpendicular edge contacts
+    // remain a fallback, so opposing box sides do not cancel a valid material-side escape.
+    if(abs(alignment)<=0.05) { priority+=3u; }
+    let vertices = array<vec3f, 3>(p0, p1, p2);
+    for (var vertex = 0u; vertex < 3u; vertex++) {
+      if (abs(alignment)<=0.05) { break; }
+      let point = vertices[vertex];
+      // A negative infinite-plane sign does not establish finite skin proximity.
+      // Deeper finite crossings retain their separate edge/chord recovery below.
+      let finiteNearest = getClosestPointOnTriangle(a.xyz, b.xyz, c.xyz, point);
+      let finiteOffset = point - finiteNearest;
+      if (dot(finiteOffset, finiteOffset) > thickness * thickness) { continue; }
+      let signedDistance = dot(a.xyz - point, contactNormal);
+      if (signedDistance >= thickness || signedDistance < -searchDepth) { continue; }
+      let projected = point + contactNormal * signedDistance;
+      let nearest = getClosestPointOnTriangle(a.xyz, b.xyz, c.xyz, projected);
+      let tangential = nearest - projected;
+      // The projection must fall on this finite face (or within thickness at its edge).
+      if (dot(tangential, tangential) > thickness * thickness) { continue; }
+      let depth = thickness - signedDistance;
+      let kind=select(1u,0u,signedDistance<0.0 && dot(tangential,tangential)<1e-12);
+      if (kind<bestKind || (kind==bestKind && (priority < bestPriority || (priority == bestPriority && depth > bestDepth)))) {
+        bestDepth = depth; bestWeights = barycentric(a.xyz,b.xyz,c.xyz,nearest);
+        bestNormal = contactNormal; bestPriority = priority; bestKind=kind;
+      }
+    }
+    let clothPoints = array<vec3f,3>(a.xyz,b.xyz,c.xyz);
+    for (var edge=0u;edge<3u;edge++) {
+      let clothHit = segmentTriangleHit(clothPoints[edge],clothPoints[(edge+1u)%3u],p0,p1,p2);
+      let bodyHit = segmentTriangleHit(vertices[edge],vertices[(edge+1u)%3u],a.xyz,b.xyz,c.xyz);
+      var hit = select(bodyHit, clothHit, clothHit.w>=0.0);
+      var edgeNormal=contactNormal;var edgeDepth=thickness;
+      if (clothHit.w>=0.0 && dot(clothPoints[(edge+1u)%3u]-clothPoints[edge],outward)<0.0) {
+        // An outside-to-outside edge can shortcut a skin crease while both endpoints remain
+        // clear. Recover its actual finite interior chord, rather than using an endpoint's
+        // distance behind the infinite entry plane (which can greatly overstate penetration).
+        var exitT=2.0;
+        var exitTriangle=vec3u(0u);
+        for (var otherSlot=0u;otherSlot<budget;otherSlot++) {
+          let otherEncoded=candidates[index*budget+otherSlot];
+          if(otherEncoded<2) { break; }
+          let otherIndex=u32(otherEncoded-2);
+          if(otherIndex>=arrayLength(&bodyTriangles)) { continue; }
+          let other=bodyTriangles[otherIndex];
+          let q0=bodyPositions[other.x].xyz;
+          let q1=bodyPositions[other.y].xyz;
+          let q2=bodyPositions[other.z].xyz;
+          if(dot(clothPoints[(edge+1u)%3u]-clothPoints[edge],cross(q1-q0,q2-q0))<=0.0) { continue; }
+          let exitHit=segmentTriangleHit(clothPoints[edge],clothPoints[(edge+1u)%3u],q0,q1,q2);
+          if(exitHit.w>clothHit.w+1e-6 && exitHit.w<exitT) {
+            exitT=exitHit.w;exitTriangle=other.xyz;
+          }
+        }
+        if(exitT<=1.0) {
+          let parameter=0.5*(clothHit.w+exitT);
+          let insidePoint=mix(clothPoints[edge],clothPoints[(edge+1u)%3u],parameter);
+          let entryClosest=getClosestPointOnTriangle(p0,p1,p2,insidePoint);
+          let exitClosest=getClosestPointOnTriangle(bodyPositions[exitTriangle.x].xyz,
+            bodyPositions[exitTriangle.y].xyz,bodyPositions[exitTriangle.z].xyz,insidePoint);
+          let entryOffset=entryClosest-insidePoint;let exitOffset=exitClosest-insidePoint;
+          let escape=select(exitOffset,entryOffset,dot(entryOffset,entryOffset)<=dot(exitOffset,exitOffset));
+          let penetration=length(escape);
+          if(penetration>1e-8) {
+            edgeNormal=escape/penetration;edgeDepth=thickness+penetration;
+            hit=vec4f(insidePoint,parameter);
+            let previousPoint=mix(previous[tri[edge]].xyz,previous[tri[(edge+1u)%3u]].xyz,parameter);
+            priority=select(1u,0u,dot(previousPoint-(insidePoint+escape),edgeNormal)>=-thickness);
+          }
+        }
+      }
+      if(clothHit.w<0.0 && bodyHit.w>=0.0) {
+        // A body edge passing through a cloth interior must separate along the cloth plane's
+        // normal. Pushing it along a perpendicular body-face normal only slides the crossing.
+        // Preserve an unambiguous previous outside side; an intersecting diagnostic seed uses
+        // the material normal until an outside history exists.
+        if(abs(alignment)<=0.05) {
+          let oldMinimum=min(dot(p0-previousCenter,normal),min(dot(p1-previousCenter,normal),dot(p2-previousCenter,normal)));
+          edgeNormal=normal*select(1.0,-1.0,oldMinimum>0.000001);
+        }
+        edgeDepth=thickness+max(0.0,max(dot(vertices[edge]-hit.xyz,edgeNormal),
+          dot(vertices[(edge+1u)%3u]-hit.xyz,edgeNormal)));
+      }
+      if (hit.w>=0.0 && (bestKind>0u || (priority<bestPriority || (priority==bestPriority && edgeDepth>bestDepth)))) {
+        bestDepth=edgeDepth;bestWeights=barycentric(a.xyz,b.xyz,c.xyz,hit.xyz);
+        bestNormal=edgeNormal;bestPriority=priority;bestKind=0u;
+      }
+    }
+  }
+  if (bestDepth <= 0.0) { return; }
+  let inverseMass = vec3f(a.w, b.w, c.w);
+  let denominator = dot(inverseMass, bestWeights * bestWeights);
+  if (denominator <= 0.0) { return; }
+  for (var slot = 0u; slot < 3u; slot++) {
+    if (inverseMass[slot] <= 0.0 || bestWeights[slot] <= 1e-6) { continue; }
+    // Bound recovery separately from physical clearance; coarse curved facets may need several
+    // millimetres of depenetration even when fabric clearance is one millimetre.
+    let displacement = min(maxCorrection, inverseMass[slot] * bestWeights[slot] * bestDepth / denominator);
+    corrections[index * 3u + slot] = vec4f(bestNormal * displacement, 1.0);
+  }
+}`;
+}
+
+export function gatherExternalSurfaceCorrectionsWGSL(maxIncident: number): string {
+  return /* wgsl */ `
+@group(0) @binding(0) var<storage, read> clothTriangles: array<vec4u>;
+@group(0) @binding(1) var<storage, read> incidentTriangles: array<i32>;
+@group(0) @binding(2) var<storage, read> triangleCorrections: array<vec4f>;
+@group(0) @binding(3) var<storage, read_write> particleCorrections: array<vec4f>;
+const stride = ${maxIncident + 1}u;
+@compute @workgroup_size(${WG})
+fn main(@builtin(global_invocation_id) gid: vec3u) {
+  let index = gid.x;
+  if (index >= arrayLength(&particleCorrections)) { return; }
+  var correction = vec4f(0.0);
+  for (var slot = 0u; slot < ${maxIncident}u; slot++) {
+    let incident = incidentTriangles[index * stride + slot + 1u];
+    if (incident < 0) { break; }
+    let triangleIndex = u32(incident);
+    let tri = clothTriangles[triangleIndex];
+    var corner = 0u;
+    if (tri.y == index) { corner = 1u; }
+    else if (tri.z == index) { corner = 2u; }
+    else if (tri.x != index) { continue; }
+    correction += triangleCorrections[triangleIndex * 3u + corner];
+  }
+  particleCorrections[index] += correction;
 }`;
 }
 
@@ -519,7 +855,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
 // ---------------------------------------------------------------------------------------------
 
 /** Spatial-hash helpers shared by the hash-build and gather shaders. */
-function hashFunctions(hashTableSize: number, spacing: number): string {
+export function hashFunctions(hashTableSize: number, spacing: number): string {
   return /* wgsl */ `
 const hashTableSize : i32 = ${hashTableSize};
 const spacing : f32 = ${spacing}f;
@@ -544,7 +880,8 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   let p0 = positions[triangles[index].x].xyz;
   let p1 = positions[triangles[index].y].xyz;
   let p2 = positions[triangles[index].z].xyz;
-  triangleCenters[index] = vec4f((p0 + p1 + p2) / 3.0, 0.0);
+  let center=(p0+p1+p2)/3.0;
+  triangleCenters[index] = vec4f(center, max(distance(center,p0),max(distance(center,p1),distance(center,p2))));
 }`;
 }
 
@@ -719,32 +1056,7 @@ fn decodeTriangleOutsideSign(metaValue: u32) -> f32 {
   return 1.0;
 }
 
-fn getClosestPointOnTriangle(p0: vec3f, p1: vec3f, p2: vec3f, point: vec3f) -> vec3f {
-  let edge0 = p1 - p0; let edge1 = p2 - p0; let v0 = point - p0;
-  let a = dot(edge0, edge0); let b = dot(edge0, edge1); let c = dot(edge1, edge1);
-  let d = dot(edge0, v0); let e = dot(edge1, v0);
-  let det = a * c - b * b;
-  var s = b * e - c * d; var t = b * d - a * e;
-  if (s + t < det) {
-    if (s < 0.0) {
-      if (t < 0.0) {
-        if (d < 0.0) { s = clamp(-d / a, 0.0, 1.0); t = 0.0; }
-        else { s = 0.0; t = clamp(-e / c, 0.0, 1.0); }
-      } else { s = 0.0; t = clamp(-e / c, 0.0, 1.0); }
-    } else if (t < 0.0) { s = clamp(-d / a, 0.0, 1.0); t = 0.0; }
-    else { let invDet = 1.0 / det; s *= invDet; t *= invDet; }
-  } else {
-    if (s < 0.0) {
-      let tmp0 = b + d; let tmp1 = c + e;
-      if (tmp1 > tmp0) { let numer = tmp1 - tmp0; let denom = a - 2.0 * b + c; s = clamp(numer / denom, 0.0, 1.0); t = 1.0 - s; }
-      else { t = clamp(-e / c, 0.0, 1.0); s = 0.0; }
-    } else if (t < 0.0) {
-      if (a + d > b + e) { let numer = c + e - b - d; let denom = a - 2.0 * b + c; s = clamp(numer / denom, 0.0, 1.0); t = 1.0 - s; }
-      else { s = clamp(-e / c, 0.0, 1.0); t = 0.0; }
-    } else { let numer = c + e - b - d; let denom = a - 2.0 * b + c; s = clamp(numer / denom, 0.0, 1.0); t = 1.0 - s; }
-  }
-  return p0 + s * edge0 + t * edge1;
-}
+${closestPointOnTriangleWGSL}
 
 fn computeBarycentric(p0: vec3f, p1: vec3f, p2: vec3f, point: vec3f) -> vec3f {
   let v0 = p1 - p0; let v1 = p2 - p0; let v2 = point - p0;

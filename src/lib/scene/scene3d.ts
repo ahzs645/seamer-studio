@@ -14,11 +14,18 @@ import {
   type SeamPick,
   type SeamToolState
 } from '@seamer/pattern-model';
-import { AvatarController } from '@seamer/avatar';
+import { AvatarController, activeGarmentCodeBody } from '@seamer/avatar';
+import { visibleSourceCollisionPreparation } from '../utils/sourceCollisionPreparation';
+import { PINNED_GATHER_PROGRAMS } from '../utils/pinnedGatherPrograms';
+import { sourceGatherRegistry, compatibleSourceGatherCheckpoint, preparationStillCurrent, capturedSourceGatherCacheMarker } from '../utils/sourceGatherPreparation';
+import { finalizeSourceGatherCollisionGeometry } from '@seamer/cloth-sim';
+import { compatibleSourceBodyCheckpoint, SOURCE_BODY_FIT_REVISION, GARMENT_CODE_ASSEMBLY_REVISION } from './sourceBodyCheckpoint';
+import { decodeFrozenRenderRequest, bindFrozenPrepared, verifyFrozenModulePins, type FrozenAppRenderRequest, type FrozenAppRenderReceipt } from './frozenAppRender';
+import { fitSourceCamera, sourceCameraSafeRect, type CameraFitPoint, type CameraFitRect } from './sourceCameraFit';
 import { buildCylinders, type CylinderFrame } from '@seamer/cloth-sim';
 import { arrangeParticles } from '@seamer/cloth-sim';
-import { prepareCloth, fromArrangement, ClothSimulation, type PreparedCloth } from '@seamer/cloth-sim';
-import { SIM_CONFIG, type SimConfig } from '@seamer/cloth-sim';
+import { prepareCloth, fromArrangement, ClothSimulation, ClothCollisionGuard, CollisionSafetyError, type PreparedCloth, type CollisionGuardReport, type AssemblySupportState, type SourceAssemblyState } from '@seamer/cloth-sim';
+import { SIM_CONFIG, applySourceContactPolicy, type SimConfig, type SourceContactConfigOptions } from '@seamer/cloth-sim';
 import { cylinderRefit } from '@seamer/cloth-sim';
 import { toOBJ, toSTL } from '@atelier/io/three';
 import { SolverRunner, requestDevice, isWebGPUAvailable } from '@atelier/sim';
@@ -57,6 +64,8 @@ export interface DrapeDebugState {
   frameCount: number;
   particleCount: number;
   positionHash: string | null;
+  /** Actual midpoint mesh coordinate error against accepted simulation positions (metres). */
+  renderedPositionErrorM: number | null;
   positionsFinite: boolean;
   particleBounds: DrapeDebugBounds | null;
   avatarBounds: DrapeDebugBounds | null;
@@ -64,6 +73,35 @@ export interface DrapeDebugState {
   maxSeamPairDistanceMm: number | null;
   /** Maximum live distance across skirt-to-waistband seam constraints (millimetres). */
   waistbandMaxSeamPairDistanceMm: number | null;
+  /** Geometry rejection or GPU failure; a paused failure is not a settled simulation. */
+  simulationFailure: string | null;
+  safetyReport: CollisionGuardReport | null;
+  /** True while source geometry is being checked away from the interface thread. */
+  collisionSafetyPending: boolean;
+  assemblySupportStates: AssemblySupportState[];
+  /** Defensive accepted mask state; no requested transition is presented as an accepted stage. */
+  sourceAssemblyState: SourceAssemblyState | null;
+  /** Stronger accepted closed/released/free eligibility for source cache reuse. */
+  sourceAssemblyComplete: boolean | null;
+}
+
+/** DEV-only exact rejected geometry, kept separately from the displayed safe garment. */
+export interface DrapeFailureDiagnostics {
+  report: CollisionGuardReport;
+  candidatePositions: Float32Array | null;
+  candidateTrajectory: Float32Array[] | null;
+  previousPositions: Float32Array;
+  bodyPositions: Float32Array;
+  bodyTriangles: Uint32Array;
+  bodyPositionStride: number;
+  bodyTriangleStride: number;
+  clothTriangles: Uint32Array;
+  seams: Int32Array;
+  seamPairsBySeam: PreparedCloth['simData']['seamPairsBySeam'];
+  particleCount: number;
+  config: SimConfig;
+  pattern: Pattern | null;
+  sceneGeneration: number;
 }
 
 interface ClothMeshEntry {
@@ -95,6 +133,140 @@ interface ArrangeEntry {
 export type SceneMode = 'view' | 'arrange';
 
 export class PatternRenderer {
+  // DEV diagnostics never change the document, prepared seed, solver or cache eligibility.
+  private frozenRequestRevision = 0;
+  private simulationInitializations = 0;
+  private frozenPending = false;
+  private frozenDisplay: {
+    receipt: FrozenAppRenderReceipt; positions: Float32Array; bodyPositions: Float32Array; bodyIndices: Uint32Array;
+    priorPositions: Float32Array; priorContext: PatternRenderer['sourcePublishedCollisionContext'];
+    priorGuard: ClothCollisionGuard | null; priorReport: CollisionGuardReport | null;
+    priorCamera: ReturnType<PatternRenderer['getCameraState']>;
+    priorCameraIntent: [boolean, boolean, boolean];
+  } | null = null;
+
+  private assertNotFrozen(): void {
+    if (this.frozenPending || this.frozenDisplay) throw new Error('Exit the read-only frozen checkpoint before editing, simulating, saving or exporting.');
+  }
+
+  /** DEV-only sealed observation, using the already genuinely prepared production scene. */
+  async presentFrozenCheckpoint(request: FrozenAppRenderRequest): Promise<FrozenAppRenderReceipt> {
+    if (!import.meta.env.DEV) throw new Error('Frozen checkpoint inspection is available only in development.');
+    this.assertNotFrozen();
+    const observationRequest = { snapshotJson: request.snapshotJson, snapshotSha256: request.snapshotSha256 };
+    const revision = ++this.frozenRequestRevision;
+    this.frozenPending = true;
+    try {
+      this.pauseSimulation();
+      await this.buildQueue;
+      await this.activeSimulationStep?.catch(() => undefined);
+      // A cold scene prevents diagnostic display from borrowing a warm solver or acquiring a device.
+      if (this.frozenRequestRevision !== revision || this.disposed || this.sim || this.device || this.simulationInitializations > 0 || !this.prepared || !this.avatar || !this.pattern || this.mode !== 'view' || this.snapshotGroup || this.arrangementGhost) {
+        throw new Error('Open the original source document in a fresh, ready 3D view without starting simulation.');
+      }
+      const prepared = this.prepared, avatar = this.avatar, pattern = this.pattern;
+      if (!avatar.mesh?.visible || this.clothMeshes.some(entry => !entry.mesh.visible || !entry.baseVisible)) throw new Error('Show the complete body and garment surfaces before frozen inspection.');
+      const generation = this.sourceSceneGeneration, bodyRevision = this.sourceBodyInitializationRevision;
+      const resetRevision = this.simulationResetRevision, preparationRevision = this.sourcePreparationRequestRevision;
+      clearTimeout(this.cameraSaveTimer);
+      const current = () => !this.disposed && !this.sim && !this.device && !(this.simulationInitializations > 0) && this.frozenRequestRevision === revision
+        && this.prepared === prepared && this.avatar === avatar && this.pattern === pattern
+        && this.sourceSceneGeneration === generation && this.sourceBodyInitializationRevision === bodyRevision
+        && this.simulationResetRevision === resetRevision && this.sourcePreparationRequestRevision === preparationRevision;
+      const bodyPositions = avatar.vertexPositions.slice(), bodyIndices = avatar.indices.slice();
+      const evidence = await decodeFrozenRenderRequest(observationRequest);
+      await verifyFrozenModulePins(evidence, async path => {
+        const module = await import(/* @vite-ignore */ `/${path}?raw&import`);
+        if (typeof module.default !== 'string') throw new Error(`Source bytes unavailable: ${path}`);
+        return module.default;
+      });
+      const bound = await bindFrozenPrepared(evidence, { pattern, prepared, bodyPositions, bodyIndices,
+        sourceFitRevision: SOURCE_BODY_FIT_REVISION, sourceAssemblyRevision: GARMENT_CODE_ASSEMBLY_REVISION });
+      if (!current()) throw new Error('The source document changed during frozen checkpoint verification.');
+      const guard = new ClothCollisionGuard({ bodyPositions, bodyIndices, bodyPositionStride: 3, bodyTriangleStride: 3,
+        clothTriangles: prepared.simData.triangles, particleCount: prepared.simData.particleCount, seams: prepared.simData.seams,
+        sourceGatherRefinementRevision: prepared.simData.sourceGatherRefinement?.revision,
+        sourceGatherCollisionGeometry: prepared.simData.sourceGatherCollisionGeometry as ConstructorParameters<typeof ClothCollisionGuard>[0]['sourceGatherCollisionGeometry'],
+        ...bound.dictionary });
+      const report = guard.inspect(bound.positions, undefined, bound.activation);
+      if (!report.safe) throw new CollisionSafetyError(report, bound.positions);
+      // Frozen XYZ is already world-space. A manipulated scene cannot silently apply it twice.
+      const identity = new THREE.Matrix4();
+      for (const mesh of [...this.clothMeshes.map(entry => entry.mesh), avatar.mesh]) {
+        if (!mesh) throw new Error('The source body mesh is unavailable.');
+        mesh.updateWorldMatrix(true, false);
+        if (!mesh.matrixWorld.equals(identity)) throw new Error('A frozen checkpoint requires unchanged mesh transforms.');
+      }
+      const priorPositions = this.renderedSourcePositions();
+      const priorCamera = this.getCameraState();
+      const priorCameraIntent: [boolean, boolean, boolean] = [this.sourceCameraAutomatic, this.sourceCameraUserControlled, this.cameraWritebackEnabled];
+      const priorContext = this.sourcePublishedCollisionContext, priorGuard = this.sourcePreviewGuard, priorReport = this.sourcePreviewReport;
+      const receipt: FrozenAppRenderReceipt = { snapshotSha256: observationRequest.snapshotSha256, frame: evidence.frame, sceneGeneration: generation,
+        diagnostic: true, garmentAccepted: false, cacheResumeEligible: false, deviceAcquired: false,
+        bodyPositionErrorM: 0, clothPositionErrorM: 0, staticSafetyReport: structuredClone(report), bodyIndexSha256: bound.bodyIndexSha256,
+        clothTriangleSha256: bound.clothTriangleSha256, sourceCutSha256: bound.sourceCutSha256,
+        sourceBodyFitRevision: SOURCE_BODY_FIT_REVISION, sourceAssemblyRevision: GARMENT_CODE_ASSEMBLY_REVISION,
+        seamActivationSha256: bound.seamActivationSha256, sourceApprovalOrigins: bound.sourceApprovalOrigins,
+        visibleNotice: `Frozen checkpoint · frame ${evidence.frame} · garment fit not accepted` };
+      this.sourcePublishedCollisionContext = { prepared, context: { dictionary: bound.dictionary, activation: bound.activation } };
+      this.sourcePreviewGuard = guard; this.sourcePreviewReport = report;
+      this.frozenDisplay = { receipt, positions: bound.positions.slice(), bodyPositions: bodyPositions.slice(), bodyIndices: bodyIndices.slice(), priorPositions, priorContext, priorGuard, priorReport, priorCamera, priorCameraIntent };
+      try {
+        this.applyClothPositions(bound.positions);
+        const rendered = this.getFrozenRenderedGeometry();
+        receipt.clothPositionErrorM = rendered.clothPositionErrorM;
+        receipt.bodyPositionErrorM = rendered.bodyPositionErrorM;
+        if (receipt.clothPositionErrorM !== 0 || receipt.bodyPositionErrorM !== 0) throw new Error('Actual rendered coordinates differ from the frozen checkpoint.');
+        return structuredClone(receipt);
+      } catch (error) { this.exitFrozenCheckpoint(); throw error; }
+    } finally { if (this.frozenRequestRevision === revision) this.frozenPending = false; }
+  }
+
+  /** Actual world-space render buffers; this inspection is deliberately separate from exports. */
+  getFrozenRenderedGeometry() {
+    if (!import.meta.env.DEV || !this.frozenDisplay || !this.prepared || !this.avatar?.mesh) throw new Error('No frozen checkpoint is displayed.');
+    const clothPositions = this.renderedSourcePositions(), frozen = this.frozenDisplay.positions;
+    let clothPositionErrorM = 0, bodyPositionErrorM = 0;
+    for (let i = 0; i < frozen.length; i++) if (i % 4 !== 3) clothPositionErrorM = Math.max(clothPositionErrorM, Math.abs(clothPositions[i] - frozen[i]));
+    const mesh = this.avatar.mesh, body = mesh.geometry.getAttribute('position');
+    const bodyPositions = new Float32Array(body.count * 3), vertex = new THREE.Vector3();
+    mesh.updateWorldMatrix(true, false);
+    for (let i = 0; i < body.count; i++) {
+      vertex.fromBufferAttribute(body, i).applyMatrix4(mesh.matrixWorld);
+      for (let axis = 0; axis < 3; axis++) {
+        bodyPositions[i * 3 + axis] = vertex.getComponent(axis);
+        bodyPositionErrorM = Math.max(bodyPositionErrorM, Math.abs(bodyPositions[i * 3 + axis] - this.frozenDisplay.bodyPositions[i * 3 + axis]));
+      }
+    }
+    if (bodyPositions.length !== this.frozenDisplay.bodyPositions.length) throw new Error('Rendered body vertex count differs.');
+    const bodyIndices = Uint32Array.from(mesh.geometry.getIndex()?.array ?? []);
+    if (bodyIndices.length !== this.frozenDisplay.bodyIndices.length || bodyIndices.some((value, i) => value !== this.frozenDisplay!.bodyIndices[i])) throw new Error('Rendered body topology differs.');
+    for (const piece of this.prepared.simData.pieces) {
+      const entry = this.clothMeshes.find(candidate => candidate.pieceId === piece.pieceId);
+      const index = entry?.geometry.getIndex(), uv = entry?.geometry.getAttribute('uv');
+      if (!entry || entry.start !== piece.start || entry.count !== piece.count || index?.count !== piece.triangles.length
+        || Array.from(index.array).some((value, i) => value !== piece.triangles[i] - piece.start)
+        || uv?.array.length !== piece.uv.length || Array.from(uv.array).some((value, i) => value !== piece.uv[i])) throw new Error('Rendered piece topology or material coordinates differ.');
+    }
+    return { receipt: structuredClone(this.frozenDisplay.receipt), clothPositions, bodyPositions, bodyIndices,
+      clothTriangles: this.prepared.simData.triangles.slice(), clothPositionErrorM, bodyPositionErrorM };
+  }
+
+  exitFrozenCheckpoint(): void {
+    if (!import.meta.env.DEV) return;
+    ++this.frozenRequestRevision;
+    this.frozenPending = false;
+    const frozen = this.frozenDisplay;
+    if (!frozen || this.disposed) { this.frozenDisplay = null; return; }
+    this.sourcePublishedCollisionContext = frozen.priorContext;
+    this.sourcePreviewGuard = frozen.priorGuard; this.sourcePreviewReport = frozen.priorReport;
+    clearTimeout(this.cameraSaveTimer);
+    this.setCameraState(frozen.priorCamera.position, frozen.priorCamera.target, frozen.priorCamera.fov);
+    [this.sourceCameraAutomatic, this.sourceCameraUserControlled, this.cameraWritebackEnabled] = frozen.priorCameraIntent;
+    this.frozenDisplay = null;
+    this.applyClothPositions(frozen.priorPositions);
+  }
+
   private readonly viewport: Viewport;
   private readonly container: HTMLElement;
   private readonly scene: THREE.Scene;
@@ -110,6 +282,11 @@ export class PatternRenderer {
   // camera persistence: fired (debounced) after the user orbits/zooms so the app can save the view
   onCameraChanged: (pos: [number, number, number], target: [number, number, number], fov: number) => void = () => {};
   private cameraSaveTimer: ReturnType<typeof setTimeout> | undefined;
+  private lastCameraWriteback: { position: number[]; target: number[]; fov: number } | null = null;
+  private sourceCameraPatternId: string | null = null;
+  private sourceCameraAutomatic = false;
+  private sourceCameraUserControlled = false;
+  private cameraWritebackEnabled = false;
 
   // Named arrangement-point markers from base_model.json are rendered by SeamerOverlays.
   private arrangementHover: ArrangementMarker | null = null;
@@ -136,9 +313,20 @@ export class PatternRenderer {
   private device: GPUDevice | null = null;
   private deviceLostReason: string | null = null;
   private sim: ClothSimulation | null = null;
+  private sourceContactOptions: SourceContactConfigOptions = {};
   private simRunner: SolverRunner<{ positions: Float32Array }> | null = null;
+  private activeSimulationStep: Promise<Float32Array> | null = null;
+  private simulationResetRevision = 0;
+  private sourceBodyInitializationRevision = 0;
+  private sourcePreparationRequestRevision = 0;
+  private sourceGatherManualRecording = false;
+  private sourceSimPrepared: PreparedCloth | null = null;
+  private sourcePublishedCollisionContext: { prepared: PreparedCloth; context: ReturnType<typeof visibleSourceCollisionPreparation> } | null = null;
+  private sourceGatherManualPrepared: PreparedCloth | null = null;
   private disposeSimFrame: (() => void) | null = null;
   private simFrameCount = 0;
+  private simulationFailure: string | null = null;
+  private drapeFailureDiagnostics: DrapeFailureDiagnostics | null = null;
   private simulating = false;
   private userSimulating = false; // true while a sim the USER started (via Start) is running
   // Live "hold" strength. The original solver has NO per-frame anchor; ours softly guides saved
@@ -164,6 +352,7 @@ export class PatternRenderer {
 
   /** Enable/disable the saved-drape anchor. Applies live to a running user sim. */
   setAnchorsEnabled(on: boolean): void {
+    this.assertNotFrozen();
     if (this.anchorsEnabled === on) return;
     this.anchorsEnabled = on;
     this.liveAnchorScale = this.holdAnchor();
@@ -271,6 +460,7 @@ export class PatternRenderer {
     // persist the view: debounce-fire after each completed orbit/zoom/pan interaction
     this.controls.addEventListener('end', this.handleControlsEnd);
     this.controls.addEventListener('start', this.handleControlsStart);
+    this.controls.addEventListener('change', this.handleControlsChange);
 
     this.scene.add(this.clothGroup);
     this.overlays = new SeamerOverlays(
@@ -327,12 +517,27 @@ export class PatternRenderer {
   }
 
   private readonly handleControlsEnd = (): void => this.queueCameraSave();
+  private readonly handleControlsChange = (): void => this.persistUserCameraChange();
   private readonly handleControlsStart = (): void => {
+    this.beginUserCameraChange();
     // CameraRig has no public cancelFly(); re-applying its current state cancels an active fly
     // without changing the view when the user takes control.
     this.viewport.camera.setState(this.viewport.camera.getState());
     this.invalidate();
   };
+
+  private beginUserCameraChange(): void {
+    if (this.frozenPending || this.frozenDisplay) return;
+    this.sourceCameraAutomatic = false;
+    this.sourceCameraUserControlled = true;
+    this.cameraWritebackEnabled = true;
+  }
+
+  private persistUserCameraChange(): void {
+    // Damping can keep changing the camera after pointer-up, especially when a software
+    // renderer draws slowly. Persist the latest view after those actual changes stop.
+    if (this.cameraWritebackEnabled) this.queueCameraSave();
+  }
 
   /** Low-end heuristics: few cores / little memory / known mobile-class GPU strings. */
   private detectLowEndHardware(): boolean {
@@ -452,6 +657,7 @@ export class PatternRenderer {
     };
 
     dom.addEventListener('pointerdown', (ev) => {
+      if (this.frozenPending || this.frozenDisplay) return;
       if (ev.button !== 0) return;
       // Arrange mode: click a piece to select it (the gizmo handles its own drags). Don't grab/pull.
       if (this.mode === 'arrange') {
@@ -540,6 +746,7 @@ export class PatternRenderer {
     });
 
     dom.addEventListener('pointermove', (ev) => {
+      if (this.frozenPending || this.frozenDisplay) return;
       // seam tool hover: highlight the edge run the cursor is over (throttled raycast)
       if (this.seamToolState && !this.grabbing && this.mode === 'view' && this.clothMeshes.length) {
         const now = performance.now();
@@ -586,7 +793,7 @@ export class PatternRenderer {
         // hold + self-collision so the released fabric eases back to its draped shape and the live sim
         // continues (it does not stop/freeze).
         this.sim.setAnchorScale(this.liveAnchorScale);
-        this.sim.setSelfCollision(true);
+        this.sim.setSelfCollision(SIM_CONFIG.handleSelfCollisions);
       } else {
         // Grab started from idle: leave the cloth exactly where you dropped it (freeze in place; no
         // snap-back, no slow droop). Use "Arrange"/"Reset" to return it to the settled drape.
@@ -604,15 +811,12 @@ export class PatternRenderer {
       // LIVE sim drag (source behavior): just grab — the integrate shader already releases the
       // anchor hold within the grab influence, so the fabric near the cursor follows while the
       // rest of the garment keeps simulating with self-collision on.
-      sim.setSelfCollision(true);
+      sim.setSelfCollision(SIM_CONFIG.handleSelfCollisions);
     } else {
-      // Idle drag (repo repositioning gesture): free the WHOLE garment so it moves as one
-      // connected piece (panels held together by their seams) and follows the cursor — not
-      // pinned, so seams don't pull open. Self-collision off during the drag: it's what curls a
-      // free garment, and the trousers don't self-intersect in normal dragging; seams +
-      // near-damping keep it coherent.
+      // Keep the native cached-drape repositioning gesture. Calibrated source garments keep
+      // contact handling active throughout the drag and are still checked before publication.
       sim.setAnchorScale(0);
-      sim.setSelfCollision(false);
+      sim.setSelfCollision(this.prepared?.collisionSafety ? SIM_CONFIG.handleSelfCollisions : false);
     }
     sim.setGrab(true, this.grabIndex, [point.x, point.y, point.z]);
     if (!this.simulating) {
@@ -626,6 +830,7 @@ export class PatternRenderer {
     if (this.disposed) return;
     this.viewport.resize();
     this.applyRenderQuality();
+    if (this.sourceCameraAutomatic) this.fitSourceView();
   };
 
   // Debug autofocus point retained as an editor aid. PostFX itself focuses on CameraRig's orbit
@@ -676,16 +881,21 @@ export class PatternRenderer {
 
   /** Debounced camera write-back (orbit end, tween end, FOV change). */
   private queueCameraSave(): void {
+    if (this.frozenPending || this.frozenDisplay) return;
     clearTimeout(this.cameraSaveTimer);
     this.cameraSaveTimer = setTimeout(() => {
       if (this.disposed) return;
       const p = this.camera.position, t = this.controls.target;
-      this.onCameraChanged([p.x, p.y, p.z], [t.x, t.y, t.z], this.camera.fov);
+      const position: [number, number, number] = [p.x, p.y, p.z];
+      const target: [number, number, number] = [t.x, t.y, t.z];
+      this.lastCameraWriteback = { position: [...position], target: [...target], fov: this.camera.fov };
+      this.onCameraChanged(position, target, this.camera.fov);
     }, 600);
   }
 
   /** Build or update the avatar + cloth for a pattern. */
   setPattern(pattern: Pattern, changedPieces?: Set<string>): Promise<boolean> {
+    this.assertNotFrozen();
     if (this.disposed) return Promise.resolve(false);
     const inFlight = this.buildsByPattern.get(pattern);
     if (inFlight) return inFlight;
@@ -709,12 +919,21 @@ export class PatternRenderer {
   }
 
   private async applyPattern(pattern: Pattern, changedPieces?: Set<string>): Promise<boolean> {
+    const requestRevision = ++this.sourcePreparationRequestRevision;
+    this.simulating = false;
+    this.simRunner?.stop();
+    await this.activeSimulationStep?.catch(() => undefined);
+    if (this.disposed) return false;
+    const previousGatherManualRecording = this.sourceGatherManualRecording;
     const previousPattern = this.pattern;
     const previousPatternId = this.patternId;
     const previousBaseBodyKey = this.baseBodyKey;
     const previousLastBodyKey = this.lastBodyKey;
     const previousBodyDirty = this.bodyDirty;
+    const previousAvatar = this.avatar;
+    let candidateAvatar: AvatarController | null = null;
     this.pattern = pattern;
+    this.sourceGatherManualRecording = pattern.pieces.some(piece => piece.settings3d.savedSourceGatherIntent === 'manual');
     this.showTriangles = pattern.settings3d.showTriangles;
     this.setDebugFocusPoint(pattern.settings3d.debugFocusPoint);
     // Measurement segments are tied to the previous avatar vertex positions.
@@ -739,7 +958,24 @@ export class PatternRenderer {
     }
     this.onStatus('loading');
     try {
-      if (!this.avatar) {
+      if (pattern.garmentCodeSource?.gatherSourceDocument && !sourceGatherRegistry.lookup(pattern)) {
+        const approvalToken = { prepared: this.prepared, sceneRevision: this.sourceSceneGeneration,
+          bodyRevision: this.sourceBodyInitializationRevision, resetRevision: this.simulationResetRevision,
+          requestRevision, pattern: this.pattern, avatar: this.avatar };
+        const approvalCurrent = () => ({ prepared: this.prepared, sceneRevision: this.sourceSceneGeneration,
+          bodyRevision: this.sourceBodyInitializationRevision, resetRevision: this.simulationResetRevision,
+          requestRevision: this.sourcePreparationRequestRevision, pattern: this.pattern, avatar: this.avatar, disposed: this.disposed });
+        await sourceGatherRegistry.revalidateSaved(pattern, PINNED_GATHER_PROGRAMS, () => preparationStillCurrent(approvalToken, approvalCurrent()));
+        if (!preparationStillCurrent(approvalToken, approvalCurrent())) throw new Error('The body or garment changed while reopening. Open it again.');
+      }
+      // Build a source body off-scene. An awaited body reconstruction must never expose
+      // yesterday's accepted cloth against an unvalidated replacement avatar.
+      if (this.prepared?.collisionSafety || (pattern.garmentCodeSource && activeGarmentCodeBody(pattern.body))) {
+        candidateAvatar = await AvatarController.create(avatarBody, createAvatarMaterial(pattern.body.bodyColor));
+        if (previousAvatar) candidateAvatar.copyPoseSelectionFrom(previousAvatar);
+        if (this.disposed) { candidateAvatar.dispose(); return false; }
+        this.avatar = candidateAvatar;
+      } else if (!this.avatar) {
         this.avatar = await AvatarController.create(avatarBody, createAvatarMaterial(pattern.body.bodyColor));
         const mesh = this.avatar.mesh;
         if (mesh) this.scene.add(mesh);
@@ -751,9 +987,15 @@ export class PatternRenderer {
         pattern.settings3d.avatarEnabled !== false
         && pattern.settings3d.showAvatar
       );
-      this.applyCameraFromSettings(pattern);
       this.setLightingMode(pattern.settings3d.lightingMode || 'flat');
-      this.rebuildCloth(pattern, changedPieces);
+      const rebuild = this.rebuildCloth(pattern, changedPieces);
+      if (rebuild) await rebuild;
+      this.applyCameraSettings(pattern);
+      if (candidateAvatar) {
+        if (previousAvatar?.mesh) this.scene.remove(previousAvatar.mesh);
+        if (candidateAvatar.mesh) this.scene.add(candidateAvatar.mesh);
+        previousAvatar?.dispose();
+      }
       this.onStatus('ready');
       // The engine renders on demand (ARCHITECTURE 5.3), and this method is async: by the time
       // the avatar resolves and the cloth is rebuilt, the initial frame has long been drawn
@@ -769,6 +1011,10 @@ export class PatternRenderer {
       }
       return true;
     } catch (e) {
+      if (candidateAvatar) {
+        this.avatar = previousAvatar;
+        candidateAvatar.dispose();
+      }
       const message = e instanceof Error ? e.message : String(e);
       if (
         /Delaunator|polygon constraints|triangulat|incomplete mesh/i.test(message)
@@ -777,6 +1023,7 @@ export class PatternRenderer {
         // A pointer drag can briefly self-intersect or invert a pattern piece. The geometry
         // kernel is right to reject an incomplete constrained mesh; keep the last complete
         // triangulation visible until the user returns to a valid shape.
+        this.sourceGatherManualRecording = previousGatherManualRecording;
         this.pattern = previousPattern;
         this.patternId = previousPatternId;
         this.baseBodyKey = previousBaseBodyKey;
@@ -785,6 +1032,7 @@ export class PatternRenderer {
         this.onStatus('invalid', 'Invalid shape — showing the last valid 3D mesh.');
         this.invalidate();
       } else {
+        this.sourceGatherManualRecording = previousGatherManualRecording;
         this.pattern = previousPattern;
         this.patternId = previousPatternId;
         this.baseBodyKey = previousBaseBodyKey;
@@ -796,9 +1044,84 @@ export class PatternRenderer {
     }
   }
 
-  private applyCameraFromSettings(pattern: Pattern) {
+  /** Explicit import intent, never guessed from a camera's numeric values. */
+  beginCameraDocument(): void {
+    this.sourceCameraPatternId = null;
+    this.sourceCameraAutomatic = false;
+    this.sourceCameraUserControlled = false;
+    this.cameraWritebackEnabled = false;
+    this.lastCameraWriteback = null;
+    clearTimeout(this.cameraSaveTimer);
+  }
+
+  applyCameraSettings(pattern: Pattern): void {
     const s = pattern.settings3d;
+    if (this.sourceCameraPatternId !== pattern.id) {
+      clearTimeout(this.cameraSaveTimer);
+      this.sourceCameraPatternId = pattern.id;
+      this.sourceCameraUserControlled = false;
+      this.cameraWritebackEnabled = false;
+      this.lastCameraWriteback = null;
+    }
+    this.sourceCameraAutomatic = s.sourceCameraFraming === 'viewport'
+      && !this.sourceCameraUserControlled
+      && !pattern.pieces.some(p => (p.settings3d.savedPositions?.length ?? 0) > 0);
+    if (this.sourceCameraAutomatic && this.pattern?.id === pattern.id && this.fitSourceView(s.cameraFov)) return;
+    // A settings effect during a user orbit must not restore the original imported default.
+    if (s.sourceCameraFraming === 'viewport' && this.sourceCameraUserControlled) return;
+    // The parent stores our callback and echoes it through its settings effect.
+    // Reapplying that same checkpoint would cancel an orbit still settling; an
+    // independently edited or reopened camera remains authoritative.
+    const written = this.lastCameraWriteback;
+    if (this.cameraWritebackEnabled && written && written.fov === s.cameraFov
+      && written.position.every((v, i) => v === s.cameraPosition[i])
+      && written.target.every((v, i) => v === s.controlsTarget[i])) return;
     this.setCameraState(s.cameraPosition, s.controlsTarget, s.cameraFov);
+  }
+
+  /** Overlay changes do not resize the canvas; refit only a fresh automatic camera. */
+  refreshSourceCameraFit(): void {
+    if (this.sourceCameraAutomatic) this.fitSourceView();
+  }
+
+  /** Explicit camera focus: published cloth only; body and collision geometry remain untouched. */
+  zoomToGarment(): boolean {
+    if (!this.fitSourceView(this.camera.fov, true)) return false;
+    this.beginUserCameraChange();
+    this.queueCameraSave();
+    return true;
+  }
+
+  private fitSourceView(fov = this.camera.fov, garmentOnly = false): boolean {
+    if (!this.prepared?.collisionSafety || !this.avatar) return false;
+    const bounds = this.container.getBoundingClientRect();
+    // The canvas action owns an inner div; editor controls are its siblings in the scene shell.
+    const shell = this.container.closest<HTMLElement>('[data-testid="pattern-scene-3d"]') ?? this.container;
+    const obstacles: CameraFitRect[] = [];
+    for (const element of shell.querySelectorAll<HTMLElement>(
+      '.scene-controls,.scene-camera,.scene-lighting,.scene-poses,.scene-info,.scene-mobile-primary,.scene-mobile-drawer,.scene-sim-panel,.scene-status-notice')) {
+      const r = element.getBoundingClientRect();
+      if (!element.getClientRects().length || !r.width || !r.height) continue;
+      obstacles.push({ left: r.left - bounds.left, right: r.right - bounds.left,
+        top: r.top - bounds.top, bottom: r.bottom - bounds.top });
+    }
+    const rect = sourceCameraSafeRect(bounds.width, bounds.height, obstacles);
+    if (!rect) return false;
+    const points: CameraFitPoint[] = [];
+    const cloth = garmentOnly ? this.lastClothPositions : this.lastClothPositions ?? this.prepared.simData.positions;
+    if (!cloth?.length || cloth.length % 4) return false;
+    for (let i = 0; i < cloth.length; i += 4) points.push([cloth[i], cloth[i + 1], cloth[i + 2]]);
+    if (!garmentOnly) {
+      const body = this.avatar.vertexPositions;
+      for (let i = 0; i < body.length; i += 3) points.push([body[i], body[i + 1], body[i + 2]]);
+    }
+    const direction: CameraFitPoint = garmentOnly
+      ? this.camera.position.clone().sub(this.controls.target).toArray()
+      : [.18, .08, Math.sqrt(1 - .18 ** 2 - .08 ** 2)];
+    const fitted = fitSourceCamera(points, { width: bounds.width, height: bounds.height, rect }, direction, fov);
+    if (!fitted) return false;
+    this.setCameraState(fitted.position, fitted.target, fitted.fov);
+    return true;
   }
 
   setCameraState(
@@ -823,7 +1146,7 @@ export class PatternRenderer {
 
   /** Triangulate + arrange the garment and (re)build the static cloth meshes.
    *  `changedPieces` (pieces whose 2D shape was just edited) re-triangulate from live geometry. */
-  private rebuildCloth(pattern: Pattern, changedPieces?: Set<string>) {
+  private rebuildCloth(pattern: Pattern, changedPieces?: Set<string>, forceArrangement = false): void | Promise<void> {
     if (!this.avatar) return;
     const verts = this.avatar.vertexPositions;
     const indices = this.avatar.indices;
@@ -835,15 +1158,29 @@ export class PatternRenderer {
     // Triangulate before tearing down the current cloth. During a point drag the candidate
     // polygon may be temporarily invalid; prepareCloth deliberately throws rather than returning
     // an incomplete mesh, and setPattern then leaves this last valid scene intact.
-    const nextPrepared = prepareCloth(
+    const sourceGatherScope = sourceGatherRegistry.lookup(pattern);
+    if (sourceGatherScope) sourceGatherScope.manualRecording = this.sourceGatherManualRecording;
+    if (sourceGatherScope) sourceGatherScope.explicitSettings = !!(this.sourceContactOptions.explicitFinalContactIterations
+      || this.sourceContactOptions.explicitSubstepContactIterations || this.sourceContactOptions.explicitSeamIterations
+      || this.sourceContactOptions.sourceStretchSewingMode || Object.values(this.sourceContactOptions.explicitPadding ?? {}).some(Boolean));
+    const compatiblePattern = compatibleSourceGatherCheckpoint(compatibleSourceBodyCheckpoint(pattern), sourceGatherScope, { fromArrangement: forceArrangement });
+    let nextPrepared = prepareCloth(
       {
-        pattern,
+        pattern: compatiblePattern,
         avatarVertices: verts,
         avatarIndices: indices,
         cylinders: nextCylinders
       },
-      { changedPieces }
+      { changedPieces, sourceGatherScope, fromArrangement: forceArrangement }
     );
+    const token = { prepared: this.prepared, sceneRevision: this.sourceSceneGeneration,
+      bodyRevision: this.sourceBodyInitializationRevision, resetRevision: this.simulationResetRevision, requestRevision: this.sourcePreparationRequestRevision,
+      pattern: this.pattern, avatar: this.avatar };
+    const candidateAvatar = this.avatar;
+    const commitPrepared = (finalized: PreparedCloth | null): void => {
+    nextPrepared = finalized;
+    const preview = nextPrepared ? this.checkSourcePreview(nextPrepared) : { prepared: null, guard: null, report: null };
+    nextPrepared = preview.prepared;
 
     if (this.mode === 'arrange') this.exitArrangeMode(); // stale arrange meshes reference old pieces
     this.clearClothMeshes();
@@ -854,12 +1191,19 @@ export class PatternRenderer {
     this.sim?.dispose();
     this.sim = null;
     this.cylinders = nextCylinders;
+    this.sourcePreviewGuard = preview.guard;
+    this.sourcePreviewReport = preview.report;
+    this.sourceSceneGeneration = (this.sourceSceneGeneration ?? 0) + 1;
+    this.recordedAssemblyGeneration = null;
     // Capture the cylinder frames the cached drape is authored on (a fresh, non-dirty load). On a
     // later body edit these are the OLD frames the cylinder re-fit projects from. (Keep them across a
     // dirty rebuild — don't overwrite with the new-body frames.)
     if (!this.bodyDirty || !this.baseCylinders) this.baseCylinders = this.cylinders;
     this.overlays.setAvatarContext(this.avatar, this.cylinders);
     this.prepared = nextPrepared;
+    this.sourcePublishedCollisionContext = null;
+    this.sourceGatherManualPrepared = this.sourceGatherManualRecording ? nextPrepared : null;
+    this.drapeFailureDiagnostics = null;
     if (!this.prepared) {
       this.overlays.setPrepared(null, null);
       return;
@@ -991,6 +1335,16 @@ export class PatternRenderer {
     this.overlays.setPrepared(this.prepared, this.prepared.simData.positions);
     this.overlays.setHighlightedPiece(this.highlightId);
     if (this.showTriangles) this.setShowTriangles(true); // rebuild the wireframe overlays on the new meshes
+    };
+    if (!nextPrepared?.simData.sourceGatherRefinement) { commitPrepared(nextPrepared); return; }
+    return finalizeSourceGatherCollisionGeometry(nextPrepared.simData).then(simData => {
+      if (this.avatar !== candidateAvatar || this.pattern !== pattern || !preparationStillCurrent(token, {
+        prepared: this.prepared, sceneRevision: this.sourceSceneGeneration, bodyRevision: this.sourceBodyInitializationRevision,
+        resetRevision: this.simulationResetRevision, requestRevision: this.sourcePreparationRequestRevision,
+        pattern: this.pattern, avatar: this.avatar, disposed: this.disposed
+      })) throw new Error('The body or garment changed during refined mesh preparation. Start again.');
+      commitPrepared({ ...nextPrepared!, simData });
+    });
   }
 
   /** Add a per-piece `uvLabel` attribute (0..1 across the piece's pattern bbox); returns the bbox. */
@@ -1023,8 +1377,80 @@ export class PatternRenderer {
     };
   }
 
+  private sourcePreviewGuard: ClothCollisionGuard | null = null;
+  private sourcePreviewReport: CollisionGuardReport | null = null;
+  private sourceSceneGeneration = 0;
+  private recordedAssemblyGeneration: number | null = null;
+
+  private sourceCollisionContext(prepared: PreparedCloth, useAccepted = false) {
+    const live = useAccepted && this.sim && this.sourceSimPrepared === prepared ? {
+      prepared, simData: this.sim.simData, lastCollisionSeamActivation: this.sim.lastCollisionSeamActivation,
+      safetyReport: this.sim.safetyReport
+    } : undefined;
+    if (useAccepted && !live && this.sourcePublishedCollisionContext?.prepared === prepared) {
+      const captured = this.sourcePublishedCollisionContext.context;
+      return { dictionary: captured.dictionary, activation: { ...captured.activation,
+        activeSeams: captured.activation.activeSeams.slice() } };
+    }
+    return visibleSourceCollisionPreparation(prepared, this.sourceContactOptions, live);
+  }
+
+  private createPreviewGuard(prepared: PreparedCloth, posedBody = false): ClothCollisionGuard {
+    const avatar = posedBody ? this.avatar : null;
+    return new ClothCollisionGuard({
+      bodyPositions: avatar?.vertexPositions ?? prepared.body.positions,
+      bodyIndices: avatar?.indices ?? prepared.body.triangles,
+      bodyPositionStride: avatar ? 3 : 4,
+      bodyTriangleStride: avatar ? 3 : 4,
+      clothTriangles: prepared.simData.triangles,
+      particleCount: prepared.simData.particleCount,
+      seams: prepared.simData.seams,
+      sourceGatherRefinementRevision: prepared.simData.sourceGatherRefinement?.revision,
+      sourceGatherCollisionGeometry: prepared.simData.sourceGatherCollisionGeometry as ConstructorParameters<typeof ClothCollisionGuard>[0]['sourceGatherCollisionGeometry'],
+      ...this.sourceCollisionContext(prepared).dictionary
+    });
+  }
+
+  /** Cache revisions describe compatibility, not safety against the actual posed body. */
+  private checkSourcePreview(prepared: PreparedCloth) {
+    if (!prepared.collisionSafety) return { prepared, guard: null, report: null };
+    const guard = this.createPreviewGuard(prepared);
+    let report = guard.inspect(prepared.simData.positions, undefined, this.sourceCollisionContext(prepared).activation);
+    let rejectedPositions = prepared.simData.positions;
+    if (report.safe) return { prepared, guard, report };
+    const explicitPlacement = prepared.simData.anchors?.some((weight, index) => index % 4 === 3 && weight !== 0)
+      || [prepared.simData.positions, prepared.simData.arrangedPositions]
+        .some(positions => positions.some((inverseMass, index) => index % 4 === 3 && inverseMass === 0));
+    // Frozen pieces use zero inverse mass independently of the saved XYZ hold weights.
+    // Discard a free unsafe cache, never silently replace a deliberate held or frozen garment.
+    if (!explicitPlacement) {
+      const arrangement = fromArrangement(prepared);
+      rejectedPositions = arrangement.simData.positions;
+      report = guard.inspect(arrangement.simData.positions, undefined, this.sourceCollisionContext(arrangement).activation);
+      if (report.safe) return { prepared: arrangement, guard, report };
+    }
+    const error = new CollisionSafetyError(report, rejectedPositions);
+    error.message = explicitPlacement
+      ? 'The held or frozen garment intersects this body. Release the hold or unfreeze the pieces, then reset or move the panels clear before simulating.'
+      : 'The saved garment and its arrangement intersect this body. Regenerate or move the panels clear of the body before simulating.';
+    throw error;
+  }
+
+  private assertSourcePositions(positions: Float32Array, inspectRenderedGeometry = false): void {
+    if (!this.prepared?.collisionSafety) return;
+    // SolverRunner copies the already checked readback; avoid rebuilding the same CPU proof.
+    const accepted = this.sim?.positions;
+    if (!inspectRenderedGeometry && this.sourceSimPrepared === this.prepared && this.sim?.safetyReport?.safe && accepted?.length === positions.length
+      && positions.every((value, index) => Number.isFinite(value) && (index % 4 === 3 || value === accepted[index]))) return;
+    this.sourcePreviewGuard ??= this.createPreviewGuard(this.prepared, true);
+    this.sourcePreviewReport = this.sourcePreviewGuard.inspect(positions, undefined, this.sourceCollisionContext(this.prepared, true).activation);
+    if (!this.sourcePreviewReport.safe) throw new CollisionSafetyError(this.sourcePreviewReport, positions);
+  }
+
   private applyClothPositions(global: Float32Array) {
-    this.lastClothPositions = global;
+    this.assertSourcePositions(global);
+    // Playback reuses its scratch array. A later rejected sample must not mutate our last proof.
+    this.lastClothPositions = this.prepared?.collisionSafety ? global.slice() : global;
     this.invalidate();
     this.updateDebugFocusPoint();
     for (const entry of this.clothMeshes) {
@@ -1258,17 +1684,97 @@ export class PatternRenderer {
 
   private lastClothPositions: Float32Array | null = null;
 
-  setPose(name: string | null) {
+  async setPose(name: string | null): Promise<void> {
+    this.assertNotFrozen();
+    const poseRevision = ++this.sourceBodyInitializationRevision;
+    const poseAvatar = this.avatar, posePattern = this.pattern, poseReset = this.simulationResetRevision,
+      poseRequest = this.sourcePreparationRequestRevision;
+    const poseCurrent = () => !this.disposed && this.avatar === poseAvatar && this.pattern === posePattern
+      && this.sourceBodyInitializationRevision === poseRevision && this.simulationResetRevision === poseReset
+      && this.sourcePreparationRequestRevision === poseRequest;
+    const pending = this.activeSimulationStep;
+    const simulation = this.sim;
+    const wasRunning = this.simulating;
+    const previousFailure = this.simulationFailure;
+    if (pending) {
+      this.simulating = false;
+      this.simRunner?.stop();
+      await pending.catch(() => undefined);
+      if (!poseCurrent() || this.sim !== simulation) return;
+    }
+    if (!poseCurrent()) return;
+    const previous = this.avatar?.poseName() ?? null;
     this.avatar?.setPose(name);
     // body moved: refresh cylinders + collision grid (cloth keeps current positions)
     if (this.avatar && this.sim) {
-      this.sim.rebuildBodyGrid(this.avatar.vertexPositions, this.avatar.indices);
+      try {
+        this.sim.rebuildBodyGrid(this.avatar.vertexPositions, this.avatar.indices);
+        if (this.prepared?.collisionSafety) {
+          this.sourcePreviewGuard = this.createPreviewGuard(this.prepared, true);
+          this.sourceSceneGeneration = (this.sourceSceneGeneration ?? 0) + 1;
+          this.recordedAssemblyGeneration = null;
+        }
+      } catch (error) {
+        // Keep the last accepted body/cloth pair when an instant pose change crosses the garment.
+        try {
+          this.avatar.setPose(previous);
+          this.sim.rebuildBodyGrid(this.avatar.vertexPositions, this.avatar.indices);
+          this.sim.resetTo(this.sim.positions);
+        } catch (rollbackError) {
+          this.failSimulation(rollbackError);
+          return;
+        }
+        if (error instanceof Error && error.name === 'CollisionSafetyError') {
+          error.message = 'That pose intersects the garment. Reset and reassemble before changing pose.';
+        }
+        this.failSimulation(error);
+      }
+    } else if (this.avatar && this.pattern) {
+      if (this.prepared?.collisionSafety) {
+        try {
+          const positions = this.renderedSourcePositions();
+          const report = this.createPreviewGuard(this.prepared, true).inspect(positions, undefined,
+            this.sourceCollisionContext(this.prepared, true).activation);
+          if (!report.safe) throw new CollisionSafetyError(report, positions);
+        } catch (error) {
+          if (!poseCurrent()) return;
+          poseAvatar!.setPose(previous);
+          this.failSimulation(error);
+          return;
+        }
+      }
+      try {
+        const rebuild = this.rebuildCloth(this.pattern);
+        if (rebuild) await rebuild;
+      } catch (error) {
+        if (!poseCurrent()) return;
+        poseAvatar!.setPose(previous);
+        try {
+          const rollback = this.rebuildCloth(posePattern!);
+          if (rollback) await rollback;
+        } catch (rollbackError) {
+          if (poseCurrent()) this.failSimulation(rollbackError);
+          return;
+        }
+        if (!poseCurrent()) return;
+        this.failSimulation(error);
+      }
+    }
+    if (!poseCurrent()) return;
+    if (pending && wasRunning && this.userSimulating && this.simulationFailure === previousFailure) {
+      this.simulating = true;
+      this.onStatus('simulating');
+      void this.runSimLoop();
     }
     this.invalidate();
   }
 
   poseNames(): string[] {
     return this.avatar?.poseNames() ?? [];
+  }
+
+  poseName(): string | null {
+    return this.avatar?.poseName() ?? null;
   }
 
   webgpuAvailable(): boolean {
@@ -1310,6 +1816,22 @@ export class PatternRenderer {
       positionHash = (hash >>> 0).toString(16).padStart(8, '0');
     }
     let maxSeamPairDistanceMm: number | null = null;
+    let renderedPositionErrorM: number | null = null;
+    if (positions && this.clothMeshes?.length) {
+      renderedPositionErrorM = 0;
+      for (const entry of this.clothMeshes) {
+        const vertices = entry.geometry.getAttribute('position');
+        if (!vertices || vertices.itemSize < 3 || vertices.count !== entry.count || (entry.start + entry.count) * 4 > positions.length) {
+          renderedPositionErrorM = null;
+          break;
+        }
+        for (let index = 0; index < entry.count; index++) for (let axis = 0; axis < 3; axis++) {
+          const error = Math.abs(vertices.array[index * vertices.itemSize + axis] - positions[(entry.start + index) * 4 + axis]);
+          renderedPositionErrorM = Math.max(renderedPositionErrorM, error);
+        }
+        if (!Number.isFinite(renderedPositionErrorM)) { renderedPositionErrorM = null; break; }
+      }
+    }
     let waistbandMaxSeamPairDistanceMm: number | null = null;
     if (positions && this.prepared && this.pattern) {
       const waistbandPieceIds = new Set(
@@ -1354,77 +1876,159 @@ export class PatternRenderer {
       frameCount: this.simFrameCount,
       particleCount: positions ? positions.length / 4 : 0,
       positionHash,
+      renderedPositionErrorM,
       positionsFinite,
       particleBounds: bounds(positions, 4),
       avatarBounds: bounds(this.avatar?.vertexPositions ?? null, 3),
       maxSeamPairDistanceMm,
-      waistbandMaxSeamPairDistanceMm
+      waistbandMaxSeamPairDistanceMm,
+      simulationFailure: this.simulationFailure ?? null,
+      safetyReport: this.sim?.safetyReport ?? this.sourcePreviewReport ?? null,
+      collisionSafetyPending: this.sim?.collisionSafetyPending ?? false,
+      assemblySupportStates: this.sim?.assemblySupportStates?.map(state => ({ ...state })) ?? [],
+      sourceAssemblyState: this.sim?.sourceAssemblyState ?? null,
+      sourceAssemblyComplete: this.getSourceAssemblyComplete()
     };
+  }
+
+  /** Actual baked cut-rest provenance for new checkpoint captures; never inferred from a filename. */
+  getSourceStretchPolicy(): PreparedCloth['simData']['sourceStretchPolicy'] | null {
+    const policy = this.sim?.simData?.sourceStretchPolicy ?? this.prepared?.simData.sourceStretchPolicy;
+    return policy ? { ...policy, sourcePieceIds: [...policy.sourcePieceIds] } : null;
+  }
+
+  /** Only live accepted closed/released/free assembly can certify a reusable source checkpoint. */
+  getSourceAssemblyComplete(): boolean | null {
+    if (this.frozenPending || this.frozenDisplay) return null;
+    return this.sim?.sourceAssemblyComplete ?? null;
+  }
+
+  getDrapeFailureDiagnostics(): DrapeFailureDiagnostics | null {
+    if (!import.meta.env.DEV || !this.drapeFailureDiagnostics) return null;
+    // Callers cannot mutate the retained evidence or the live solver's arrays.
+    return structuredClone(this.drapeFailureDiagnostics);
   }
 
   private async ensureSim(seedFromArrangement = false): Promise<ClothSimulation | null> {
     if (this.sim) return this.sim;
     if (!this.prepared) return null;
-    if (!this.device) {
-      this.device = await requestDevice();
-      if (this.device) {
-        const acquiredDevice = this.device;
-        this.deviceLostReason = null;
-        void acquiredDevice.lost.then((info) => {
-          if (this.device !== acquiredDevice) return;
-          this.deviceLostReason = info.message
-            ? `${info.reason}: ${info.message}`
-            : info.reason;
-        });
+    this.assertNotFrozen();
+    this.simulationInitializations = (this.simulationInitializations ?? 0) + 1;
+    try {
+      const token = { prepared: this.prepared, sceneRevision: this.sourceSceneGeneration,
+        bodyRevision: this.sourceBodyInitializationRevision, resetRevision: this.simulationResetRevision, requestRevision: this.sourcePreparationRequestRevision,
+        pattern: this.pattern, avatar: this.avatar };
+      const current = () => ({ prepared: this.prepared, sceneRevision: this.sourceSceneGeneration,
+        bodyRevision: this.sourceBodyInitializationRevision, resetRevision: this.simulationResetRevision, requestRevision: this.sourcePreparationRequestRevision,
+          pattern: this.pattern, avatar: this.avatar, disposed: this.disposed });
+      if (!this.device) {
+        this.device = await requestDevice();
+        if (this.device) {
+          const acquiredDevice = this.device;
+          this.deviceLostReason = null;
+          void acquiredDevice.lost.then((info) => {
+            if (this.device !== acquiredDevice) return;
+            this.deviceLostReason = info.message
+              ? `${info.reason}: ${info.message}`
+              : info.reason;
+          });
+        }
       }
+      if (!preparationStillCurrent(token, current())) return null;
+      if (this.sim) return this.sim;
+      if (!this.device) throw new Error('WebGPU is unavailable');
+      let seed = seedFromArrangement ? fromArrangement(token.prepared) : token.prepared;
+      if (seed.simData.sourceGatherRefinement) {
+        const simData = await finalizeSourceGatherCollisionGeometry(seed.simData);
+        if (!preparationStillCurrent(token, current())) return null;
+        if (this.sim) return this.sim;
+        seed = { ...seed, simData };
+      }
+      this.sim = new ClothSimulation(
+        this.device,
+        seed,
+        this.sourceContactOptions
+      );
+      this.sourceSimPrepared = token.prepared;
+      this.simFrameCount = 0;
+      this.simulationFailure = null;
+      const simulation = this.sim;
+      this.simRunner = new SolverRunner({
+        step: async (_dt: number): Promise<void> => this.stepSimulation(simulation),
+        read(out?: Float32Array): Float32Array {
+          if (!out || out.length !== simulation.positions.length) return simulation.positions.slice();
+          out.set(simulation.positions);
+          return out;
+        },
+        state: () => ({ positions: simulation.positions }),
+        reset: () => simulation.resetToSaved(),
+        dispose: () => undefined
+      });
+      this.disposeSimFrame = this.simRunner.onFrame(({ positions }) => this.publishRunnerFrame(simulation, positions));
+      return this.sim;
+    } finally { this.simulationInitializations = Math.max(0, this.simulationInitializations - 1); }
+  }
+
+  private publishRunnerFrame(simulation: ClothSimulation, positions: Float32Array): void {
+    // The source adapter publishes each proved step even if Pause stops runner callbacks.
+    if (this.prepared?.collisionSafety === true) return;
+    if (this.sim !== simulation || !this.simulating || this.disposed) return;
+    this.simFrameCount += 1;
+    this.applyClothPositions(positions);
+    if (this.adaptFramesLeft > 0 && --this.adaptFramesLeft === 0) {
+      this.sim?.reanchorToSettled();
+      this.sim?.setSelfCollision(SIM_CONFIG.handleSelfCollisions);
+      this.bodyDirty = false;
+      this.baseBodyKey = this.lastBodyKey;
     }
-    if (!this.device) throw new Error('WebGPU is unavailable');
-    this.sim = new ClothSimulation(
-      this.device,
-      seedFromArrangement ? fromArrangement(this.prepared) : this.prepared
-    );
-    this.simFrameCount = 0;
-    const simulation = this.sim;
-    this.simRunner = new SolverRunner({
-      async step(_dt: number): Promise<void> {
-        await simulation.step();
-      },
-      read(out?: Float32Array): Float32Array {
-        if (!out || out.length !== simulation.positions.length) return simulation.positions.slice();
-        out.set(simulation.positions);
-        return out;
-      },
-      state: () => ({ positions: simulation.positions }),
-      reset: () => simulation.resetToSaved(),
-      dispose: () => undefined
-    });
-    this.disposeSimFrame = this.simRunner.onFrame(({ positions }) => {
-      if (!this.simulating || this.disposed) {
-        this.simRunner?.stop();
-        return;
+  }
+
+  private async stepSimulation(simulation: ClothSimulation): Promise<void> {
+    const prepared = this.prepared;
+    const generation = this.sourceSceneGeneration;
+    const resetRevision = this.simulationResetRevision;
+    const pending = simulation.step();
+    this.activeSimulationStep = pending;
+    try {
+      const positions = await pending;
+      if (prepared?.collisionSafety === true && this.sim === simulation && this.prepared === prepared
+        && !this.disposed && this.sourceSceneGeneration === generation && this.simulationResetRevision === resetRevision) {
+        const report = simulation.safetyReport;
+        const activation = simulation.lastCollisionSeamActivation;
+        const used = report?.seamActivation;
+        if (report?.safe === true && report.trajectory?.valid === true
+          && report.trajectory.inspectedSubsteps === simulation.simulationConfig.subSteps
+          && activation && used && activation.revision === used.revision && activation.sewnUpTo === used.sewnUpTo
+          && activation.activeSeams.length === used.activeSeams.length
+          && activation.activeSeams.every((value, index) => value === used.activeSeams[index])
+          && positions === simulation.positions) {
+          this.applyClothPositions(positions);
+          this.sourcePublishedCollisionContext = { prepared, context: this.sourceCollisionContext(prepared, true) };
+          this.simFrameCount += 1;
+        }
       }
-      this.simFrameCount += 1;
-      this.applyClothPositions(positions);
-      if (this.adaptFramesLeft > 0 && --this.adaptFramesLeft === 0) {
-        this.sim?.reanchorToSettled();
-        this.sim?.setSelfCollision(true);
-        this.bodyDirty = false;
-        this.baseBodyKey = this.lastBodyKey;
-      }
-    });
-    return this.sim;
+    } catch (error) {
+      if (this.sim === simulation && !this.disposed) this.failSimulation(error);
+      throw error;
+    } finally {
+      if (this.activeSimulationStep === pending) this.activeSimulationStep = null;
+    }
   }
 
   /** The body-cylinder name a sim piece is arranged on (strips the mirror-instance suffix). */
   private cylinderNameForPiece(pieceId: string): string | null {
     const baseId = pieceId.replace(/#M$/, '');
     const piece = this.pattern?.pieces.find((p) => p.id === baseId);
+    // Explicit source transforms have no correspondence to the avatar's arrangement cylinders.
+    // Regenerate or manually arrange for another body instead of refitting every panel to Torso.
+    if (piece?.settings3d.arrangement.sourcePlacement) return null;
     const name = piece?.settings3d.arrangement.cylinderName;
     return name && !piece?.settings3d.arrangement.use2DPosition ? name : null;
   }
 
   /** Run the live cloth simulation from the current state (requires WebGPU). */
   async simulate(): Promise<void> {
+    this.assertNotFrozen();
     if (this.simulating) return;
     try {
       // Continue from the displayed saved drape, as the reference Studio does. Arrangement reset is
@@ -1432,7 +2036,18 @@ export class PatternRenderer {
       // garment change interpretation the moment simulation started.
       const sim = await this.ensureSim(false);
       if (!sim) return;
-      if (this.bodyDirty && this.baseCylinders && this.pattern) {
+      if (this.bodyDirty && this.pattern?.garmentCodeSource) {
+        // Source panels have no correspondence to our arrangement cylinders. In particular,
+        // do not turn a free checkpoint into a hold target while adapting the wrists/body:
+        // that would keep intersecting sleeves pinned to the previous body. The prepared
+        // checkpoint/explicit-hold weights remain authoritative, with collisions enabled.
+        sim.setSelfCollision(SIM_CONFIG.handleSelfCollisions);
+        sim.setAnchorScale(this.holdAnchor());
+        this.adaptFramesLeft = 0;
+        this.bodyDirty = false;
+        this.baseBodyKey = this.lastBodyKey;
+        this.baseCylinders = this.cylinders;
+      } else if (this.bodyDirty && this.baseCylinders && this.pattern) {
         // Body changed: re-fit the cached drape onto the new body via CYLINDER COORDINATES — decompose
         // each particle into (u, v, radial standoff) on the OLD body's cylinder and re-project onto the
         // NEW body's cylinder. This deforms the drape coherently with the body (tracks size/pose), with
@@ -1441,7 +2056,7 @@ export class PatternRenderer {
         const refit = cylinderRefit(sim.positions, this.prepared!.simData.pieces, cylName, this.baseCylinders, this.cylinders);
         sim.seedAndHold(refit, this.holdAnchor());
         this.applyClothPositions(refit);
-        sim.setSelfCollision(true);
+        sim.setSelfCollision(SIM_CONFIG.handleSelfCollisions);
         this.adaptFramesLeft = 0;
         this.bodyDirty = false;
         this.baseBodyKey = this.lastBodyKey;
@@ -1455,7 +2070,7 @@ export class PatternRenderer {
         // No change: softly hold the cached (settled) drape with self-collision on. A gentle hold
         // (not a rigid pin) lets the cloth settle/respond like a live sim while staying faithful to
         // the source's drape and not curling the free waistband edge.
-        sim.setSelfCollision(true);
+        sim.setSelfCollision(SIM_CONFIG.handleSelfCollisions);
         sim.setAnchorScale(this.holdAnchor());
         this.adaptFramesLeft = 0;
       }
@@ -1465,15 +2080,18 @@ export class PatternRenderer {
       this.onStatus('simulating');
       void this.runSimLoop();
     } catch (e) {
-      this.simulating = false;
-      this.releaseSimulationLease?.();
-      this.releaseSimulationLease = null;
-      this.onStatus('error', e instanceof Error ? e.message : String(e));
+      this.failSimulation(e);
     }
   }
 
   private runSimLoop(): void {
-    if (!this.releaseSimulationLease) {
+    // Source steps already invalidate the viewport when an accepted readback arrives.
+    // Repainting unchanged geometry while the GPU/Worker is pending blocks interface input,
+    // especially on software graphics. Camera and gizmo interactions have their own invalidation.
+    if (this.prepared?.collisionSafety) {
+      this.releaseSimulationLease?.();
+      this.releaseSimulationLease = null;
+    } else if (!this.releaseSimulationLease) {
       this.releaseSimulationLease = this.viewport.acquireRenderLease('cloth-solver');
     }
     this.simRunner?.start();
@@ -1497,27 +2115,66 @@ export class PatternRenderer {
   async recordAssemblyTimeline(
     options: RecordOptions & { from?: 'saved' | 'arranged' } = {}
   ): Promise<AssemblyRecording | null> {
+    this.assertNotFrozen();
+    if (this.prepared?.simData.sourceGatherRefinement && this.pattern) {
+      const preparedBefore = this.prepared, patternBefore = this.pattern;
+      this.pauseSimulation();
+      await this.activeSimulationStep?.catch(() => undefined);
+      if (this.disposed || this.prepared !== preparedBefore || this.pattern !== patternBefore) return null;
+      this.sourceGatherManualRecording = true;
+      this.sourcePreparationRequestRevision += 1;
+      try { await this.rebuildCloth(patternBefore, undefined, true); }
+      catch (error) { this.sourceGatherManualRecording = false; throw error; }
+      if (this.disposed || this.pattern !== patternBefore) return null;
+      if (this.prepared?.simData.sourceGatherRefinement) throw new Error('Manual assembly needs the original sewing mesh. Reset and try again.');
+    }
     const prepared = this.prepared;
     if (!prepared) return null;
     const sim = await this.ensureSim(false);
     if (!sim) return null;
     this.pauseSimulation();
+    await this.activeSimulationStep?.catch(() => undefined);
+    if (this.disposed || this.prepared !== prepared || this.sim !== sim) return null;
+    const generation = this.sourceSceneGeneration;
 
     const from = options.from ?? (this.patternHasSavedDrape() ? 'saved' : 'arranged');
-    const recording = await recordAssembly(
-      {
-        stitchCount: sim.stitchCount,
-        setSewnUpTo: (count) => sim.setSewnUpTo(count),
-        step: () => sim.step(),
-        reset: () => (from === 'saved' ? sim.resetToSaved() : sim.resetToArranged())
-      },
-      prepared.simData.assemblySteps,
-      prepared.simData.particleCount,
-      options
-    );
+    const pattern = this.pattern, bodyRevision = this.sourceBodyInitializationRevision;
+    const resetRevision = this.simulationResetRevision, preparationRevision = this.sourcePreparationRequestRevision;
+    let recording: AssemblyRecording;
+    try {
+      recording = await recordAssembly(
+        {
+          stitchCount: sim.stitchCount,
+          setSewnUpTo: (count) => sim.setSewnUpTo(count),
+          step: () => sim.step(),
+          reset: () => {
+            if (from === 'saved') sim.resetToSaved(); else sim.resetToArranged();
+            // Recording is an intentional manual sequence, including a full numerical prefix.
+            sim.cancelSourceAssembly();
+          }
+        },
+        prepared.simData.assemblySteps,
+        prepared.simData.particleCount,
+        options
+      );
+    } catch (error) {
+      // A recording uses the same guarded solver as live draping. Keep its failure
+      // actionable after the transient toast, and never publish a rejected take.
+      if (!this.disposed && this.sim === sim && this.prepared === prepared && this.pattern === pattern
+        && this.sourceSceneGeneration === generation && this.sourceBodyInitializationRevision === bodyRevision
+        && this.simulationResetRevision === resetRevision && this.sourcePreparationRequestRevision === preparationRevision) {
+        this.failSimulation(error);
+      }
+      throw error;
+    }
 
     // Leave the solver fully sewn again, or the next Play would continue from a half-open garment.
+    if (this.disposed || this.prepared !== prepared || this.sim !== sim
+      || generation !== this.sourceSceneGeneration) {
+      throw new Error('The body or garment changed during recording. Record the assembly again.');
+    }
     sim.setSewnUpTo(sim.stitchCount);
+    this.recordedAssemblyGeneration = generation;
     return recording;
   }
 
@@ -1530,10 +2187,23 @@ export class PatternRenderer {
 
   /** Paint a recorded frame. Pass null to hand the view back to the live/settled positions. */
   showAssemblyFrame(positions: Float32Array | null) {
+    this.assertNotFrozen();
     const fallback = this.sim?.positions ?? this.prepared?.simData.positions;
     const next = positions ?? fallback;
     if (!next) return;
-    this.applyClothPositions(next);
+    try {
+      if (positions && this.prepared?.collisionSafety
+        && this.recordedAssemblyGeneration !== this.sourceSceneGeneration) {
+        throw new Error('This recording belongs to a different body or garment. Record the assembly again.');
+      }
+      this.applyClothPositions(next);
+    } catch (error) {
+      if (error instanceof CollisionSafetyError) {
+        error.message = 'This playback position intersects the garment or body. The last safe frame is still displayed; choose another frame or record again.';
+      }
+      this.failSimulation(error);
+      return;
+    }
     this.overlays.updatePositions(next);
     this.invalidate();
   }
@@ -1549,16 +2219,51 @@ export class PatternRenderer {
     this.invalidate();
   }
 
+  /** Failed geometry stays at the last accepted frame and is never baked as a new drape. */
+  private failSimulation(error: unknown) {
+    this.drapeFailureDiagnostics = null;
+    if (import.meta.env.DEV && error instanceof CollisionSafetyError && this.prepared) {
+      const avatar = this.avatar;
+      const data = this.prepared.simData;
+      try { this.drapeFailureDiagnostics = structuredClone({
+        report: error.report,
+        candidatePositions: error.candidatePositions,
+        candidateTrajectory: error.candidateTrajectory ? Array.from(error.candidateTrajectory) : null,
+        previousPositions: this.sim?.positions ?? this.lastClothPositions ?? data.positions,
+        bodyPositions: avatar?.vertexPositions ?? this.prepared.body.positions,
+        bodyTriangles: avatar?.indices ?? this.prepared.body.triangles,
+        bodyPositionStride: avatar ? 3 : 4,
+        bodyTriangleStride: avatar ? 3 : 4,
+        clothTriangles: data.triangles,
+        seams: data.seams,
+        seamPairsBySeam: data.seamPairsBySeam,
+        particleCount: data.particleCount,
+        config: this.sim?.simulationConfig ?? this.getSimConfig(),
+        // The component can supply a Svelte reactive proxy. Pattern persistence is JSON;
+        // serialize that data before cloning the surrounding typed geometry snapshot.
+        pattern: this.pattern ? JSON.parse(JSON.stringify(this.pattern)) as Pattern : null,
+        sceneGeneration: this.sourceSceneGeneration ?? 0
+      }); } catch {
+        // Diagnostic capture must never prevent the safety pause itself.
+        this.drapeFailureDiagnostics = null;
+      }
+    }
+    const message = error instanceof Error ? error.message : 'The cloth simulation could not continue.';
+    this.pauseSimulation();
+    this.simulationFailure = message;
+    this.onStatus(error instanceof Error && error.name === 'CollisionSafetyError' ? 'invalid' : 'error', message);
+  }
+
   /** End and bake a simulation. Lifecycle/rebuild callers use this; the user-facing control pauses. */
   stopSimulation() {
     const wasUser = this.userSimulating;
     this.pauseSimulation();
     if (wasUser) {
-      // Weld settled seams (counterpart particles within 2 mm snap to their midpoint — the
-      // original's snapSeamPointsToCounterparts) and grade the drape before baking it.
+      // Source checkpoints preserve the exact collision-checked geometry. Legacy native drapes
+      // retain the original's snapSeamPointsToCounterparts operation before baking.
       const pos = this.sim?.positions ?? this.prepared?.simData.positions;
       if (pos) {
-        this.weldSeamCounterparts(pos);
+        if (!this.prepared?.collisionSafety) this.weldSeamCounterparts(pos);
         this.applyClothPositions(pos);
         this.lastStretchError = this.computeStretchError(pos);
       }
@@ -1623,7 +2328,16 @@ export class PatternRenderer {
   /** Per-piece settled positions in the savedPositions format (stride-5: x2d,y2d in placed-plan mm;
    *  x3d,y3d,z3d in m), keyed by base piece id. Mirror instances (#M) are skipped because
    *  savedPositions belongs to the base piece. */
+  getSourceGatherIntent(): 'manual' | undefined {
+    return this.prepared && this.sourceGatherManualPrepared === this.prepared && !this.prepared.simData.sourceGatherRefinement ? 'manual' : undefined;
+  }
+
+  getSourceGatherCacheMarker() {
+    return this.prepared ? capturedSourceGatherCacheMarker(this.prepared.simData) : undefined;
+  }
+
   extractSavedPositions(): Record<string, number[]> {
+    this.assertNotFrozen();
     const out: Record<string, number[]> = {};
     if (!this.prepared || !this.pattern) return out;
     const sd = this.prepared.simData;
@@ -1654,18 +2368,26 @@ export class PatternRenderer {
 
   /** Discard the live state and restore the pre-drape cylinder arrangement. */
   resetSimulation() {
+    this.assertNotFrozen();
+    this.sourcePublishedCollisionContext = null;
     this.pauseSimulation();
-    if (this.sim) {
-      this.sim.resetToArranged();
-      this.applyClothPositions(this.sim.positions);
-    } else if (this.prepared) {
-      this.applyClothPositions(this.prepared.simData.arrangedPositions);
-    }
+    this.simulationResetRevision += 1;
+    this.simulationFailure = null;
+    this.drapeFailureDiagnostics = null;
+    try {
+      if (this.sim) {
+        this.sim.resetToArranged();
+        this.applyClothPositions(this.sim.positions);
+      } else if (this.prepared) {
+        this.applyClothPositions(this.prepared.simData.arrangedPositions);
+      }
+    } catch (error) { this.failSimulation(error); }
     this.invalidate();
   }
 
   /** "Arrange" — return the garment to its pre-drape placement on the body. */
   arrange() {
+    this.assertNotFrozen();
     this.resetSimulation();
   }
 
@@ -1683,6 +2405,7 @@ export class PatternRenderer {
 
   /** Enter arrange mode: show pieces flat-on-body, each individually selectable + movable. */
   enterArrangeMode(): void {
+    this.assertNotFrozen();
     if (this.mode === 'arrange' || !this.prepared || !this.pattern) return;
     this.stopSimulation();
     this.arrangeFromDrape = false;
@@ -1695,6 +2418,7 @@ export class PatternRenderer {
    * pieces back to the settled drape — they "fly back" because the sim's anchors stay at that drape.
    */
   enterManipulateMode(): void {
+    this.assertNotFrozen();
     if (this.mode === 'arrange' || !this.prepared || !this.pattern) return;
     this.stopSimulation();
     this.arrangeFromDrape = true;
@@ -1833,6 +2557,7 @@ export class PatternRenderer {
 
   /** Drape from the current arrangement: seed the sim with the moved pieces and simulate. */
   async simulateFromArrangement(): Promise<void> {
+    this.assertNotFrozen();
     if (this.mode !== 'arrange' || !this.prepared) return;
     const fromDrape = this.arrangeFromDrape;
     const seed = this.arrangedSeed();
@@ -1844,16 +2569,15 @@ export class PatternRenderer {
     if (fromDrape) {
       // Move mode: the anchors still target the settled drape, so a soft hold eases the displaced
       // pieces back into place — they "fly back" — then the live sim keeps running until stopped.
-      sim.setSelfCollision(true);
+      sim.setSelfCollision(SIM_CONFIG.handleSelfCollisions);
       sim.setAnchorScale(this.holdAnchor());
       this.liveAnchorScale = this.holdAnchor();
       this.userSimulating = true; // stays live across grabs; Stop bakes the result
     } else {
-      // Flat-arrangement drape: free settle from the user's layout (no cached drape applies);
-      // self-collision off avoids the free-settle curl, matching the interactive-drag behaviour.
+      // Calibrated source assemblies stay live with contacts; retain native repositioning policy.
       sim.setAnchorScale(0);
-      sim.setSelfCollision(false);
-      this.userSimulating = false; // one-shot settle: grab→freeze on release
+      sim.setSelfCollision(this.prepared.collisionSafety ? SIM_CONFIG.handleSelfCollisions : false);
+      this.userSimulating = this.prepared.collisionSafety === true;
     }
     this.bodyDirty = false;
     this.adaptFramesLeft = 0;
@@ -1921,39 +2645,60 @@ export class PatternRenderer {
 
   /** Live snapshot of the solver config (the panel reads this to seed its controls). */
   getSimConfig(): SimConfig {
-    return { ...SIM_CONFIG };
+    const config = this.sim?.simulationConfig ?? (this.prepared?.contactPolicy
+      ? applySourceContactPolicy(SIM_CONFIG, this.prepared.contactPolicy, this.sourceContactOptions).config
+      : SIM_CONFIG);
+    return { ...config, gravity: [...config.gravity] };
   }
 
   /**
-   * Update solver parameters. Anchor/self-collision are uniform writes (apply live); the rest are
-   * baked into the compute shaders at build time, so we rebuild the sim from the current drape and
+   * Update solver parameters. Anchors are uniform writes; self-collision changes provision
+   * collision pipelines, and other parameters are baked into shaders. Rebuild from the current drape and
    * resume — the cloth keeps its shape and the new params take effect immediately.
    */
   async setSimConfig(partial: Partial<SimConfig>): Promise<void> {
+    this.assertNotFrozen();
     const keys = Object.keys(partial) as Array<keyof SimConfig>;
+    const currentConfig = this.getSimConfig();
     const changed = keys.some((key) => {
       const next = partial[key];
-      const current = SIM_CONFIG[key];
+      const current = currentConfig[key];
       return Array.isArray(next) && Array.isArray(current)
         ? next.length !== current.length || next.some((value, index) => value !== current[index])
         : next !== current;
     });
-    if (!changed) return;
+    const options = this.sourceContactOptions ?? (this.sourceContactOptions = {});
+    for (const field of ['simulationThickness', 'edgeThickness'] as const) {
+      if (field in partial) (options.explicitPadding ??= {})[field] = true;
+    }
+    if ('finalContactIterations' in partial) options.explicitFinalContactIterations = true;
+    if ('substepContactIterations' in partial) options.explicitSubstepContactIterations = true;
+    if ('seamIterations' in partial) options.explicitSeamIterations = true;
     Object.assign(SIM_CONFIG, partial);
     // deltaT is derived from timeStep/subSteps (the shaders bake it), so keep it in sync.
     if ('timeStep' in partial || 'subSteps' in partial) {
       SIM_CONFIG.deltaT = SIM_CONFIG.timeStep / Math.max(1, SIM_CONFIG.subSteps);
     }
+    if (!changed) return;
     if (this.sim) this.sim.setSelfCollision(SIM_CONFIG.handleSelfCollisions);
     // Params that change shader code need a rebuilt engine; preserve the live positions across it.
-    // (timeStep/subSteps/max/minVelocity are baked as WGSL constants; useBending gates the bend pass.)
-    const bakedKeys: (keyof SimConfig)[] = ['gravity', 'globalDamping', 'localDamping', 'nearDamping', 'simulationThickness', 'edgeThickness', 'seamStrength', 'selfCollisionFriction', 'externalCollisionFriction', 'seamIterations', 'handleExternalCollisions', 'timeStep', 'subSteps', 'maxVelocity', 'minVelocity', 'useBending'];
+    // Collision flags also provision their pipelines at construction; turning them on needs a rebuild.
+    // timeStep/subSteps/max/minVelocity are WGSL constants; useBending gates the bend pass.
+    const bakedKeys: (keyof SimConfig)[] = ['gravity', 'globalDamping', 'localDamping', 'nearDamping', 'simulationThickness', 'maxSurfaceCorrection', 'finalContactIterations', 'substepContactIterations', 'edgeThickness', 'seamStrength', 'selfCollisionFriction', 'externalCollisionFriction', 'seamIterations', 'handleSelfCollisions', 'handleSelfSurfaceCollisions', 'handleExternalCollisions', 'handleExternalSurfaceCollisions', 'numInternalSurfaceCollisionConstraints', 'numExternalSurfaceCollisionConstraints', 'timeStep', 'subSteps', 'maxVelocity', 'minVelocity', 'useBending'];
     if (!this.sim || !bakedKeys.some((k) => k in partial)) return;
-    const pos = this.sim.positions.slice();
+    const previousSimulation = this.sim;
     const wasSim = this.simulating;
+    const previousFailure = this.simulationFailure;
     this.simulating = false; // halt the loop without firing onDrapeSettled
     this.simRunner?.stop();
-    await Promise.resolve();
+    // Stop scheduling and drain the current readback before capturing support/particle state.
+    await this.activeSimulationStep?.catch(() => undefined);
+    if (this.sim !== previousSimulation || this.disposed) return;
+    const previousPrepared = this.prepared;
+    const pos = previousSimulation.positions.slice();
+    const sourceAssemblyState = previousSimulation.captureSourceAssembly();
+    const assemblyState = previousSimulation.captureAssemblySupport();
+    const resume = wasSim && this.userSimulating && this.simulationFailure === previousFailure;
     this.disposeSimFrame?.();
     this.disposeSimFrame = null;
     this.simRunner?.dispose();
@@ -1961,11 +2706,17 @@ export class PatternRenderer {
     this.sim.dispose();
     this.sim = null;
     const sim = await this.ensureSim();
-    if (!sim) return;
+    // ensureSim installs its result asynchronously; keep that mutation outside TS's null narrowing.
+    const installedSimulation = this.sim as ClothSimulation | null;
+    if (!sim || installedSimulation !== sim || this.disposed || this.prepared !== previousPrepared) return;
     sim.resetTo(pos);
+    // Keep the effective requested/accepted masks and manual gate across a shader rebuild.
+    // Restoration validates topology and requires a fresh accepted proof before cache reuse.
+    if (sourceAssemblyState) sim.restoreSourceAssembly(sourceAssemblyState);
+    if (assemblyState) sim.restoreAssemblySupport(assemblyState);
     this.applyClothPositions(pos);
     sim.setSelfCollision(SIM_CONFIG.handleSelfCollisions);
-    if (wasSim) {
+    if (resume) {
       sim.setAnchorScale(this.liveAnchorScale);
       this.simulating = true;
       this.userSimulating = true;
@@ -1979,6 +2730,7 @@ export class PatternRenderer {
 
   /** Freeze the current drape as a translucent ghost reference (replaces any previous one). */
   freezeSnapshot(opacity = 0.35): void {
+    this.assertNotFrozen();
     this.clearSnapshot();
     if (!this.clothMeshes.length) return;
     const group = new THREE.Group();
@@ -2045,6 +2797,7 @@ export class PatternRenderer {
     // candidate placement: the piece's arrangement re-seated on the hovered marker
     const arr = {
       ...piece.settings3d.arrangement,
+      sourcePlacement: undefined,
       cylinderName: marker.cylinderName, uDegrees: marker.uDegrees, v: marker.v,
       uOffsetMm: 0, vOffsetMm: 0, use2DPosition: false, positionChanged: false
     };
@@ -2155,6 +2908,11 @@ export class PatternRenderer {
 
   /** Animate the camera to an orthographic-style preset around the current target. */
   setCameraView(view: 'front' | 'back' | 'left' | 'right' | 'top' | 'reset'): void {
+    this.beginUserCameraChange();
+    if (view === 'reset' && this.prepared?.collisionSafety) {
+      if (this.fitSourceView()) this.queueCameraSave();
+      return;
+    }
     let toPos: THREE.Vector3;
     let toTgt: THREE.Vector3;
     if (view === 'reset') {
@@ -2179,10 +2937,12 @@ export class PatternRenderer {
     target: THREE.Vector3,
     duration: number
   ): Promise<void> {
+    const patternId = this.sourceCameraPatternId;
+    const diagnosticCamera = this.frozenPending || !!this.frozenDisplay;
     const release = this.viewport.acquireRenderLease('camera-flight');
     try {
       await this.viewport.camera.flyTo(position, target, duration);
-      this.queueCameraSave();
+      if (!diagnosticCamera && this.cameraWritebackEnabled && patternId === this.sourceCameraPatternId) this.queueCameraSave();
     } finally {
       release();
     }
@@ -2210,6 +2970,7 @@ export class PatternRenderer {
   }
 
   setCameraFov(deg: number): void {
+    this.beginUserCameraChange();
     this.viewport.camera.setFov(deg);
     this.invalidate();
     this.queueCameraSave();
@@ -2218,6 +2979,7 @@ export class PatternRenderer {
   /** Capture the current 3D view as a PNG data URL. Renders a fresh frame first, then reads the
    *  canvas in the same tick (so it works without preserveDrawingBuffer). */
   captureImage(): string {
+    this.assertNotFrozen();
     this.refreshPostSettings();
     return this.viewport.captureImage();
   }
@@ -2242,7 +3004,31 @@ export class PatternRenderer {
   }
 
   /** Avatar + visible cloth meshes cloned into a detached group with current world matrices. */
+  private renderedSourcePositions(): Float32Array {
+    if (!this.prepared) throw new Error('The garment is no longer available.');
+    const positions = (this.lastClothPositions ?? this.prepared.simData.positions).slice();
+    const vertex = new THREE.Vector3();
+    for (const entry of this.clothMeshes) {
+      entry.mesh.updateWorldMatrix(true, false);
+      const attribute = entry.geometry.getAttribute('position') as THREE.BufferAttribute;
+      for (let index = 0; index < entry.count; index++) {
+        vertex.fromBufferAttribute(attribute, index).applyMatrix4(entry.mesh.matrixWorld);
+        positions[(entry.start + index) * 4] = vertex.x;
+        positions[(entry.start + index) * 4 + 1] = vertex.y;
+        positions[(entry.start + index) * 4 + 2] = vertex.z;
+      }
+    }
+    return positions;
+  }
+
   private buildExportGroup(): THREE.Group {
+    this.assertNotFrozen();
+    if (this.prepared?.collisionSafety) {
+      // Arrangement gizmos edit the mesh directly. Validate what will actually be exported,
+      // rather than a previous solver buffer that may no longer match the visible garment.
+      const positions = this.renderedSourcePositions();
+      this.assertSourcePositions(positions, true);
+    }
     const group = new THREE.Group();
     if (this.avatar?.mesh && this.avatar.mesh.visible) group.add(this.avatar.mesh.clone());
     for (const e of this.clothMeshes) if (e.baseVisible) group.add(e.mesh.clone());
@@ -2263,6 +3049,8 @@ export class PatternRenderer {
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
+    ++this.frozenRequestRevision; this.frozenPending = false; this.frozenDisplay = null;
+    this.drapeFailureDiagnostics = null;
     this.simulating = false;
     this.releaseSimulationLease?.();
     this.releaseSimulationLease = null;
@@ -2274,6 +3062,7 @@ export class PatternRenderer {
     window.removeEventListener('resize', this.onResize);
     this.controls.removeEventListener('end', this.handleControlsEnd);
     this.controls.removeEventListener('start', this.handleControlsStart);
+    this.controls.removeEventListener('change', this.handleControlsChange);
     if (this.mode === 'arrange') this.exitArrangeMode();
     for (const dispose of this.gizmoDisposers) dispose();
     this.disposeSimFrame?.();

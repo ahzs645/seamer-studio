@@ -7,25 +7,37 @@ import { loadAvatarAssets, loadGenderAssets, type AvatarAssets, type Cylinder, t
 import { solveBodyCoefficients } from './measurements';
 import { reconstructVertices } from './avatar';
 import { SkinnedAvatar } from './skinnedAvatar';
+import { snapshotAvatarBody } from './bodySnapshot';
+import { fitSourceInWorker, type SourceFitMode, type SourceFitWorkerFactory } from './sourceFitWorker';
+import { activeGarmentCodeBody, fitGarmentCodeAvatar } from './garmentCodeFit';
 
 export class AvatarController {
   private assets: AvatarAssets;
+  private sourceFitOptions: { sourceFitMode?: SourceFitMode; sourceFitWorkerFactory?: SourceFitWorkerFactory };
+  private bodyGeneration = 0;
+  private disposed = false;
+  private sourceFitAbort: AbortController | null = null;
   private material: THREE.Material;
   private skinned: SkinnedAvatar | null = null;
   // The reference Studio opens in the avatar's neutral/rest pose. Named poses are opt-in controls;
   // defaulting to T made imported saved garments appear to target a different body silhouette.
   private pose: string | null = null;
+  private poseWasChosen = false;
+  private appliedPose: string | null = null;
+  private automaticPose: string | null = null;
   private gender = 'female';
 
-  private constructor(assets: AvatarAssets, material: THREE.Material) {
+  private constructor(assets: AvatarAssets, material: THREE.Material, options: { sourceFitMode?: SourceFitMode; sourceFitWorkerFactory?: SourceFitWorkerFactory } = {}) {
     this.assets = assets;
+    this.sourceFitOptions = { ...options };
     this.material = material;
   }
 
-  static async create(body: Body, material: THREE.Material): Promise<AvatarController> {
+  static async create(body: Body, material: THREE.Material, options: { sourceFitMode?: SourceFitMode; sourceFitWorkerFactory?: SourceFitWorkerFactory } = {}): Promise<AvatarController> {
+    body = snapshotAvatarBody(body);
     const assets = await loadAvatarAssets();
-    const c = new AvatarController(assets, material);
-    await c.setBody(body);
+    const c = new AvatarController(assets, material, options);
+    try { await c.setBody(body); } catch (error) { c.dispose(); throw error; }
     return c;
   }
 
@@ -41,9 +53,14 @@ export class AvatarController {
    *  blends the male and female statistical models 50/50: both share the base topology, so the
    *  per-gender reconstructions average vertex-for-vertex. */
   async setBody(body: Body): Promise<void> {
-    this.gender = body.gender === 'male' ? 'male' : body.gender === 'neutral' ? 'neutral' : 'female';
+    if (this.disposed) throw new Error('Avatar is disposed.');
+    const generation = ++this.bodyGeneration;
+    this.sourceFitAbort?.abort();
+    body = snapshotAvatarBody(body);
+    const gender = body.gender === 'male' ? 'male' : body.gender === 'neutral' ? 'neutral' : 'female';
+    const current = () => !this.disposed && generation === this.bodyGeneration;
     let verts: Float32Array;
-    if (this.gender === 'neutral') {
+    if (gender === 'neutral') {
       const [fem, mal] = await Promise.all([loadGenderAssets('female'), loadGenderAssets('male')]);
       const reconstruct = (g: typeof fem) => {
         const { coeff } = solveBodyCoefficients(g.model, body);
@@ -54,7 +71,7 @@ export class AvatarController {
       verts = vf;
       for (let i = 0; i < verts.length; i++) verts[i] = (vf[i] + vm[i]) / 2;
     } else {
-      const genderAssets = await loadGenderAssets(this.gender);
+      const genderAssets = await loadGenderAssets(gender);
       const { coeff } = solveBodyCoefficients(genderAssets.model, body);
       verts = reconstructVertices(
         this.assets.baseModel,
@@ -63,6 +80,18 @@ export class AvatarController {
         this.assets.numVertices
       );
     }
+    if (!current()) return;
+    const surfaceSource = activeGarmentCodeBody(body);
+    if (surfaceSource) {
+      const abort = new AbortController(); this.sourceFitAbort = abort;
+      try { verts = await fitSourceInWorker({ vertices: verts, indices: this.assets.indices,
+        skinIndices: this.assets.skinIndices, skinWeights: this.assets.skinWeights, model: this.assets.baseModel, body },
+        { mode: this.sourceFitOptions.sourceFitMode, factory: this.sourceFitOptions.sourceFitWorkerFactory, signal: abort.signal }); }
+      catch (error) { if (!current()) return; throw error; }
+      finally { if (this.sourceFitAbort === abort) this.sourceFitAbort = null; }
+    } else verts = fitGarmentCodeAvatar(verts, this.assets.indices, this.assets.baseModel, body);
+    if (!current()) return;
+    this.gender = gender;
     if (!this.skinned) {
       this.skinned = new SkinnedAvatar(
         this.assets.baseModel,
@@ -72,15 +101,31 @@ export class AvatarController {
         verts,
         this.material
       );
-      this.skinned.setPose(this.pose);
     } else {
       this.skinned.setRestVertices(verts);
     }
+    const sourceBody = activeGarmentCodeBody(body);
+    this.skinned.configureGarmentCodeAPose(sourceBody);
+    this.automaticPose = sourceBody ? 'A' : null;
+    this.appliedPose = this.poseWasChosen ? this.pose : this.automaticPose;
+    this.skinned.setPose(this.appliedPose);
   }
 
   setPose(name: string | null): void {
+    this.poseWasChosen = true;
     this.pose = name;
+    this.appliedPose = name;
     this.skinned?.setPose(name);
+  }
+
+  poseName(): string | null { return this.appliedPose; }
+
+  /** Transfer user intent to an off-scene replacement, retaining its own automatic body pose. */
+  copyPoseSelectionFrom(other: AvatarController): void {
+    this.pose = other.pose;
+    this.poseWasChosen = other.poseWasChosen;
+    this.appliedPose = this.poseWasChosen ? this.pose : this.automaticPose;
+    this.skinned?.setPose(this.appliedPose);
   }
 
   get skinnedAvatar(): SkinnedAvatar | null {
@@ -130,6 +175,7 @@ export class AvatarController {
   }
 
   dispose(): void {
+    this.disposed = true; ++this.bodyGeneration; this.sourceFitAbort?.abort(); this.sourceFitAbort = null;
     this.skinned?.dispose();
   }
 }

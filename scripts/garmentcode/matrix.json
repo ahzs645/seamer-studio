@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "kind": "generated-preset-matrix",
+  "description": "Five generated fixtures from the GarmentCode design space; these are not verified released GarmentCodeData records.",
+  "fixtures": [
+    {
+      "id": "tee-short-164",
+      "request": { "preset": "t-shirt", "body": { "height": 164 } },
+      "limitations": ["Short sleeves, open hems and neckline.", "Height changes independently; omitted measurements remain neutral defaults."]
+    },
+    {
+      "id": "shirt-long-176",
+      "request": {
+        "preset": "t-shirt",
+        "body": { "height": 176 },
+        "design": { "sleeve": { "length": 1.0, "end_width": 0.45, "cuff": { "type": null } } }
+      },
+      "limitations": ["Full-length narrower sleeve openings; no cuff panels.", "Needs fresh source-body arm calibration and independent cloth surface contact checks."]
+    },
+    {
+      "id": "skirt-170",
+      "request": { "preset": "skirt", "body": { "height": 170 } },
+      "limitations": ["Waistband and two skirt panels; waist placement matters.", "No extra anchoring requested; a free waistband may slip during gravity settling."]
+    },
+    {
+      "id": "pants-183",
+      "request": { "preset": "pants", "body": { "height": 183, "waist": 92, "hips": 110, "leg_circ": 62 } },
+      "limitations": ["Trouser crotch, inner-leg joins and waistband.", "Leg girth and the dataset apart-leg stance are not explicitly source-calibrated."]
+    },
+    {
+      "id": "dress-sleeveless-176",
+      "request": {
+        "preset": "dress",
+        "body": { "height": 176, "bust": 101, "waist": 88, "hips": 106 },
+        "design": { "sleeve": { "sleeveless": true } }
+      },
+      "limitations": ["Full-body waist seam, open armholes and skirt volume.", "The existing avatar approximates dimensions; it does not reproduce the original dataset body."]
+    }
+  ]
+}

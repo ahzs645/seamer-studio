@@ -1,29 +1,57 @@
 <script lang="ts">
-  // Preferences — theme, grid/snap, interaction quality, autosave cadence and the 3D stats overlay.
-  // The original buried these across menus; here they live in one panel. All bind to live stores /
-  // utilities so changes take effect immediately and persist (localStorage / theme attribute).
-  import { showGrid, snapToGrid, interactionMode, autoSaveSeconds, show3dStats, showCoordinates } from '$lib/stores/pattern';
+  // Grid and snapping belong to the active pattern; the other preferences belong to this device.
+  import type { Pattern } from '@seamer/pattern-model';
+  import { interactionMode, autoSaveSeconds, show3dStats, showCoordinates } from '$lib/stores/pattern';
   import { isDarkTheme, toggleTheme } from '$lib/utils/theme';
-  import { mcpSessionId, enableMcpSession, disableMcpSession, copyMcpSessionId } from '$lib/stores/mcpSession';
+  import { mcpSessionId, mcpSessionPending, mcpSessionUnavailable, mcpSessionError, enableMcpSession, disableMcpSession, copyMcpSessionId } from '$lib/stores/mcpSession';
 
-  let { onclose }: { onclose: () => void } = $props();
+  interface Props {
+    currentPattern: Pattern;
+    onchange: (pattern: Pattern) => void;
+    onclose: () => void;
+  }
+
+  let { currentPattern, onchange, onclose }: Props = $props();
+  let dialog: HTMLDialogElement;
+  let launcher: HTMLElement | null = null;
+
+  $effect(() => {
+    const element = dialog;
+    launcher = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const focusTarget = launcher;
+    element.showModal();
+    return () => {
+      if (element.open) element.close();
+      if (focusTarget?.isConnected) focusTarget.focus({ preventScroll: true });
+    };
+  });
   let dark = $state(isDarkTheme());
 
   function flipTheme() { toggleTheme(); dark = isDarkTheme(); }
+
+  function closeSettings() {
+    // Close before the parent removes the dialog; native cancellation otherwise races unmount.
+    if (dialog.open) dialog.close();
+    if (launcher?.isConnected) launcher.focus({ preventScroll: true });
+    onclose();
+  }
 </script>
 
-<svelte:window onkeydown={(e) => { if (e.key === 'Escape') onclose(); }} />
-
-<div
-  class="fixed inset-0 z-[200] flex items-center justify-center bg-black/40"
-  role="button" tabindex="-1"
-  onclick={(e) => { if (e.target === e.currentTarget) onclose(); }}
-  onkeydown={() => {}}
+<dialog
+  bind:this={dialog}
+  class="bg-base-100 text-base-content w-[min(440px,92vw)] max-h-[calc(100dvh-2rem)] rounded-lg shadow-2xl p-0 overflow-y-auto backdrop:bg-black/40"
+  aria-labelledby="settings-title"
+  oncancel={(e) => { e.preventDefault(); closeSettings(); }}
+  onclick={(e) => {
+    if (e.target !== e.currentTarget) return;
+    const bounds = e.currentTarget.getBoundingClientRect();
+    if (e.clientX < bounds.left || e.clientX > bounds.right || e.clientY < bounds.top || e.clientY > bounds.bottom) closeSettings();
+  }}
 >
-  <div class="bg-base-100 w-[min(440px,92vw)] rounded-lg shadow-2xl p-4 space-y-3" role="dialog" aria-label="Settings">
+  <div class="p-4 space-y-3">
     <div class="flex items-center justify-between">
-      <h2 class="font-bold text-lg flex items-center gap-2"><span class="material-symbols-rounded">settings</span> Settings</h2>
-      <button class="btn btn-ghost btn-sm btn-square" onclick={onclose} aria-label="Close">✕</button>
+      <h2 id="settings-title" class="font-bold text-lg flex items-center gap-2"><span class="material-symbols-rounded" aria-hidden="true">settings</span> Settings</h2>
+      <button class="btn btn-ghost btn-sm btn-square" onclick={closeSettings} aria-label="Close">✕</button>
     </div>
 
     <div class="space-y-2 text-sm">
@@ -34,25 +62,25 @@
         </button>
       </div>
 
-      <label class="flex items-center justify-between"><span>Show grid</span>
-        <input type="checkbox" class="toggle toggle-sm" checked={$showGrid} onchange={(e) => showGrid.set(e.currentTarget.checked)} /></label>
+      <label class="flex items-center justify-between gap-3 min-h-11 md:min-h-8"><span>Show grid</span>
+        <input type="checkbox" class="toggle toggle-sm" checked={currentPattern.showGrid} onchange={(e) => onchange({ ...currentPattern, showGrid: e.currentTarget.checked })} /></label>
 
-      <label class="flex items-center justify-between"><span>Snap to grid</span>
-        <input type="checkbox" class="toggle toggle-sm" checked={$snapToGrid} onchange={(e) => snapToGrid.set(e.currentTarget.checked)} /></label>
+      <label class="flex items-center justify-between gap-3 min-h-11 md:min-h-8"><span>Snap to grid</span>
+        <input type="checkbox" class="toggle toggle-sm" checked={currentPattern.snapToGrid} onchange={(e) => onchange({ ...currentPattern, snapToGrid: e.currentTarget.checked })} /></label>
 
-      <label class="flex items-center justify-between"><span>Show coordinates</span>
+      <label class="flex items-center justify-between gap-3 min-h-11 md:min-h-8"><span>Show coordinates</span>
         <input type="checkbox" class="toggle toggle-sm" checked={$showCoordinates} onchange={(e) => showCoordinates.set(e.currentTarget.checked)} /></label>
 
       <span class="text-xs font-semibold opacity-70 block pt-1">Interaction</span>
-      <label class="flex items-center justify-between"><span>Interaction mode</span>
+      <label class="flex flex-wrap items-center justify-between gap-2 min-h-11 md:min-h-8"><span>Interaction mode</span>
         <select class="select select-bordered select-sm" value={$interactionMode} onchange={(e) => interactionMode.set(e.currentTarget.value as 'fast' | 'safe')}>
           <option value="safe">Safe (select first)</option><option value="fast">Fast (direct drag)</option>
         </select></label>
 
-      <label class="flex items-center justify-between"><span>3D stats overlay (FPS)</span>
+      <label class="flex items-center justify-between gap-3 min-h-11 md:min-h-8"><span>3D stats overlay (FPS)</span>
         <input type="checkbox" class="toggle toggle-sm" checked={$show3dStats} onchange={(e) => show3dStats.set(e.currentTarget.checked)} /></label>
 
-      <label class="flex items-center justify-between gap-2"><span>Autosave every</span>
+      <label class="flex items-center justify-between gap-2 min-h-11 md:min-h-8"><span>Autosave every</span>
         <span class="flex items-center gap-1">
           <input type="number" min="2" max="120" step="1" class="input input-bordered input-sm w-20" value={$autoSaveSeconds}
             onchange={(e) => {
@@ -66,8 +94,15 @@
         </span></label>
 
       <span class="text-xs font-semibold opacity-70 block pt-1">MCP</span>
-      <label class="flex items-center justify-between"><span>Enable MCP session</span>
-        <input type="checkbox" class="toggle toggle-sm" checked={$mcpSessionId !== null} onchange={(e) => e.currentTarget.checked ? enableMcpSession() : disableMcpSession()} /></label>
+      <label class="flex items-center justify-between gap-3 min-h-11 md:min-h-8"><span>Enable MCP session</span>
+        <input type="checkbox" class="toggle toggle-sm" checked={$mcpSessionId !== null || $mcpSessionPending} disabled={$mcpSessionPending || $mcpSessionUnavailable}
+          aria-describedby="mcp-session-status" onchange={(e) => e.currentTarget.checked ? enableMcpSession() : disableMcpSession()} /></label>
+      <p id="mcp-session-status" class="text-xs text-base-content/60" role="status">
+        {#if $mcpSessionPending}Starting MCP session…
+        {:else if $mcpSessionError}{$mcpSessionError}
+        {:else if $mcpSessionId}MCP session active.
+        {:else}MCP sessions require a server-enabled deployment.{/if}
+      </p>
       {#if $mcpSessionId}
         <div class="flex items-center justify-between gap-2">
           <code class="text-[11px] truncate text-base-content/60" title={$mcpSessionId}>{$mcpSessionId}</code>
@@ -77,6 +112,13 @@
       {/if}
     </div>
 
-    <p class="text-[11px] text-base-content/50">Preferences are saved on this device.</p>
+    <p class="text-[11px] text-base-content/50">Grid and snapping are saved with the pattern. Other preferences are saved on this device.</p>
   </div>
-</div>
+</dialog>
+
+<style>
+  @media (max-width: 767px) {
+    button, select, input[type="number"] { min-height: 44px; }
+    button[aria-label="Close"] { min-width: 44px; }
+  }
+</style>

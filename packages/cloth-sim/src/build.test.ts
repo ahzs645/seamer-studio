@@ -13,6 +13,7 @@ import {
 } from './config';
 import { createEmptyPattern, type Pattern, type Piece, type Material, type Seam } from '@seamer/pattern-model';
 import type { PieceCloth } from './geometry/boundary';
+import { attachGarmentCodeBody } from '@seamer/avatar';
 
 // ---------------------------------------------------------------------------------------------
 // Fixtures
@@ -177,6 +178,94 @@ function seamPartners(sim: ReturnType<typeof buildSimData>, particle: number): n
   return Array.from(sim.seams.slice(particle * 4, particle * 4 + 4)).filter((v) => v !== -1);
 }
 
+function sourceCutFixture() {
+  const band = makePiece('GC_Piece0', ['band-bottom']), skirt = makePiece('GC_Piece1', ['skirt-waist']);
+  band.name = 'wb_front'; skirt.name = 'skirt_front';
+  const placement = { worldMatrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], layoutOffsetMm: { x: 0, y: 0 } };
+  for (const piece of [band, skirt]) piece.settings3d.arrangement = { sourcePlacement: placement } as Piece['settings3d']['arrangement'];
+  const pattern = patternWith([band, skirt], [seamOf('band-bottom', 'skirt-waist')]);
+  pattern.garmentCodeSource = { format: 'garmentcode-json', unitsInMeter: 100, properties: {}, panelNames: ['wb_front', 'skirt_front'] };
+  pattern.body = attachGarmentCodeBody(pattern.body, { height: 170, head_l: 26.3262, waist_line: 36.8913, hips_line: 23.4837, waist: 84.3338, shoulder_w: 36.4568, shoulder_incl: 21.6777 });
+  pattern.materials[0].stretchWarpValue = 12;
+  pattern.materials[0].stretchWeftValue = 14;
+  // The dataset front waistband is451.98mm long and46.9674mm wide. Its skirt edge is
+  // deliberately longer: closing the join must retain each panel's own cut rest length.
+  const rectangular = (id: string, path: string, width: number) => {
+    const cloth = quadCloth(id);
+    cloth.mesh.points = [{ x: 0, y: 0 }, { x: width, y: 0 }, { x: width, y: 46.9674 }, { x: 0, y: 46.9674 }];
+    cloth.edgeParticles.set(path, [0, 1]);
+    return arrangedQuad(cloth, cloth.mesh.points.flatMap(p => [p.x / 1000, p.y / 1000, 0]));
+  };
+  return { pattern, arranged: [rectangular(band.id, 'band-bottom', 451.98), rectangular(skirt.id, 'skirt-waist', 550)] };
+}
+
+function stretchFor(sim: ReturnType<typeof buildSimData>, a: number, b: number) {
+  for (const group of sim.stretchColors) for (let i = 0; i < group.count; i++) {
+    const A = group.edges[i * 4], B = group.edges[i * 4 + 1];
+    if ((A === a && B === b) || (A === b && B === a)) return { rest: group.edges[i * 4 + 2], compliance: group.props[i * 4] };
+  }
+  throw new Error('Missing cut edge');
+}
+
+describe('source panel cut length at sewing boundaries', () => {
+  it('keeps the actual waistband rest edge and authored weft compliance while sewing a longer skirt', () => {
+    const { pattern, arranged } = sourceCutFixture(), sim = buildSimData(pattern, arranged);
+    expect(seamPartners(sim, 0)).not.toHaveLength(0);
+    expect(seamPartners(sim, 1)).not.toHaveLength(0);
+    expect(stretchFor(sim, 0, 1)).toEqual({ rest: Math.fround(.45198), compliance: Math.fround(stretchScaleToCompliance(14)) });
+    expect(stretchFor(sim, 4, 5)).toEqual({ rest: Math.fround(.55), compliance: Math.fround(stretchScaleToCompliance(14)) });
+    expect(sim.sourceStretchPolicy).toMatchObject({ policy: 'source-authored-seam-stretch-v1', retainedSeamStretchEdges: 2, legacySoftenedSeamStretchEdges: 0 });
+    // Fabric constraints connect particles inside one instance. Sewing links are separate.
+    for (const group of sim.stretchColors) for (let i = 0; i < group.count; i++) {
+      expect(group.edges[i * 4] < 4).toBe(group.edges[i * 4 + 1] < 4);
+    }
+  });
+
+  it('leaves native and inactive source boundaries at their exact legacy compliance', () => {
+    const native = sourceCutFixture(); delete native.pattern.garmentCodeSource;
+    const inactive = sourceCutFixture(); inactive.pattern.body.fields.height += 1;
+    for (const fixture of [native, inactive]) {
+      const sim = buildSimData(fixture.pattern, fixture.arranged);
+      expect(stretchFor(sim, 0, 1).compliance).toBe(DISABLED_COMPLIANCE);
+      expect(stretchFor(sim, 4, 5).compliance).toBe(DISABLED_COMPLIANCE);
+      expect(sim.sourceStretchPolicy).toBeUndefined();
+    }
+  });
+
+  it('preserves mixed native additions separately and does not depend on editable panel names', () => {
+    const { pattern, arranged } = sourceCutFixture();
+    pattern.pieces[0].name = 'Renamed waistband';
+    pattern.pieces[1].settings3d.arrangement = null as unknown as Piece['settings3d']['arrangement'];
+    const sim = buildSimData(pattern, arranged);
+    expect(stretchFor(sim, 0, 1).compliance).toBeCloseTo(stretchScaleToCompliance(14), 7);
+    expect(stretchFor(sim, 4, 5).compliance).toBe(DISABLED_COMPLIANCE);
+    expect(sim.sourceStretchPolicy).toMatchObject({ sourcePieceIds: ['GC_Piece0'], retainedSeamStretchEdges: 1, legacySoftenedSeamStretchEdges: 1 });
+  });
+
+  it('requires finite source placement and measured provenance, independent of contact thickness', () => {
+    const invalid = sourceCutFixture(); invalid.pattern.pieces[0].settings3d.arrangement.sourcePlacement!.worldMatrix[0] = NaN;
+    expect(stretchFor(buildSimData(invalid.pattern, invalid.arranged), 0, 1).compliance).toBe(DISABLED_COMPLIANCE);
+    const unmeasured = sourceCutFixture(); delete unmeasured.pattern.body.garmentCodeBody;
+    expect(stretchFor(buildSimData(unmeasured.pattern, unmeasured.arranged), 0, 1).compliance).toBe(DISABLED_COMPLIANCE);
+    const invalidUnits = sourceCutFixture(); invalidUnits.pattern.garmentCodeSource!.unitsInMeter = NaN;
+    expect(stretchFor(buildSimData(invalidUnits.pattern, invalidUnits.arranged), 0, 1).compliance).toBe(DISABLED_COMPLIANCE);
+    const material = sourceCutFixture(); material.pattern.materials[0].thickness = NaN;
+    expect(stretchFor(buildSimData(material.pattern, material.arranged), 0, 1).compliance).toBeCloseTo(stretchScaleToCompliance(14), 7);
+  });
+
+  it('keeps authored warp/blended interior stiffness and the existing bending policy', () => {
+    const { pattern, arranged } = sourceCutFixture();
+    const before = buildSimData(pattern, arranged);
+    delete pattern.garmentCodeSource;
+    const native = buildSimData(pattern, arranged);
+    expect(stretchFor(before, 1, 2)).toEqual(stretchFor(native, 1, 2));
+    expect(bendConstraints(before)).toEqual(bendConstraints(native));
+    expect(before.positions).toEqual(native.positions);
+    expect(before.triangles).toEqual(native.triangles);
+    expect(before.seams).toEqual(native.seams);
+  });
+});
+
 // ---------------------------------------------------------------------------------------------
 
 describe('bend props buffer', () => {
@@ -306,6 +395,20 @@ describe('seam linking', () => {
     expect(seamPartners(sim, 0)).toEqual([6]);
     expect(seamPartners(sim, 1)).toEqual([5]);
     expect(seamPartners(sim, 2)).toEqual([4]);
+  });
+
+  it.each([false, true])('preserves literal false/false interchange seam direction (cached=%s)', (cached) => {
+    const seam = seamOf('eA', 'eB');
+    seam.explicitOrientation = true;
+    const pattern = patternWith([makePiece('P1', ['eA']), makePiece('P2', ['eB'])], [seam]);
+    const sim = buildSimData(pattern, [
+      arrangedQuad(quadCloth('P1', 'eA'), QUAD_POS_A, { fromSaved: cached }),
+      arrangedQuad(quadCloth('P2', 'eB'), QUAD_POS_B_REVERSED, { fromSaved: cached })
+    ]);
+    // Nearest geometry would reverse B, but the source declares index-to-index stitching.
+    expect(seamPartners(sim, 0)).toEqual([4]);
+    expect(seamPartners(sim, 1)).toEqual([5]);
+    expect(seamPartners(sim, 2)).toEqual([6]);
   });
 
   it('uses cached drape coincidence to repair an explicit orientation invalidated by rebuilt edge order', () => {

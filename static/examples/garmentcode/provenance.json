@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/maria-korosteleva/GarmentCode",
+  "commit": "d449629979028123a5c4dc9e732a2ec19b7fce31",
+  "license": "MIT",
+  "source_directory": "assets/Patterns",
+  "description": "Original bundled pattern specifications; initial panel placement, not simulated drapes."
+}

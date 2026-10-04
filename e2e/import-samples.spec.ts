@@ -1,7 +1,11 @@
 import { expect, test, type Page } from '@playwright/test';
 
 test.beforeEach(async ({ page }) => {
-	await page.addInitScript(() => localStorage.setItem('seamer.welcomeSeen', '1'));
+	await page.addInitScript(() => {
+		localStorage.setItem('seamer.welcomeSeen', '1');
+		// Explicit-save cases must observe dirty state before the autosave interval.
+		localStorage.setItem('seamer.autosaveSeconds', '120');
+	});
 });
 
 async function openStudio(page: Page) {
@@ -58,7 +62,8 @@ test.describe('Import samples', () => {
 		await openStudio(page);
 		await page.getByTestId('templates-menu-trigger').click();
 		await expect(page.getByText('Complete SSP samples (21)')).toBeVisible();
-		await expect(page.locator('[data-testid^="template-"]')).toHaveCount(23);
+		// 21 SSP projects, two drafting templates, and the lantern generator.
+		await expect(page.locator('[data-testid^="template-"]')).toHaveCount(25);
 
 		const sampleResponse = page.waitForResponse((response) =>
 			response.url().endsWith('/templates/reference-ssp/04-panty-block.seamer.ssp') && response.ok()
@@ -94,13 +99,17 @@ test.describe('Import samples', () => {
 
 	test('an import becomes the active unsaved document and survives save/reload', async ({ page }) => {
 		await page.goto('/studio', { waitUntil: 'domcontentloaded' });
-		const patternName = page.getByRole('textbox', { name: 'Pattern name...' });
+		const patternName = page.getByTestId('pattern-name-input');
 		await expect(patternName).toHaveValue('Pencil skirt - 3D');
 		await page.getByRole('button', { name: 'Import', exact: true }).click();
 		await page.getByRole('button', { name: 'Two pieces (SVG)', exact: true }).click();
 
 		await expect(page.getByText('Imported "two-pieces"')).toBeVisible();
 		await expect(patternName).toHaveValue('two-pieces');
+		const importedGeometry = await page.evaluate(() => {
+			const document = window.seamer!.getPattern();
+			return { points: document.points, paths: document.paths, pieces: document.pieces.map(({ id, mainPaths, internalPaths }) => ({ id, mainPaths, internalPaths })) };
+		});
 		expect(new URL(page.url()).pathname).toMatch(/\/studio\/[^/]+$/);
 		const importedUrl = page.url();
 
@@ -111,8 +120,11 @@ test.describe('Import samples', () => {
 		await expect(page.getByRole('button', { name: 'Saved', exact: true })).toBeVisible();
 		await page.reload({ waitUntil: 'domcontentloaded' });
 		expect(page.url()).toBe(importedUrl);
-		await expect(page.getByRole('textbox', { name: 'Pattern name...' })).toHaveValue('two-pieces');
-		await expect(page.getByText('P:8 · Paths:8 · Pieces:2 · Seams:0')).toBeVisible();
+		await expect(page.getByTestId('pattern-name-input')).toHaveValue('two-pieces');
+		await expect.poll(() => page.evaluate(() => {
+			const document = window.seamer!.getPattern();
+			return { points: document.points, paths: document.paths, pieces: document.pieces.map(({ id, mainPaths, internalPaths }) => ({ id, mainPaths, internalPaths })) };
+		})).toEqual(importedGeometry);
 	});
 
 	test('object browser lists imported pieces', async ({ page }) => {

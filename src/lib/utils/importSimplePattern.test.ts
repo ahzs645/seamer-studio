@@ -1,12 +1,63 @@
 /// <reference types="node" />
 
 import { readFileSync } from 'node:fs';
+import { gunzipSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
 import { buildPieceCloth, computeSeamEdgeIntervals } from '@seamer/cloth-sim';
 import { assertPatternBuildable3d, convertSimplePattern, convertSimplePatternWithLegacyProject, type SimpleFile } from './importSimplePattern';
+import { referenceSspTemplates } from '$lib/data/referenceSspTemplates';
+import type { Pattern } from '@seamer/pattern-model';
 
 const LEGACY_PENCIL_SKIRT = new URL('../../../e2e/fixtures/pencil-skirt-legacy.json', import.meta.url);
 const CANONICAL_PENCIL_SKIRT = new URL('../../../static/templates/pencil-skirt.json', import.meta.url);
+
+describe('3D import perimeter validation', () => {
+  function polygon(vertices: [number, number][]): Pattern {
+    const geometry = vertices.map((point, index) => [point, vertices[(index + 1) % vertices.length]]);
+    return convertSimplePattern({
+      name: 'Imported outline',
+      pieces: [{ name: 'Panel', boundary: geometry, sewLines: geometry }]
+    });
+  }
+
+  it('rejects a bow-tie even when tolerant legacy triangulation produces a mesh', () => {
+    const pattern = polygon([[0, 0], [100, 100], [0, 100], [100, 0]]);
+    expect(() => assertPatternBuildable3d(pattern)).toThrow(/Cannot import.*boundary crosses/);
+  });
+
+  it('allows a valid concave outline', () => {
+    const pattern = polygon([[0, 0], [100, 0], [100, 40], [40, 40], [40, 100], [0, 100]]);
+    expect(() => assertPatternBuildable3d(pattern)).not.toThrow();
+  });
+
+  it('rejects a crossing located exactly at intermediate line samples', () => {
+    const geometry: [number, number][][] = [
+      [[0, 0], [50, 50], [100, 100]], [[100, 100], [0, 100]],
+      [[0, 100], [50, 50], [100, 0]], [[100, 0], [0, 0]]
+    ];
+    const pattern = convertSimplePattern({
+      name: 'Sampled bow-tie', pieces: [{ name: 'Panel', boundary: geometry, sewLines: geometry }]
+    });
+    expect(() => assertPatternBuildable3d(pattern)).toThrow(/boundary crosses/);
+  });
+
+  it('leaves crossing outlines available for intentionally disabled 3D drafting', () => {
+    const pattern = polygon([[0, 0], [100, 100], [0, 100], [100, 0]]);
+    pattern.enable3d = false;
+    expect(() => assertPatternBuildable3d(pattern)).not.toThrow();
+    pattern.enable3d = true;
+    pattern.pieces[0].settings3d.enable3d = false;
+    expect(() => assertPatternBuildable3d(pattern)).not.toThrow();
+  });
+
+  it.each(['reference-ssp/10-pencil-skirt-3d.seamer.ssp', ...referenceSspTemplates.map((template) => template.file)])(
+    'keeps bundled curved and concave garment %s importable', (file) => {
+      const bytes = readFileSync(new URL(`../../../static/templates/${file}`, import.meta.url));
+      const pattern = JSON.parse(gunzipSync(bytes).toString('utf8')) as Pattern;
+      expect(() => assertPatternBuildable3d(pattern)).not.toThrow();
+    }
+  );
+});
 
 describe('convertSimplePattern legacy pencil skirt', () => {
   const source = JSON.parse(readFileSync(LEGACY_PENCIL_SKIRT, 'utf8')) as SimpleFile;

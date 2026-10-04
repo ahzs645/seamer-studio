@@ -3,6 +3,7 @@
   import { editorState } from '@atelier/svelte';
   import { selectedTool, zoom } from '$lib/stores/pattern';
   import type { Pattern } from '@seamer/pattern-model';
+  import { canUseDrawingShortcut } from '$lib/utils/keyboard';
 
   interface Props {
     currentPattern: Pattern;
@@ -27,16 +28,12 @@
   function zoomOut() { zoom.update((v) => Math.max(0.02, v * 0.8)); }
 
   function handleKeydown(e: KeyboardEvent) {
-    const t = e.target;
-    if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement || (t instanceof HTMLElement && t.isContentEditable)) return;
-    if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return; // plain keys only (Cmd+V etc. are app-level)
-    // while the pointer is over the 3D pane, plain keys (M/A/Space) belong to the 3D scene's shortcuts
-    if (document.querySelector('[data-testid="pattern-scene-3d"]:hover')) return;
+    if (!canUseDrawingShortcut(e) || e.shiftKey) return;
     // M doubles as "mirror selection" — an active selection wins over the measure tool
     if (e.key.toLowerCase() === 'm' &&
         (editorView.selection.get('point').size || editorView.selection.get('path').size || editorView.selection.get('piece').size)) return;
     const tool = tools.find((t) => t.hotkey?.toLowerCase() === e.key.toLowerCase());
-    if (tool) selectedTool.set(tool.id);
+    if (tool) { e.preventDefault(); selectedTool.set(tool.id); }
   }
 
   $effect(() => {
@@ -49,6 +46,9 @@
   <div class="join join-horizontal">
     {#each tools as tool}
       <button
+        type="button"
+        aria-label={tool.label}
+        aria-pressed={$selectedTool === tool.id}
         class="join-item btn btn-xs tooltip tooltip-top"
         data-tip="{tool.label}{tool.hotkey ? ' (' + tool.hotkey + ')' : ''}"
         class:btn-active={$selectedTool === tool.id}

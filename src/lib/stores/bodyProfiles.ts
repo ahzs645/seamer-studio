@@ -14,8 +14,8 @@ export interface BodyProfile {
 const KEY = 'seamer.bodyProfiles';
 
 function load(): BodyProfile[] {
-  if (typeof localStorage === 'undefined') return [];
   try {
+    if (typeof localStorage === 'undefined') return [];
     const raw = localStorage.getItem(KEY);
     const list = raw ? (JSON.parse(raw) as BodyProfile[]) : [];
     return Array.isArray(list) ? list : [];

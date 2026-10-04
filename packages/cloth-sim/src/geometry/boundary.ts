@@ -18,6 +18,12 @@ export interface PieceCloth {
   mesh: ClothMesh;
   /** ordered boundary particle indices per PiecePath id (for seam correspondence) */
   edgeParticles: Map<string, number[]>;
+  /** Original sewing knots; absent for unrefined/native topology. */
+  stitchEdgeParticles?: Map<string, number[]>;
+  /** Explicit captured final model weights for a refined free source piece. */
+  capturedInverseMass?: Float32Array;
+  /** Local child law overrides from the already clamped original boundary row. */
+  gatherAxialOverrides?: import('../sourceGatherRefinement').GatherAxialOverride[];
   /** 2D centroid (mm) of the boundary, used by arrangement */
   particleDistanceMm: number;
 }
@@ -57,12 +63,14 @@ function properlyIntersects(a: Vec2, b: Vec2, c: Vec2, d: Vec2): boolean {
 }
 
 /**
- * Legacy sampled outlines can contain sub-millimetre wedges that make the strict constrained
- * triangulator reject an otherwise usable mesh when its area check misses a few slivers. SeamScape
- * accepted these public garments. This fallback keeps the same 10 mm interior density and rejects
- * triangles outside/crossing the outline, but deliberately tolerates those boundary slivers.
+ * Retry simple outlines whose authored short edges violate the triangulator's mesh-quality
+ * thresholds. Strict recovery keeps all vertices/segments and checks area and manifold incidence.
+ * The legacy SeamScape mode additionally tolerates the slivers its original importer accepted.
+ * Both modes retain interior particle density and reject triangles outside/crossing the outline.
  */
-function triangulateLegacyOutline(outer: Vec2[], internalPoints: Vec2[], spacing: number): ClothMesh {
+function triangulateOutlineRecovery(
+  outer: Vec2[], internalPoints: Vec2[], spacing: number, preserveConstraints = false
+): ClothMesh {
   const minX = Math.min(...outer.map((point) => point.x));
   const maxX = Math.max(...outer.map((point) => point.x));
   const minY = Math.min(...outer.map((point) => point.y));
@@ -103,10 +111,12 @@ function triangulateLegacyOutline(outer: Vec2[], internalPoints: Vec2[], spacing
       (all[b].x - all[a].x) * (all[c].y - all[a].y)
       - (all[b].y - all[a].y) * (all[c].x - all[a].x)
     ) / 2;
-    if (area < spacing * spacing * 0.001) continue;
+    // An authored seam edge can be shorter than the particle spacing. Dropping its narrow adjacent
+    // triangle loses that constraint and leaves a hole; strict recovery retains nondegenerate faces.
+    if (area < (preserveConstraints ? 1e-10 : spacing * spacing * 0.001)) continue;
     kept.push(a, b, c);
   }
-  if (kept.length < 3) throw new Error('Legacy outline fallback produced no cloth triangles');
+  if (kept.length < 3) throw new Error('Outline recovery produced no cloth triangles');
 
   const originalToCompact = new Int32Array(all.length).fill(-1);
   const points: Vec2[] = [];
@@ -128,13 +138,39 @@ function triangulateLegacyOutline(outer: Vec2[], internalPoints: Vec2[], spacing
     ] as [number, number][]) edgeSet.set(edgeKey(a, b), [a, b]);
   }
   const boundary = outer.map((_point, index) => originalToCompact[index]);
+  const internal = internalPoints.map((_point, index) => originalToCompact[outer.length + index]);
+  if (preserveConstraints) {
+    if ([...boundary, ...internal].some((index) => index < 0)) throw new Error('Boundary recovery lost an authored constraint');
+    const incidence = new Map<number, number>();
+    for (let i = 0; i < triangles.length; i += 3) {
+      for (const [a, b] of [[triangles[i], triangles[i + 1]], [triangles[i + 1], triangles[i + 2]], [triangles[i + 2], triangles[i]]]) {
+        const key = edgeKey(a, b);
+        incidence.set(key, (incidence.get(key) ?? 0) + 1);
+      }
+    }
+    const boundaryEdges = new Set(boundary.map((a, index) => edgeKey(a, boundary[(index + 1) % boundary.length])));
+    for (const [key, count] of incidence) {
+      if (count !== (boundaryEdges.has(key) ? 1 : 2)) throw new Error('Boundary recovery produced a non-manifold edge');
+    }
+    if ([...boundaryEdges].some((key) => incidence.get(key) !== 1)) throw new Error('Boundary recovery lost an authored segment');
+    const expected = Math.abs(outer.reduce((sum, p, index) => {
+      const next = outer[(index + 1) % outer.length];
+      return sum + p.x * next.y - next.x * p.y;
+    }, 0)) / 2;
+    const actual = kept.reduce((sum, _vertex, index) => {
+      if (index % 3) return sum;
+      const a = all[kept[index]], b = all[kept[index + 1]], c = all[kept[index + 2]];
+      return sum + Math.abs((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)) / 2;
+    }, 0);
+    if (Math.abs(actual - expected) > Math.max(1e-7, expected * 1e-9)) throw new Error('Boundary recovery produced an incomplete mesh');
+  }
   return {
     points,
     triangles,
     edges: [...edgeSet.values()],
     boundary,
     numBoundary: boundary.filter((index) => index >= 0).length,
-    internal: internalPoints.map((_point, index) => originalToCompact[outer.length + index])
+    internal
   };
 }
 
@@ -174,6 +210,49 @@ function resample(poly: Vec2[], spacing: number, forceIntervals?: number): Vec2[
 interface LoopEdge {
   ppId: string;
   poly: Vec2[];
+}
+
+/** Refine the distal cross-arm boundary on source arm panels. The importer keeps
+ * semantic panel labels and rigid placement separately from the editable 2D
+ * layout; neither a fixture filename nor the canvas offset identifies a hem. */
+function sourceArmHem(pattern: Pattern, piece: Piece, edges: LoopEdge[]): string | null {
+  const source = pattern.garmentCodeSource, placement = piece.settings3d.arrangement.sourcePlacement;
+  if (source?.format !== 'garmentcode-json' || !source.panelNames.includes(piece.name) || !placement) return null;
+  const sleeve = /^(?:left|right)_sleeve(?:_[fb])?$/.test(piece.name);
+  const cuff = /^sl_(?:left|right)_cuff_[fb]$/.test(piece.name);
+  if (piece.label !== 'arm' && !sleeve && !cuff) return null;
+  const matrix = placement.worldMatrix;
+  if (matrix.length !== 16 || matrix.some(n => !Number.isFinite(n))) return null;
+  const offset = placement.layoutOffsetMm;
+  const world = (p: Vec2) => {
+    const x = (p.x - offset.x) / 1000, y = (p.y - offset.y) / 1000;
+    return [matrix[0] * x + matrix[4] * y + matrix[12],
+      matrix[1] * x + matrix[5] * y + matrix[13], matrix[2] * x + matrix[6] * y + matrix[14]];
+  };
+  const vertices = edges.flatMap(edge => edge.poly.map(world));
+  if (!vertices.length) return null;
+  const sign = Math.sign(vertices.reduce((sum, p) => sum + p[0], 0));
+  if (!sign) return null;
+  const metadata = source.properties.garmentcode_body;
+  const angle = metadata && typeof metadata === 'object' ? (metadata as Record<string, unknown>).arm_pose_angle : undefined;
+  let axis: number[];
+  if (typeof angle === 'number' && Number.isFinite(angle) && angle >= 0 && angle <= 90) {
+    axis = [sign * Math.cos(angle * Math.PI / 180), -Math.sin(angle * Math.PI / 180), 0];
+  } else if (sleeve || cuff) {
+    // Older source examples lack body measurements: standard sleeve components
+    // run along local X, cuff bands along local Y. Orient their source axis outward.
+    const start = cuff ? 4 : 0;
+    axis = matrix.slice(start, start + 3);
+    const direction = sign * axis[0] < 0 ? -1 : 1;
+    axis = axis.map(n => n * direction);
+  } else return null;
+  const candidates = edges.flatMap(edge => {
+    const points = edge.poly.map(world), a = points[0], b = points.at(-1)!;
+    const direction = b.map((n, i) => n - a[i]), length = Math.hypot(...direction);
+    if (length < 1e-8 || Math.abs(direction.reduce((sum, n, i) => sum + n * axis[i], 0)) > 0.3 * length) return [];
+    return [{ id: edge.ppId, distal: points.reduce((sum, p) => sum + p.reduce((dot, n, i) => dot + n * axis[i], 0), 0) / points.length }];
+  }).sort((a, b) => b.distal - a.distal);
+  return candidates[0]?.id ?? null;
 }
 
 /** Stitch the mainPath edges into an ordered closed loop by matching shared endpoints. */
@@ -217,13 +296,25 @@ export function computeSeamEdgeIntervals(pattern: Pattern): Map<string, number> 
   const paths = indexPaths(pattern);
   const points = indexPoints(pattern);
   const out = new Map<string, number>();
+  const fineIntervals = new Map<string, number>();
   // pd + polyline length per PiecePath id (owner piece determines pd)
   const info = new Map<string, { len: number; pd: number }>();
   for (const piece of pattern.pieces) {
     const pd = piece.settings3d.particleDistance ?? DEFAULT_PARTICLE_DISTANCE;
+    const edges = piece.mainPaths.map(path => ({ ppId: path.id,
+      poly: piecePathPolyline(path, paths, points, Math.min(4, pd / 2)) }));
+    const hem = sourceArmHem(pattern, piece, edges);
     for (const pp of [...piece.mainPaths, ...piece.internalPaths]) {
       const poly = piecePathPolyline(pp, paths, points, Math.min(4, pd / 2));
-      if (poly.length >= 2) info.set(pp.id, { len: polylineLength(poly), pd });
+      if (poly.length >= 2) {
+        const global = pattern.settings3d.globalParticleDistanceOverride;
+        const len = polylineLength(poly), edgeDistance = pp.id === hem ? Math.min(pd, global && global > 0 ? global : pd, 10) : pd;
+        info.set(pp.id, { len, pd: edgeDistance });
+        if (pp.id === hem) {
+          const minimum = Math.max(1, Math.ceil(len / edgeDistance));
+          out.set(pp.id, minimum); fineIntervals.set(pp.id, minimum);
+        }
+      }
     }
   }
   const sides = new Map<string, {
@@ -248,7 +339,10 @@ export function computeSeamEdgeIntervals(pattern: Pattern): Map<string, number> 
     const toLength = to.items.reduce((sum, item) => sum + item.len, 0);
     const distances = [...from.items, ...to.items].map((item) => item.pd).filter((pd) => pd > 0);
     const particleDistance = distances.length ? Math.min(...distances) : DEFAULT_PARTICLE_DISTANCE;
-    seamCounts.set(seam.id, Math.max(1, Math.ceil(Math.max(fromLength, toLength) / particleDistance)));
+    const refined = [...from.refs, ...to.refs].some(ref => fineIntervals.has(ref.id));
+    const minimum = (value: ReturnType<typeof side>) => value.refs.reduce((sum, ref) => sum + (fineIntervals.get(ref.id) ?? 1), 0);
+    seamCounts.set(seam.id, Math.max(1, Math.ceil(Math.max(fromLength, toLength) / particleDistance),
+      refined ? Math.max(minimum(from), minimum(to)) : 1));
   }
 
   // A path participating in several seams uses their largest count. Iterate to a fixed point so
@@ -281,7 +375,7 @@ export function computeSeamEdgeIntervals(pattern: Pattern): Map<string, number> 
     const distribute = (s: ReturnType<typeof side>) => {
       const totalLen = s.items.reduce((a, it) => a + it.len, 0) || 1;
       const raw = s.items.map((it) => (intervalCount * it.len) / totalLen);
-      const base = raw.map((r) => Math.max(1, Math.floor(r)));
+      const base = raw.map((r, i) => Math.max(fineIntervals.get(s.refs[i].id) ?? 1, Math.floor(r)));
       let rem = intervalCount - base.reduce((a, b) => a + b, 0);
       const order = raw.map((r, i) => ({ i, frac: r - Math.floor(r) })).sort((a, b) => b.frac - a.frac);
       for (let k = 0; rem > 0 && k < order.length; k++, rem--) base[order[k].i]++;
@@ -310,6 +404,7 @@ export function buildPieceCloth(
     .map((pp) => ({ ppId: pp.id, poly: piecePathPolyline(pp, paths, points, Math.min(4, pd / 2)) }))
     .filter((e) => e.poly.length >= 2);
   if (rawEdges.length === 0) return null;
+  const fineHem = sourceArmHem(pattern, piece, rawEdges);
 
   let loop = stitchLoop(rawEdges);
 
@@ -330,7 +425,8 @@ export function buildPieceCloth(
   const edgeOuterRanges = new Map<string, number[]>();
   for (let li = 0; li < loop.length; li++) {
     const e = loop[li];
-    const rs = resample(e.poly, pd, edgeIntervals?.get(e.ppId));
+    const intervals = edgeIntervals?.get(e.ppId) ?? (e.ppId === fineHem ? Math.ceil(polylineLength(e.poly) / Math.min(pd, 10)) : undefined);
+    const rs = resample(e.poly, pd, intervals);
     const idxs: number[] = [];
     for (let i = 0; i < rs.length; i++) {
       // skip the first point if it duplicates the current tail (shared endpoint)
@@ -406,9 +502,13 @@ export function buildPieceCloth(
       grid: piece.grainVector
     });
   } catch (error) {
-    if (piece.legacyGeometry?.format !== 'seamscape-json') throw error;
-    console.warn(`Piece "${piece.name}" used tolerant SeamScape outline triangulation`);
-    mesh = triangulateLegacyOutline(outer, internalPoints, pd);
+    try {
+      mesh = triangulateOutlineRecovery(outer, internalPoints, pd, true);
+    } catch {
+      if (piece.legacyGeometry?.format !== 'seamscape-json') throw error;
+      console.warn(`Piece "${piece.name}" used tolerant SeamScape outline triangulation`);
+      mesh = triangulateOutlineRecovery(outer, internalPoints, pd);
+    }
   }
 
   // Map outer-input indices -> compacted particle indices via mesh.boundary (aligned to outer order).

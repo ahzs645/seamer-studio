@@ -112,7 +112,7 @@
   $effect(() => () => { stopPlaying(); controller?.abort(); });
 </script>
 
-<div class="bg-base-200/95 backdrop-blur rounded-lg shadow-lg p-3 text-xs w-[30rem] max-w-[calc(100vw-2rem)]">
+<div class="assembly-timeline bg-base-200/95 backdrop-blur rounded-lg shadow-lg p-3 text-xs w-[30rem] max-w-[calc(100vw-2rem)]" role="group" aria-label="Assembly timeline">
   <div class="flex items-center justify-between mb-2">
     <span class="font-bold">Assembly timeline</span>
     <button class="btn btn-ghost btn-xs btn-circle" onclick={close} aria-label="Close">✕</button>
@@ -183,3 +183,14 @@
     </div>
   {/if}
 </div>
+
+<style>
+  @media (pointer: coarse) {
+    .assembly-timeline button.btn, .assembly-timeline button.btn:active {
+      min-height: 44px; min-width: 44px;
+      --btn-focus-scale: 1;
+      animation: none; transform: none;
+    }
+    .assembly-timeline input[type='range'] { min-height: 44px; }
+  }
+</style>

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick, untrack } from 'svelte';
   import { viewport as viewportAction } from '@atelier/svelte';
   import { docToWorld, type Viewport } from '@atelier/viewport';
   import {
@@ -10,13 +10,16 @@
     type Pattern,
     type SeamPick
   } from '@seamer/pattern-model';
-  import { PatternRenderer, type DrapeDebugState, type RendererStatus, type SceneMode } from '$lib/scene/scene3d';
+  import { PatternRenderer, type DrapeDebugState, type DrapeFailureDiagnostics, type RendererStatus, type SceneMode } from '$lib/scene/scene3d';
+  import type { FrozenAppRenderRequest, FrozenAppRenderReceipt } from '$lib/scene/frozenAppRender';
+  import { compatibleSourceBodyCheckpoint } from '$lib/scene/sourceBodyCheckpoint';
   import AssemblyTimeline from '$lib/components/AssemblyTimeline.svelte';
   import { createSeamerAoPass } from '$lib/scene/n8aoPost';
   import type { SimConfig } from '@seamer/cloth-sim';
   import { isDarkTheme, toggleTheme, applyStoredTheme, onThemeChange } from '$lib/utils/theme';
   import { show3dStats, simAnchors, selectedTool, seamTool, selectedSeamId, bodyZoomRequest } from '$lib/stores/pattern';
   import { get } from 'svelte/store';
+  import { isAppShortcutBlocked } from '$lib/utils/keyboard';
   import { downloadBlob, sceneToGLTF } from '$lib/utils/exporters';
   import { toast, toastError, toastSuccess } from '$lib/stores/toast';
   import { confirm } from '$lib/stores/confirm';
@@ -37,19 +40,20 @@
 
   interface Props {
     currentPattern: Pattern;
+    onfrozendiagnosticchange?: (active: boolean) => void;
     selectedPieceId?: string | null;
     onpieceselect?: (id: string | null) => void;
     labelDisplay?: 'off' | 'billboard' | 'flat';
     onlabeldisplaychange?: (value: 'off' | 'billboard' | 'flat') => void;
     /** Fired when a user-run drape settles, with per-piece settled savedPositions to persist. */
-    ondrapesettled?: (savedByPiece: Record<string, number[]>) => void;
+    ondrapesettled?: (savedByPiece: Record<string, number[]>, sourceStretchPolicy: ReturnType<PatternRenderer['getSourceStretchPolicy']>, sourceAssemblyComplete: boolean | null, sourceGatherPolicy?: ReturnType<PatternRenderer['getSourceGatherCacheMarker']>, sourceGatherIntent?: 'manual') => void;
     /** Undo-aware pattern update (arrangement-point snaps, freeze toggle). */
     onpatternupdate?: (p: Pattern, label?: string) => void;
     /** Non-undo camera write-back so the view survives a reload. */
     oncamerachange?: (pos: [number, number, number], target: [number, number, number], fov: number) => void;
   }
 
-  let { currentPattern, selectedPieceId = null, onpieceselect, labelDisplay = 'flat', onlabeldisplaychange, ondrapesettled, onpatternupdate, oncamerachange }: Props = $props();
+  let { currentPattern, selectedPieceId = null, onpieceselect, labelDisplay = 'flat', onlabeldisplaychange, ondrapesettled, onpatternupdate, oncamerachange, onfrozendiagnosticchange }: Props = $props();
 
   const docMmToWorld = (mm: number): number => docToWorld({ x: mm, y: 0 }).x;
   const worldToDocMm = (metres: number): number =>
@@ -57,16 +61,24 @@
 
   let viewportInstance: Viewport | null = null;
   let renderer: PatternRenderer | null = null;
+  let sceneShell: HTMLDivElement;
+
+  /** File imports can replace a document while retaining its id. */
+  export function beginCameraDocument() { renderer?.beginCameraDocument(); }
 
   /** Stable project-export checkpoint. Current particle positions are captured even while the
    *  solver is running; import resumes from this geometry with zero velocity. */
   export function captureProjectState() {
-    if (!renderer) return null;
+    if (!renderer || frozenReadOnly) return null;
     const camera = renderer.getCameraState();
     let previewDataUrl: string | null = null;
     try { previewDataUrl = renderer.captureImage(); } catch { /* 2D preview remains the fallback */ }
     return {
       savedByPiece: renderer.extractSavedPositions(),
+      sourceStretchPolicy: renderer.getSourceStretchPolicy(),
+      sourceAssemblyComplete: renderer.getSourceAssemblyComplete(),
+      sourceGatherPolicy: renderer.getSourceGatherCacheMarker(),
+      sourceGatherIntent: renderer.getSourceGatherIntent(),
       cameraPosition: camera.position,
       controlsTarget: camera.target,
       cameraFov: camera.fov,
@@ -74,9 +86,36 @@
       previewDataUrl
     };
   }
-  type DrapeDebugApi = { getState: () => DrapeDebugState | null };
+  let frozenReadOnly = $state(false);
+  let frozenUiRevision = 0;
+  let frozenReceipt = $state<FrozenAppRenderReceipt | null>(null);
+  async function presentFrozenCheckpoint(request: FrozenAppRenderRequest) {
+    if (!import.meta.env.DEV || !renderer || frozenReadOnly) throw new Error('A ready development 3D view is required.');
+    const target = renderer, document = currentPattern, requestRevision = ++frozenUiRevision;
+    frozenReadOnly = true; onfrozendiagnosticchange?.(true);
+    clearTimeout(rebuildTimer);
+    try {
+      // Flush the genuine pending document build; frozen data cannot create or approve preparation.
+      if (!await target.setPattern(document) || currentPattern !== document || renderer !== target || requestRevision !== frozenUiRevision) throw new Error('The source document changed during preparation.');
+      builtSigs = pieceSigs(document); lastKey = patternKey(document); lastDrapeKey = drapeKey(document);
+      const receipt = await target.presentFrozenCheckpoint(request);
+      if (requestRevision !== frozenUiRevision) throw new Error('Frozen inspection was cancelled.');
+      frozenReceipt = receipt; mobileControlsOpen = false; showSimPanel = false;
+      await tick();
+      return receipt;
+    } catch (error) { if (requestRevision === frozenUiRevision) { frozenReadOnly = false; onfrozendiagnosticchange?.(false); } throw error; }
+  }
+  function exitFrozenCheckpoint() {
+    ++frozenUiRevision;
+    renderer?.exitFrozenCheckpoint(); frozenReceipt = null; frozenReadOnly = false; onfrozendiagnosticchange?.(false);
+  }
+  type DrapeDebugApi = { getState: () => DrapeDebugState | null; getFailureDiagnostics: () => DrapeFailureDiagnostics | null;
+    getCameraState: () => ReturnType<PatternRenderer['getCameraState']> | null;
+    presentFrozenCheckpoint: typeof presentFrozenCheckpoint; exitFrozenCheckpoint: typeof exitFrozenCheckpoint;
+    getFrozenRenderedGeometry: () => ReturnType<PatternRenderer['getFrozenRenderedGeometry']> | null };
   type DrapeDebugWindow = Window & { __seamerWebgpuDrape?: DrapeDebugApi };
   let drapeDebugApi: DrapeDebugApi | null = null;
+  let refinedReassemblyNotice = $state(false);
   let status = $state<RendererStatus>('idle');
   let statusMessage = $state('');
   let poses = $state<string[]>([]);
@@ -117,7 +156,7 @@
       const sp = pc.settings3d.savedPositions;
       let sum = 0;
       for (let i = 0; i < sp.length; i += 7) sum += sp[i];
-      parts.push(pc.id, sp.length, Math.round(sum * 1e3));
+      parts.push(pc.id, sp.length, Math.round(sum * 1e3), pc.settings3d.savedDrapeState ?? '', pc.settings3d.savedBodyFitRevision ?? '', pc.settings3d.savedAssemblyRevision ?? '', pc.settings3d.savedSourceStretchPolicy ?? '', String(pc.settings3d.savedSourceAssemblyComplete ?? ''), JSON.stringify(pc.settings3d.savedSourceGatherPolicy ?? null), String(pc.settings3d.savedSourceGatherIntent ?? ''));
     }
     return parts.join(',');
   }
@@ -141,8 +180,8 @@
         fixTop: p.settings3d.fixTop,
         mirrored: p.settings3d.drapeMirroredPieces
       },
-      pieces: p.pieces.map((pc) => ({ id: pc.id, g: sigs.get(pc.id), a: pc.settings3d.arrangement, f: pc.settings3d.frozen, h: pc.hidden, fn: pc.settings3d.flipNormals, cl: pc.settings3d.collisionLayer, fc: pc.settings3d.filterExternalCollisionsByClothNormal })),
-      seams: p.seams.length,
+      pieces: p.pieces.map((pc) => ({ id: pc.id, material: pc.materialId, g: sigs.get(pc.id), a: pc.settings3d.arrangement, f: pc.settings3d.frozen, h: pc.hidden, fn: pc.settings3d.flipNormals, cl: pc.settings3d.collisionLayer, fc: pc.settings3d.filterExternalCollisionsByClothNormal })),
+      seams: p.seams,
       // texture-map urls can be multi-MB data URLs — sign with length + tail instead of the full string
       mats: p.materials.map((m) => {
         const slotSig = (t: typeof m.frontTexture) => t && {
@@ -151,7 +190,7 @@
         };
         return {
           id: m.id, ft: slotSig(m.frontTexture), bt: m.useSeparateBackSide ? slotSig(m.backTexture) : null, sb: m.useSeparateBackSide,
-          sw: m.stretchWarpValue, wf: m.stretchWeftValue, b: m.bendValue, w: m.weight, th: m.thickness,
+          sw: m.stretchWarpValue, wf: m.stretchWeftValue, b: m.bendValue, w: m.weight, th: m.thickness, shell: m.visualizationThickness,
           r: m.roughness, mt: m.metalness, sp: m.specularIntensity, op: m.opacity, nsc: m.normalScale, ac: m.alphaCutoff
         };
       })
@@ -170,17 +209,25 @@
     renderer = new PatternRenderer(viewportInstance);
     if (import.meta.env.DEV) {
       const target = window as DrapeDebugWindow;
-      drapeDebugApi = { getState: () => renderer?.getDrapeDebugState() ?? null };
+      drapeDebugApi = { getState: () => renderer?.getDrapeDebugState() ?? null,
+        getFailureDiagnostics: () => renderer?.getDrapeFailureDiagnostics() ?? null,
+        getCameraState: () => renderer?.getCameraState() ?? null,
+        presentFrozenCheckpoint, exitFrozenCheckpoint, getFrozenRenderedGeometry: () => renderer?.getFrozenRenderedGeometry() ?? null };
       target.__seamerWebgpuDrape = drapeDebugApi;
     }
     webgpu = renderer.webgpuAvailable();
     renderer.onStatus = (s, msg) => {
       status = s; statusMessage = msg ?? '';
-      if (s === 'ready') stretchError = renderer?.getStretchError() ?? null;
+      refinedReassemblyNotice = !!renderer?.getSourceGatherCacheMarker();
+      if (s === 'ready' || s === 'simulating') syncSimulationControls();
+      if (s === 'ready') {
+        stretchError = renderer?.getStretchError() ?? null;
+        syncPoses();
+      }
     };
     renderer.onModeChange = (m, piece, kind) => { sceneMode = m; selectedPiece = piece; arrangeKind = kind ?? null; };
     renderer.onSelectPiece = (id) => { onpieceselect?.(id); };
-    renderer.onCameraChanged = (pos, target, fov) => { oncamerachange?.(pos, target, fov); };
+    renderer.onCameraChanged = (pos, target, fov) => { if (!frozenReadOnly) oncamerachange?.(pos, target, fov); };
     renderer.onArrangementPointHover = (name) => { hoveredArrangementPoint = name; };
     renderer.onArrangementPointPicked = ({ pieceId, name, cylinderName, uDegrees, v }) => {
       // bind the selected piece's arrangement to the clicked named point (rebuild re-seats it)
@@ -188,13 +235,17 @@
         ...p,
         settings3d: {
           ...p.settings3d,
-          arrangement: { ...p.settings3d.arrangement, cylinderName, uDegrees, v, uOffsetMm: 0, vOffsetMm: 0, use2DPosition: false, positionChanged: false }
+          savedPositions: [],
+          savedDrapeState: undefined,
+          savedSourceAssemblyComplete: undefined, savedSourceGatherPolicy: undefined, savedSourceGatherIntent: undefined,
+          savedMeshSnapshot: undefined,
+          arrangement: { ...p.settings3d.arrangement, sourcePlacement: undefined, cylinderName, uDegrees, v, uOffsetMm: 0, vOffsetMm: 0, use2DPosition: false, positionChanged: false }
         }
       }));
       onpatternupdate?.({ ...currentPattern, pieces, hasChanged: true }, `Arrange on ${name}`);
     };
     renderer.onDrapeSettled = (savedByPiece) => {
-      ondrapesettled?.(savedByPiece);
+      ondrapesettled?.(savedByPiece, renderer?.getSourceStretchPolicy() ?? null, renderer?.getSourceAssemblyComplete() ?? null, renderer?.getSourceGatherCacheMarker(), renderer?.getSourceGatherIntent());
       // the parent has now written savedPositions back into the pattern (synchronously); accept our
       // own echo so the drape watcher below doesn't rebuild what we just settled
       lastDrapeKey = drapeKey(currentPattern);
@@ -224,7 +275,8 @@
     lightingMode = currentPattern.settings3d.lightingMode || 'flat';
     renderer.setPattern(currentPattern).then((built) => {
       if (!built) return;
-      poses = renderer?.poseNames() ?? [];
+      syncPoses();
+      syncSimulationControls();
       renderer?.setHighlightedPiece(selectedPieceId);
       applyLabelDisplay();
       renderer?.setShowSeams(currentPattern.settings3d.showSeams ?? false);
@@ -236,6 +288,8 @@
   }
 
   onDestroy(() => {
+    ++frozenUiRevision;
+    if (frozenReadOnly) onfrozendiagnosticchange?.(false);
     clearTimeout(rebuildTimer);
     unsubscribeTheme?.();
     unsubscribeTheme = null;
@@ -250,6 +304,7 @@
   });
 
   $effect(() => {
+    if (frozenReadOnly) return;
     const key = patternKey(currentPattern);
     const dKey = drapeKey(currentPattern);
     if ((key === lastKey && dKey === lastDrapeKey) || !renderer) return;
@@ -267,7 +322,8 @@
       renderer?.setPattern(snapshot, changed).then((built) => {
         if (!built) return;
         builtSigs = sigs;
-        poses = renderer?.poseNames() ?? [];
+        syncPoses();
+        syncSimulationControls();
         renderer?.setHighlightedPiece(selectedPieceId);
         applyLabelDisplay();
         renderer?.setShowSeams(snapshot.settings3d.showSeams ?? false);
@@ -342,8 +398,9 @@
   // undo/redo, document restore, or automation).
   $effect(() => {
     const s = currentPattern.settings3d;
-    showAvatar = s.avatarEnabled !== false && s.showAvatar;
-    renderer?.setAvatarVisible(showAvatar);
+    const visible = s.avatarEnabled !== false && s.showAvatar;
+    showAvatar = visible;
+    renderer?.setAvatarVisible(visible);
   });
   $effect(() => {
     const next = currentPattern.settings3d.showTriangles;
@@ -356,7 +413,9 @@
   });
   $effect(() => {
     const s = currentPattern.settings3d;
-    renderer?.setCameraState(s.cameraPosition, s.controlsTarget, s.cameraFov);
+    // Camera framing uses explicit fresh-source intent; native/saved camera settings stay exact.
+    void s.cameraPosition; void s.controlsTarget; void s.cameraFov; void s.sourceCameraFraming;
+    untrack(() => renderer?.applyCameraSettings(currentPattern));
   });
   $effect(() => {
     const s = currentPattern.settings3d;
@@ -399,8 +458,9 @@
     if (status === 'simulating') renderer.pauseSimulation();
     else if (status === 'ready') renderer.simulate();
   }
+  function canReset() { return status === 'ready' || status === 'simulating' || status === 'invalid' || status === 'error'; }
   async function reset() {
-    if (!renderer || (status !== 'ready' && status !== 'simulating')) return;
+    if (!renderer || !canReset()) return;
     const accepted = await confirm({
       title: 'Reset all simulations?',
       message: 'Are you sure you want to reset all simulations? This will discard all simulated positions.',
@@ -408,10 +468,10 @@
     });
     if (!accepted) return;
     renderer.resetSimulation();
-    if (currentPattern.pieces.some((piece) => piece.settings3d.savedPositions.length > 0)) {
+    if (currentPattern.pieces.some((piece) => piece.settings3d.savedPositions.length > 0 || piece.settings3d.savedDrapeState !== undefined)) {
       const pieces = currentPattern.pieces.map((piece) => ({
         ...piece,
-        settings3d: { ...piece.settings3d, savedPositions: [] }
+        settings3d: { ...piece.settings3d, savedPositions: [], savedDrapeState: undefined, savedSourceAssemblyComplete: undefined, savedSourceGatherPolicy: undefined, savedSourceGatherIntent: undefined }
       }));
       onpatternupdate?.({ ...currentPattern, pieces, hasChanged: true }, 'Reset simulation');
     }
@@ -445,7 +505,24 @@
   // Dark mode flips the app's DaisyUI data-theme; both the 3D scene and the 2D canvas observe it and
   // re-theme themselves (see utils/theme), and all DaisyUI panels switch with it.
   function toggleDark() { dark = toggleTheme() === 'dark'; }
-  function setPose(p: string) { currentPose = p; renderer?.setPose(p); }
+  function syncPoses() {
+    poses = renderer?.poseNames() ?? [];
+    currentPose = renderer?.poseName() ?? '';
+  }
+  async function setPose(p: string) {
+    const currentRenderer = renderer;
+    if (!currentRenderer) return;
+    const previousPose = currentPose;
+    try {
+      await currentRenderer.setPose(p);
+    } catch (error) {
+      if (renderer === currentRenderer) {
+        toastError(error instanceof Error ? error.message : 'Could not update body pose');
+      }
+    } finally {
+      if (renderer === currentRenderer) currentPose = currentRenderer.poseName() ?? previousPose;
+    }
+  }
   function toggleTriangles() {
     const next = !showTriangles;
     showTriangles = next;
@@ -507,6 +584,7 @@
   $effect(() => { void labelDisplay; applyLabelDisplay(); });
   // live-apply the "Show seams (3D)" toggle from the Properties panel
   $effect(() => { const on = currentPattern.settings3d.showSeams ?? false; renderer?.setShowSeams(on); });
+  function zoomToGarment() { renderer?.zoomToGarment(); }
   function setView(v: 'front' | 'back' | 'left' | 'right' | 'top' | 'reset') { renderer?.setCameraView(v); }
   function downloadOBJ() {
     if (!renderer) return;
@@ -555,6 +633,38 @@
   let showSimPanel = $state(false);
   let showTimeline = $state(false);
   let showWires = $state(true);
+  let mobileControlsOpen = $state(false);
+  let isNarrowPane = $state(false);
+  let mobileControlsTrigger = $state<HTMLButtonElement | undefined>();
+  let mobileControlsClose = $state<HTMLButtonElement | undefined>();
+  const mobileControlsId = $props.id();
+
+  $effect(() => {
+    void mobileControlsOpen; void showSimPanel; void poses.length; void needsSourceReassembly; void refinedReassemblyNotice; void status;
+    void tick().then(() => renderer?.refreshSourceCameraFit());
+  });
+
+  onMount(() => {
+    const resize = new ResizeObserver(([entry]) => {
+      isNarrowPane = entry.contentRect.width < 480 || entry.contentRect.height < 320;
+      if (!isNarrowPane && mobileControlsOpen) {
+        mobileControlsOpen = false;
+        if (sceneShell.contains(document.activeElement)) sceneShell.focus({ preventScroll: true });
+      }
+    });
+    resize.observe(sceneShell);
+    return () => resize.disconnect();
+  });
+
+  function closeMobileControls() {
+    mobileControlsOpen = false;
+    mobileControlsTrigger?.focus({ preventScroll: true });
+  }
+  function runMobileControl(action: () => void) {
+    closeMobileControls();
+    // Fit measures the available canvas after the drawer has actually closed.
+    void tick().then(action);
+  }
 
   function toggleTimeline() {
     showTimeline = !showTimeline;
@@ -567,7 +677,15 @@
   }
   let stretchError = $state<number | null>(null);
   let simCfg = $state<SimConfig | null>(null);
+  let bodyCollisionCheckbox = $state<HTMLInputElement>();
+  $effect(() => {
+    if (bodyCollisionCheckbox && simCfg)
+      bodyCollisionCheckbox.indeterminate = simCfg.handleExternalCollisions !== simCfg.handleExternalSurfaceCollisions;
+  });
   let cameraFov = $state(54);
+  function syncSimulationControls() {
+    if (showSimPanel && renderer) simCfg = renderer.getSimConfig();
+  }
   function toggleSimPanel() {
     showSimPanel = !showSimPanel;
     if (showSimPanel && renderer) { simCfg = renderer.getSimConfig(); cameraFov = renderer.getCameraFov(); }
@@ -578,10 +696,31 @@
   function setSim(patch: Partial<SimConfig>) {
     if (!renderer || !simCfg) return;
     simCfg = { ...simCfg, ...patch };
-    void renderer.setSimConfig(patch);
+    const currentRenderer = renderer;
+    void currentRenderer.setSimConfig(patch).then(() => {
+      if (renderer === currentRenderer) syncSimulationControls();
+    }).catch((error) => {
+      if (renderer !== currentRenderer) return;
+      syncSimulationControls();
+      toastError(error instanceof Error ? error.message : 'Could not update simulation controls');
+    });
   }
   // gravity is stored as a vector; the slider edits its magnitude (m/s²).
   function setGravity(g: number) { setSim({ gravity: [0, -g, 0] }); }
+
+  const sourceCheckpoint = $derived(!!currentPattern.garmentCodeSource);
+  const needsSourceReassembly = $derived(compatibleSourceBodyCheckpoint(currentPattern) !== currentPattern);
+  const cachedPieces = $derived(currentPattern.pieces.filter((piece) => piece.settings3d.savedPositions.length > 0));
+  const holdsSavedCheckpoint = $derived(!needsSourceReassembly && cachedPieces.length > 0 && cachedPieces.every((piece) => piece.settings3d.savedDrapeState === 'held') && $simAnchors);
+  function setCheckpointHold(held: boolean) {
+    simAnchors.set(held);
+    if (!sourceCheckpoint) return;
+    const pieces = currentPattern.pieces.map((piece) => piece.settings3d.savedPositions.length === 0 ? piece : {
+      ...piece,
+      settings3d: { ...piece.settings3d, savedDrapeState: held ? 'held' as const : 'checkpoint' as const }
+    });
+    onpatternupdate?.({ ...currentPattern, pieces, hasChanged: true }, held ? 'Hold saved checkpoint' : 'Release saved checkpoint');
+  }
 
   // Frozen snapshot: a translucent ghost of the current drape, kept as a visual reference.
   let hasSnap = $state(false);
@@ -597,10 +736,16 @@
   let paneHovered = $state(false);
   let paneFocused = $state(false);
   function handleKey(e: KeyboardEvent) {
+    if (frozenReadOnly) return;
     if (!paneHovered && !paneFocused) return;
-    const t = e.target;
-    if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement || (t instanceof HTMLElement && t.isContentEditable)) return;
-    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === 'Escape' && mobileControlsOpen) {
+      e.preventDefault();
+      closeMobileControls();
+      return;
+    }
+    // Typing or using buttons inside the drawer must not trigger viewport shortcuts.
+    if (mobileControlsOpen) return;
+    if (isAppShortcutBlocked(e) || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
     if (e.key === 'a' || e.key === 'A') { e.preventDefault(); toggleArrangeMode(); }
     if (e.key === 'm' || e.key === 'M') {
       // like the 2D toolbar, M defers to "mirror selection" while a piece is selected outside arrange mode
@@ -615,7 +760,7 @@
   interface Tool { label: string; icon: string; onClick: () => void; active?: () => boolean; disabled?: () => boolean; sep?: boolean; shortcut?: string }
   const tools = $derived<Tool[]>([
     { label: status === 'simulating' ? 'Pause simulation' : 'Start simulation', icon: status === 'simulating' ? 'pause' : 'play_arrow', onClick: toggleSimulate, active: () => status === 'simulating', disabled: () => status !== 'ready' && status !== 'simulating' },
-    { label: 'Reset simulation', icon: 'refresh', onClick: () => void reset(), disabled: () => status !== 'ready' && status !== 'simulating' },
+    { label: 'Reset simulation', icon: 'refresh', onClick: () => void reset(), disabled: () => !canReset() },
     { label: 'Show triangles', icon: 'change_history', onClick: toggleTriangles, active: () => showTriangles, sep: true },
     { label: bodyEnabled ? 'Hide avatar' : 'Draft on a body', icon: 'person', onClick: bodyEnabled ? toggleAvatar : togglePerson, active: () => bodyEnabled && showAvatar },
     { label: bodyEnabled ? 'Remove the body' : 'No body — lantern, bag, shade', icon: bodyEnabled ? 'person_off' : 'deployed_code', onClick: togglePerson, active: () => !bodyEnabled },
@@ -640,18 +785,30 @@
 
 <svelte:window onkeydown={handleKey} />
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
+<!-- svelte-ignore a11y_no_static_element_interactions, a11y_no_noninteractive_tabindex -- focus owns the viewport keyboard shortcuts -->
 <div
-  class="w-full h-full relative"
+  bind:this={sceneShell}
+  class="scene-shell w-full h-full relative"
+  class:frozen-view={frozenReadOnly}
   data-testid="pattern-scene-3d"
+  role="region"
+  aria-label="3D pattern view"
+  tabindex="0"
   data-status={status}
   onpointerenter={() => (paneHovered = true)}
   onpointerleave={() => (paneHovered = false)}
   onfocusin={() => (paneFocused = true)}
   onfocusout={() => (paneFocused = false)}
 >
+  {#if frozenReadOnly}
+    <div class="scene-status-notice frozen-notice" role="status" aria-live="polite" data-testid="frozen-diagnostic-notice"
+      aria-label={`${frozenReceipt?.visibleNotice ?? 'Verifying frozen checkpoint…'} Read-only diagnostic. Simulation, editing, saving and export are unavailable.`}
+      title={`${frozenReceipt?.visibleNotice ?? 'Verifying frozen checkpoint…'} Read-only diagnostic. Simulation, editing, saving and export are unavailable.`}>
+      <span aria-hidden="true">{frozenReceipt ? `Frame ${frozenReceipt.frame} · read-only · garment fit not accepted` : 'Verifying read-only checkpoint…'}</span>
+    </div>
+  {/if}
   <div
-    class="w-full h-full"
+    class="scene-viewport w-full h-full"
     use:viewportAction={{
       projection: '3d',
       postProcessing: true,
@@ -679,6 +836,18 @@
   {#if status === 'invalid'}
     <div class="absolute top-2 left-1/2 -translate-x-1/2 z-10 bg-warning text-warning-content text-xs rounded px-3 py-1 shadow max-w-md text-center">{statusMessage}</div>
   {/if}
+  {#if !frozenReadOnly && needsSourceReassembly && status === 'ready'}
+    <div class="scene-status-notice scene-reassembly-info absolute top-12 left-1/2 -translate-x-1/2 z-10 bg-base-100/95 text-base-content text-xs rounded px-3 py-2 shadow max-w-sm text-center" role="status">
+      <span class="source-reassembly-full">Garment fit updated. Start simulation to reassemble the garment.</span>
+      <span class="source-reassembly-compact" aria-hidden="true">Start simulation to reassemble</span>
+    </div>
+  {/if}
+  {#if !frozenReadOnly && refinedReassemblyNotice && status === 'ready' && !needsSourceReassembly}
+    <div class="scene-status-notice scene-reassembly-info absolute top-12 left-1/2 -translate-x-1/2 z-10 bg-base-100/95 text-base-content text-xs rounded px-3 py-2 shadow max-w-sm text-center" role="status">
+      <span class="source-reassembly-full">This garment reassembles when reopened. Start simulation to drape it.</span>
+      <span class="source-reassembly-compact" aria-hidden="true">Start simulation to reassemble</span>
+    </div>
+  {/if}
   {#if status === 'loading'}
     <div class="absolute inset-0 flex flex-col gap-2 items-center justify-center z-10 pointer-events-none" role="status" aria-live="polite">
       <span class="loading loading-spinner loading-md opacity-70"></span>
@@ -686,8 +855,17 @@
     </div>
   {/if}
 
+  {#if frozenReadOnly}
+      <div class="scene-mobile-primary frozen-camera" role="group" aria-label="Frozen checkpoint camera">
+        <button disabled={!frozenReceipt} class="btn btn-sm" onclick={() => setView('front')}>Front</button>
+        <button disabled={!frozenReceipt} class="btn btn-sm" onclick={() => setView('back')}>Back</button>
+        <button disabled={!frozenReceipt} class="btn btn-sm" onclick={() => setView('reset')}>Fit</button>
+        <button type="button" disabled={!frozenReceipt} class="btn btn-sm" aria-label="Zoom to garment" title="Zoom to garment" onclick={zoomToGarment}>Zoom</button>
+        <button class="btn btn-sm" onclick={exitFrozenCheckpoint}>Exit diagnostic</button>
+      </div>
+  {:else}
   <!-- Right-side control toolbar (mirrors the original studio) -->
-  <div class="flex flex-col mt-3 absolute right-2 top-[6rem] z-10" data-tour-id="tour-3d-controls">
+  <div class="scene-controls scene-desktop-controls flex flex-col mt-3 absolute right-2 top-[6rem] z-10" data-tour-id={isNarrowPane ? undefined : 'tour-3d-controls'} role="group" aria-label="3D controls">
     {#each tools as tool}
       {#if tool.sep}<div class="h-8 mx-2"></div>{/if}
       <button
@@ -713,9 +891,91 @@
     {/each}
   </div>
 
+  <!-- Narrow panes keep only the simulation actions over the garment. The remaining
+       controls are disclosed together, with labels instead of a long icon rail. -->
+  <div class="scene-mobile-primary" data-tour-id={isNarrowPane ? 'tour-3d-controls' : undefined} role="group" aria-label="Primary 3D controls">
+    {#each tools.slice(0, 2) as tool}
+      <button type="button" class="btn btn-sm" class:btn-accent={tool.active?.()}
+        title={tool.label} aria-label={tool.label} disabled={tool.disabled?.()} onclick={tool.onClick}>
+        <span class="material-symbols-rounded notranslate" aria-hidden="true">{tool.icon}</span>
+        {tool.icon === 'refresh' ? 'Reset' : status === 'simulating' ? 'Pause' : 'Start'}
+      </button>
+    {/each}
+    {#if currentPattern.garmentCodeSource && bodyEnabled}
+      <button type="button" class="btn btn-sm scene-garment-zoom" title="Zoom to garment" aria-label="Zoom to garment"
+        onclick={() => runMobileControl(zoomToGarment)}>
+        <span class="material-symbols-rounded notranslate" aria-hidden="true">zoom_in</span>
+        Zoom
+      </button>
+    {/if}
+    <button type="button" class="btn btn-sm" bind:this={mobileControlsTrigger}
+      aria-label={mobileControlsOpen ? 'Collapse 3D controls' : 'Expand 3D controls'}
+      aria-expanded={mobileControlsOpen} aria-controls={mobileControlsId}
+      onclick={() => {
+        if (mobileControlsOpen) closeMobileControls();
+        else { mobileControlsOpen = true; queueMicrotask(() => mobileControlsClose?.focus({ preventScroll: true })); }
+      }}>
+      <span class="material-symbols-rounded notranslate" aria-hidden="true">tune</span>
+      Controls
+    </button>
+  </div>
+  {#if mobileControlsOpen}
+    <div id={mobileControlsId} class="scene-mobile-drawer" role="group" aria-label="3D controls">
+      <div class="scene-mobile-drawer-heading">
+        <strong>3D controls</strong>
+        <button type="button" class="btn btn-sm btn-ghost" aria-label="Close 3D controls"
+          bind:this={mobileControlsClose} onclick={closeMobileControls}>
+          Close <span aria-hidden="true">✕</span>
+        </button>
+      </div>
+      <div class="scene-mobile-tools">
+        {#each tools.slice(2) as tool}
+          <button type="button" class="btn btn-sm justify-start" aria-label={tool.label}
+            class:btn-accent={tool.active?.()} disabled={tool.disabled?.()}
+            onclick={() => runMobileControl(tool.onClick)}>
+            <span class="material-symbols-rounded notranslate" aria-hidden="true">{tool.icon}</span>
+            {tool.label}
+          </button>
+        {/each}
+      </div>
+      <div class="scene-mobile-section" role="group" aria-label="Camera views">
+        <strong>Camera views</strong>
+        <div class="scene-mobile-options">
+          {#each [['front', 'Front'], ['back', 'Back'], ['left', 'Left'], ['right', 'Right'], ['top', 'Top']] as [v, label]}
+            <button type="button" class="btn btn-sm" title={`${label} view`}
+              onclick={() => runMobileControl(() => setView(v as 'front'))}>{label}</button>
+          {/each}
+          <button type="button" class="btn btn-sm" aria-label="Reset view"
+            onclick={() => runMobileControl(() => setView('reset'))}>Reset view</button>
+        </div>
+      </div>
+      {#if poses.length && bodyEnabled}
+        <div class="scene-mobile-section" role="group" aria-label="Body poses">
+          <strong>Body poses</strong>
+          <div class="scene-mobile-options">
+            {#each poses as p}
+              <button type="button" class="btn btn-sm" class:btn-active={currentPose === p}
+                onclick={() => runMobileControl(() => setPose(p))}>{p}</button>
+            {/each}
+          </div>
+        </div>
+      {/if}
+      <div class="scene-mobile-section" role="group" aria-label="Lighting and image export">
+        <strong>Lighting</strong>
+        <div class="scene-mobile-options">
+          {#each lightingTabs as tab}
+            <button type="button" class="btn btn-sm" class:btn-active={lightingMode === tab.id}
+              onclick={() => runMobileControl(() => setLighting(tab.id))}>{tab.label}</button>
+          {/each}
+          <button type="button" class="btn btn-sm" onclick={() => runMobileControl(saveImage)}>Save Image</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
   <!-- Piece-edit panel: select a piece, move/rotate it with the gizmo, then drape/settle -->
   {#if sceneMode === 'arrange'}
-    <div class="absolute top-12 left-1/2 -translate-x-1/2 z-10 flex flex-col items-center gap-1">
+    <div class="scene-status-notice absolute top-12 left-1/2 -translate-x-1/2 z-10 flex flex-col items-center gap-1">
       <div class="bg-base-200/90 backdrop-blur rounded-lg shadow px-3 py-2 flex items-center gap-2">
         <span class="text-xs opacity-70">{selectedPiece ? 'Piece selected' : 'Click a piece to select'}</span>
         <div class="join">
@@ -746,9 +1006,12 @@
 
   <!-- Simulation controls panel (mirrors the source's "Simulation controls"/Simulator config) -->
   {#if showSimPanel && simCfg}
-    <div class="absolute top-12 right-2 z-10 w-60 bg-base-200/95 backdrop-blur rounded-lg shadow-lg p-3 text-xs space-y-2 max-h-[70vh] overflow-y-auto">
+    <div class="scene-sim-panel absolute top-12 right-2 z-10 w-60 bg-base-200/95 backdrop-blur rounded-lg shadow-lg p-3 text-xs space-y-2 max-h-[70vh] overflow-y-auto">
       <div class="flex items-center justify-between"><span class="font-bold">Simulation controls</span>
-        <button class="btn btn-ghost btn-xs btn-circle" onclick={() => (showSimPanel = false)} aria-label="Close">✕</button>
+        <button class="btn btn-ghost btn-xs btn-circle" onclick={() => {
+          showSimPanel = false;
+          if (isNarrowPane) mobileControlsTrigger?.focus({ preventScroll: true });
+        }} aria-label="Close">✕</button>
       </div>
       {#if stretchError !== null}
         <div class="flex items-center justify-between opacity-80" title="RMS deviation of every cloth edge from its rest length at the last settled drape">
@@ -758,11 +1021,14 @@
       <label class="flex items-center justify-between gap-2"><span>Self-collision</span>
         <input type="checkbox" class="toggle toggle-xs" checked={simCfg.handleSelfCollisions} onchange={(e) => setSim({ handleSelfCollisions: e.currentTarget.checked })} /></label>
       <label class="flex items-center justify-between gap-2"><span>Body collision</span>
-        <input type="checkbox" class="toggle toggle-xs" checked={simCfg.handleExternalCollisions} onchange={(e) => setSim({ handleExternalCollisions: e.currentTarget.checked })} /></label>
+        <input bind:this={bodyCollisionCheckbox} type="checkbox" class="toggle toggle-xs" checked={simCfg.handleExternalCollisions && simCfg.handleExternalSurfaceCollisions}
+          onchange={(e) => setSim({ handleExternalCollisions: e.currentTarget.checked, handleExternalSurfaceCollisions: e.currentTarget.checked })} /></label>
       <label class="flex items-center justify-between gap-2"><span>Use bending</span>
         <input type="checkbox" class="toggle toggle-xs" checked={simCfg.useBending} onchange={(e) => setSim({ useBending: e.currentTarget.checked })} /></label>
-      <label class="flex items-center justify-between gap-2" title="ON: softly preserve the saved drape while remaining interactive. OFF: fully free-run the local solver."><span>Anchor to saved drape</span>
-        <input type="checkbox" class="toggle toggle-xs" checked={$simAnchors} onchange={(e) => simAnchors.set(e.currentTarget.checked)} /></label>
+      <label class="flex items-center justify-between gap-2" title={sourceCheckpoint ? 'Explicitly hold this saved shape. Leave off to let an imported checkpoint continue assembling.' : 'ON: softly preserve the saved drape while remaining interactive. OFF: fully free-run the local solver.'}>
+        <span>{sourceCheckpoint ? 'Hold saved checkpoint' : 'Anchor to saved drape'}</span>
+        <input type="checkbox" class="toggle toggle-xs" checked={sourceCheckpoint ? holdsSavedCheckpoint : $simAnchors}
+          disabled={sourceCheckpoint && (cachedPieces.length === 0 || needsSourceReassembly)} onchange={(e) => setCheckpointHold(e.currentTarget.checked)} /></label>
       <label class="flex items-center justify-between gap-2"><span>Time step</span>
         <input type="number" class="input input-bordered input-xs w-20" min="0.001" max="1" step="0.001" value={simCfg.timeStep}
           onchange={(e) => { const v = parseFloat(e.currentTarget.value); if (Number.isFinite(v) && v > 0) setSim({ timeStep: Math.min(1, Math.max(0.001, v)) }); }} /></label>
@@ -781,14 +1047,16 @@
         { key: 'selfCollisionFriction', label: 'Self friction', min: 0, max: 1, step: 0.05, get: () => simCfg!.selfCollisionFriction, set: (v: number) => setSim({ selfCollisionFriction: v }), fmt: (v: number) => v.toFixed(2) },
         { key: 'externalCollisionFriction', label: 'Body friction', min: 0, max: 1, step: 0.05, get: () => simCfg!.externalCollisionFriction, set: (v: number) => setSim({ externalCollisionFriction: v }), fmt: (v: number) => v.toFixed(2) },
         { key: 'seamStrength', label: 'Seam strength', min: 0, max: 2, step: 0.1, get: () => simCfg!.seamStrength, set: (v: number) => setSim({ seamStrength: v }), fmt: (v: number) => v.toFixed(1) },
-        { key: 'seamIterations', label: 'Seam iterations', min: 1, max: 8, step: 1, get: () => simCfg!.seamIterations, set: (v: number) => setSim({ seamIterations: v }), fmt: (v: number) => v.toFixed(0) }
+        { key: 'seamIterations', label: 'Seam iterations', min: 1, max: 8, step: 1, get: () => simCfg!.seamIterations, set: (v: number) => setSim({ seamIterations: v }), fmt: (v: number) => v.toFixed(0) },
+        { key: 'substepContactIterations', label: 'Contact passes per substep', min: 1, max: 16, step: 1, get: () => simCfg!.substepContactIterations ?? 1, set: (v: number) => setSim({ substepContactIterations: v }), fmt: (v: number) => v.toFixed(0) },
+        { key: 'finalContactIterations', label: 'Final contact passes', min: 1, max: 16, step: 1, get: () => simCfg!.finalContactIterations ?? 1, set: (v: number) => setSim({ finalContactIterations: v }), fmt: (v: number) => v.toFixed(0) }
       ] as ctl (ctl.key)}
         <label class="flex flex-col gap-0.5">
           <span class="flex justify-between"><span>{ctl.label}</span><span class="opacity-60">{ctl.fmt(ctl.get())}</span></span>
           <input type="range" class="range range-xs" min={ctl.min} max={ctl.max} step={ctl.step} value={ctl.get()} oninput={(e) => ctl.set(parseFloat(e.currentTarget.value))} />
         </label>
       {/each}
-      <p class="opacity-50 leading-tight pt-1">Changes apply immediately; the drape is preserved.</p>
+      <p class="opacity-50 leading-tight pt-1">{sourceCheckpoint ? 'Changes update simulation. Unfinished garments may reassemble.' : 'Changes apply immediately; the drape is preserved.'}</p>
       <div class="border-t border-base-300 pt-2">
         <label class="flex flex-col gap-0.5">
           <span class="flex justify-between"><span>Camera FOV</span><span class="opacity-60">{cameraFov.toFixed(0)}°</span></span>
@@ -818,15 +1086,21 @@
   {/if}
 
   <!-- Camera view presets -->
-  <div class="absolute top-2 right-2 z-10 join join-horizontal bg-base-200/85 backdrop-blur rounded-lg shadow">
+  <div class="scene-camera absolute top-2 right-2 z-10 join join-horizontal bg-base-200/85 backdrop-blur rounded-lg shadow" role="group" aria-label="Camera views">
     {#each [['front', 'Front'], ['back', 'Back'], ['left', 'Left'], ['right', 'Right'], ['top', 'Top']] as [v, label]}
       <button class="join-item btn btn-xs" title={`${label} view`} onclick={() => setView(v as 'front')}>{label[0]}</button>
     {/each}
+    {#if currentPattern.garmentCodeSource && bodyEnabled}
+      <button class="join-item btn btn-xs" title="Zoom to garment" aria-label="Zoom to garment" onclick={zoomToGarment}>
+        <span class="material-symbols-rounded text-sm" aria-hidden="true">zoom_in</span>
+      </button>
+    {/if}
     <button class="join-item btn btn-xs" title="Reset view" onclick={() => setView('reset')} aria-label="Reset view"><span class="material-symbols-rounded text-sm">refresh</span></button>
   </div>
 
   <!-- Lighting-mode tabs + Save Image (mirrors the source's bottom bar) -->
-  <div class="absolute bottom-2 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2">
+  <div class="scene-lighting absolute bottom-2 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2" role="group" aria-label="Lighting and image export"
+    onfocusin={(event) => { if (event.target instanceof HTMLButtonElement) event.target.scrollIntoView({ block: 'nearest', inline: 'nearest' }); }}>
     <div class="join join-horizontal bg-base-200/85 backdrop-blur rounded-lg shadow">
       {#each lightingTabs as tab}
         <button class="join-item btn btn-xs" class:btn-active={lightingMode === tab.id} onclick={() => setLighting(tab.id)}>{tab.label}</button>
@@ -840,7 +1114,7 @@
 
   <!-- Pose selector — only meaningful when the pattern is drafted on a body -->
   {#if poses.length && bodyEnabled}
-    <div class="absolute bottom-11 left-1/2 -translate-x-1/2 z-10">
+    <div class="scene-poses absolute bottom-11 left-1/2 -translate-x-1/2 z-10" role="group" aria-label="Body poses">
       <div class="join join-horizontal bg-base-200/85 backdrop-blur rounded-lg shadow">
         {#each poses as p}
           <button class="join-item btn btn-xs" class:btn-active={currentPose === p} onclick={() => setPose(p)}>{p}</button>
@@ -849,7 +1123,134 @@
     </div>
   {/if}
 
-  <div class="absolute top-2 left-2 z-10 text-xs opacity-60 bg-base-200/80 rounded px-2 py-1">
+  {/if}
+  <div class="scene-info absolute top-2 left-2 z-10 text-xs opacity-60 bg-base-200/80 rounded px-2 py-1">
     {#if bodyEnabled}{currentPattern.body.gender} · {/if}{currentPattern.pieces.length} pieces
   </div>
 </div>
+
+<style>
+  .scene-shell.frozen-view { display: flex; flex-direction: column; }
+  .frozen-view > .scene-viewport { flex: 1; min-height: 0; height: auto; }
+  .frozen-notice { flex-shrink: 0; background: var(--color-base-200, #ddd); padding: 0.25rem 0.5rem; border-radius: 0.5rem; font-size: 0.75rem; line-height: 1rem; text-align: center; }
+  .frozen-notice span { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .scene-mobile-primary.frozen-camera { display: flex; position: absolute; bottom: 0.5rem; right: 0.5rem; z-index: 30; flex-wrap: wrap; max-width: calc(100% - 1rem); gap: 0.25rem; }
+  .frozen-camera button { min-height: 44px; min-width: 44px; animation: none !important; transform: none !important; scale: 1 !important; }
+  .scene-shell { container: pattern-scene / size; }
+  .source-reassembly-compact { display: none; }
+  @media (pointer: coarse) and (orientation: landscape) and (max-height: 500px) {
+    @container pattern-scene (width < 480px) or (height < 320px) {
+      /* Informational source-cache notices keep their full accessible message,
+         while leaving more of a short touch viewport for the garment. */
+      .scene-reassembly-info {
+        top: 0.5rem;
+        max-width: calc(100% - 1rem);
+        padding: 0.25rem 0.5rem;
+        line-height: 1rem;
+      }
+      .scene-reassembly-info .source-reassembly-full {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip-path: inset(50%);
+        white-space: nowrap;
+        border: 0;
+      }
+      .scene-reassembly-info .source-reassembly-compact {
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+    }
+  }
+  .scene-mobile-primary, .scene-mobile-drawer { display: none; }
+  .scene-controls {
+    max-height: calc(100% - 7.5rem);
+    overflow-y: auto;
+    overflow-x: hidden;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+  }
+  .scene-controls > :global(*) { flex-shrink: 0; }
+
+  @media (max-width: 1023px) {
+    .scene-controls > :global(button) { height: 44px; min-height: 44px; min-width: 44px; max-width: 44px; }
+    .scene-controls > :global(button) > :global(span:first-child) { display: none; }
+    .scene-camera > :global(button) { height: 44px; min-height: 44px; min-width: 44px; }
+    .scene-lighting :global(button), .scene-poses :global(button) { height: 32px; min-height: 32px; min-width: 32px; }
+  }
+
+  /* Size follows the actual pane, including a short landscape split view. */
+  @container pattern-scene (width < 480px) or (height < 320px) {
+    .scene-desktop-controls, .scene-camera, .scene-lighting, .scene-poses { display: none; }
+    .scene-mobile-primary {
+      display: flex;
+      position: absolute;
+      bottom: 0.5rem;
+      right: 0.5rem;
+      z-index: 20;
+      gap: 0.25rem;
+      max-width: calc(100% - 1rem);
+      padding: 0.25rem;
+      background: oklch(var(--b2) / 0.9);
+      border-radius: 0.75rem;
+      box-shadow: 0 2px 8px rgb(0 0 0 / 0.15);
+    }
+    .scene-mobile-primary > button, .scene-mobile-drawer button { min-height: 44px; height: auto; }
+    .scene-mobile-primary > button { padding: 0 0.5rem; gap: 0.25rem; }
+    .scene-mobile-primary .material-symbols-rounded { font-size: 20px; }
+    .scene-garment-zoom { min-width: 44px; animation: none !important; transform: none !important; scale: 1 !important; }
+    .scene-mobile-drawer {
+      display: block;
+      position: absolute;
+      top: 0.5rem;
+      bottom: 4.25rem;
+      right: 0.5rem;
+      z-index: 20;
+      width: min(22rem, calc(100% - 1rem));
+      overflow-y: auto;
+      overflow-x: hidden;
+      overscroll-behavior: contain;
+      background: oklch(var(--b2) / 0.98);
+      border-radius: 0.75rem;
+      padding: 0 0.5rem 0.5rem;
+      box-shadow: 0 2px 12px rgb(0 0 0 / 0.2);
+      font-size: 0.75rem;
+    }
+    .scene-mobile-drawer-heading {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      padding: 0.25rem 0;
+      background: oklch(var(--b2));
+    }
+    .scene-mobile-tools { display: grid; gap: 0.25rem; }
+    .scene-mobile-tools > button { white-space: normal; text-align: left; padding: 0.5rem; }
+    .scene-mobile-section { border-top: 1px solid oklch(var(--b3)); margin-top: 0.5rem; padding-top: 0.5rem; }
+    .scene-mobile-options { display: flex; flex-wrap: wrap; gap: 0.25rem; margin-top: 0.25rem; }
+    .scene-sim-panel { top: 0.5rem; bottom: 4.25rem; max-height: none; width: min(20rem, calc(100% - 1rem)); }
+    .scene-sim-panel input[type="range"] { min-height: 44px; height: 44px; }
+    .scene-sim-panel input[type="number"] { min-height: 44px; height: 44px; font-size: 16px; }
+    .scene-sim-panel > div:first-child { position: sticky; top: -0.75rem; background: oklch(var(--b2)); z-index: 1; }
+    .scene-sim-panel > div:first-child > button { min-height: 44px; min-width: 44px; }
+    .scene-info { display: none; }
+  }
+
+  @container pattern-scene (height < 320px) {
+    .scene-controls { top: 3.5rem; bottom: 2.5rem; margin-top: 0; max-height: none; }
+    .scene-camera { top: 0.25rem; }
+    .scene-info { display: none; }
+  }
+  @container pattern-scene (height < 240px) {
+    /* In a very short split pane, the expanded drawer temporarily covers the
+       compact bar so its sticky Close and a full touch target can both fit. */
+    .scene-mobile-drawer, .scene-sim-panel { bottom: 0.5rem; z-index: 30; }
+  }
+</style>

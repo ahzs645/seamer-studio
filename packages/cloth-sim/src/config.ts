@@ -9,7 +9,10 @@ export interface SimConfig {
   globalDamping: number; // shader uses (1 - globalDamping)
   localDamping: number; // rigid-body damping (original default 0 -> pass skipped)
   nearDamping: number; // 8-neighbour local rigid-body damping (original default 0.1)
-  simulationThickness: number; // m
+  simulationThickness: number; // m physical collision clearance
+  maxSurfaceCorrection?: number; // m depenetration displacement bound, independent of clearance
+  substepContactIterations?: number; // collision-only passes after constraints on EVERY substep
+  finalContactIterations?: number; // collision-only finishing passes on the last substep
   edgeThickness: number; // m (self-collision edge contact)
   maxVelocity: number;
   minVelocity: number;
@@ -17,7 +20,10 @@ export interface SimConfig {
   selfCollisionFriction: number;
   externalCollisionFriction: number;
   handleSelfCollisions: boolean;
+  handleSelfSurfaceCollisions?: boolean;
   handleExternalCollisions: boolean;
+  /** Finite cloth face contacts complement particle-vs-body contacts. */
+  handleExternalSurfaceCollisions: boolean;
   useBending: boolean; // original "Use bending": dispatch the bending-constraint passes
   staticCollisionRadius: number; // m (cloth self-collision search radius)
   externalStaticCollisionRadius: number; // m (body)
@@ -25,13 +31,17 @@ export interface SimConfig {
   clothSpacing: number; // m (internal spatial-hash cell size)
   externalHashSpacing: number; // m (body spatial-hash cell size; original getHashSpacingMeters = particleDistance/1000)
   numInternalCollisionConstraintsPerParticle: number;
+  numInternalSurfaceCollisionConstraints?: number;
+  numExternalSurfaceCollisionConstraints?: number;
   numExternalCollisionConstraintsPerParticle: number; // body tris gathered per particle (original 32)
   internalHashTableMultiplier: number;
   externalHashTableMultiplier: number; // body hash table size = mult * numBodyTris + 1 (original 5)
   // Substeps between self-collision near-triangle re-gathers. Original = subSteps (once/frame);
   // smaller re-gathers more often against current positions (stable when the cloth is moving).
   selfCollisionGatherInterval: number;
-  // Seam constraint Gauss-Seidel iterations per substep. Original = 1; more closes weakly-linked
+  /** Body candidates must follow assembly motion within a frame. */
+  externalCollisionGatherInterval: number;
+  // Seam constraint Jacobi iterations per substep. Original = 1; more closes weakly-linked
   // seams (e.g. the short waistband-centre join) faster so panels don't pull apart under a drag.
   seamIterations: number;
 }
@@ -51,6 +61,9 @@ export const SIM_CONFIG: SimConfig = {
   localDamping: 0, // original default: local (rigid-body) damping disabled
   nearDamping: 0.1, // original default: near-neighbour damping on
   simulationThickness: 0.005,
+  maxSurfaceCorrection: 0.005,
+  substepContactIterations: 1,
+  finalContactIterations: 1,
   edgeThickness: 0.005,
   maxVelocity: 1,
   minVelocity: 0,
@@ -65,7 +78,9 @@ export const SIM_CONFIG: SimConfig = {
   // drape and self-collision never curls them. Re-gathering contacts more often than once/frame was
   // measured to NOT reduce the curl and to cost ~9x, so we keep the original's once-per-frame gather.
   handleSelfCollisions: true,
+  handleSelfSurfaceCollisions: true,
   handleExternalCollisions: true,
+  handleExternalSurfaceCollisions: true,
   useBending: true,
   staticCollisionRadius: designParticleDistance / 1000, // 0.01 m
   externalStaticCollisionRadius: (designParticleDistance / 1000) * 2.5, // 0.025 m
@@ -73,11 +88,14 @@ export const SIM_CONFIG: SimConfig = {
   clothSpacing: 0.02, // ClothConfig.spacing
   externalHashSpacing: designParticleDistance / 1000, // 0.01 m (original getHashSpacingMeters)
   numInternalCollisionConstraintsPerParticle: 16,
+  numInternalSurfaceCollisionConstraints: 32,
+  numExternalSurfaceCollisionConstraints: 128,
   numExternalCollisionConstraintsPerParticle: 32,
   internalHashTableMultiplier: 5,
   externalHashTableMultiplier: 5,
+  externalCollisionGatherInterval: 4,
   selfCollisionGatherInterval: subSteps, // once per frame (matches original; re-gathering more was no better and ~9x slower)
-  seamIterations: 1 // matches original (one seam Gauss-Seidel pass per substep); dense pairing makes the extra pass unnecessary
+  seamIterations: 1 // matches original (one seam Jacobi pass per substep); dense pairing makes the extra pass unnecessary
 };
 
 export const DISABLED_COMPLIANCE = 10; // seam-edge stretch override
@@ -86,6 +104,66 @@ export const DISABLED_COMPLIANCE = 10; // seam-edge stretch override
 export function seamMaxDisplacementSq(cfg: SimConfig): number {
   const d = cfg.maxVelocity * cfg.deltaT;
   return d * d * 4;
+}
+
+export interface LegacySewingMotionPolicy {
+  policy: 'legacy-per-iteration-v1';
+  actualIterations: number;
+  perIterationMaximumMeters: number;
+  perIterationMaximumSq: number;
+  substepTotalTravelUpperBoundMeters: number;
+  sharedSubstepMaximumMeters: number;
+}
+
+export interface SourceSewingMotionPolicy {
+  policy: 'source-open-budget-closed-restoration-v2';
+  actualIterations: number;
+  classification: 'immutable-previous-physical-substep-active-pair-gap';
+  closedGapCriterionMeters: number;
+  openPerIterationMaximumMeters: number;
+  openPerIterationMaximumSq: number;
+  openSubstepTravelUpperBoundMeters: number;
+  closedRestorationPerIterationMaximumMeters: number;
+  closedRestorationPerIterationMaximumSq: number;
+  closedRestorationSubstepTravelUpperBoundMeters: number;
+  universalSharedSubstepBudget: false;
+}
+
+export type SewingMotionPolicy = LegacySewingMotionPolicy | SourceSewingMotionPolicy;
+
+/** Open source joins share the substep closing budget. Previously closed joins retain
+ * the original restoration clamp; native simulations retain that clamp for every join. */
+export function resolveSewingMotionPolicy(cfg: SimConfig, strictSurfaceHistory: boolean): Readonly<SewingMotionPolicy> {
+  // The existing dispatch loop performs ceil(max(1, seamIterations)) iterations.
+  const actualIterations = Math.ceil(Math.max(1, cfg.seamIterations ?? 1));
+  if (strictSurfaceHistory && (!Number.isFinite(cfg.seamIterations ?? 1)
+    || actualIterations > 64 || !Number.isFinite(cfg.maxVelocity) || cfg.maxVelocity < 0
+    || !Number.isFinite(cfg.deltaT) || cfg.deltaT <= 0))
+    throw new Error('Source sewing motion requires a finite substep and at most sixty-four iterations');
+  const originalMaximumSq = seamMaxDisplacementSq(cfg);
+  if (strictSurfaceHistory && !Number.isFinite(originalMaximumSq))
+    throw new Error('Source sewing motion requires a finite squared displacement budget');
+  const sharedSubstepMaximumMeters = Math.sqrt(originalMaximumSq);
+  const perIterationMaximumSq = strictSurfaceHistory ? originalMaximumSq / (actualIterations * actualIterations) : originalMaximumSq;
+  const perIterationMaximumMeters = Math.sqrt(perIterationMaximumSq);
+  if (strictSurfaceHistory) return Object.freeze({
+    policy: 'source-open-budget-closed-restoration-v2', actualIterations,
+    classification: 'immutable-previous-physical-substep-active-pair-gap',
+    closedGapCriterionMeters: .003,
+    openPerIterationMaximumSq: perIterationMaximumSq,
+    openPerIterationMaximumMeters: perIterationMaximumMeters,
+    openSubstepTravelUpperBoundMeters: perIterationMaximumMeters * actualIterations,
+    closedRestorationPerIterationMaximumSq: originalMaximumSq,
+    closedRestorationPerIterationMaximumMeters: sharedSubstepMaximumMeters,
+    closedRestorationSubstepTravelUpperBoundMeters: sharedSubstepMaximumMeters * actualIterations,
+    universalSharedSubstepBudget: false
+  });
+  return Object.freeze({
+    policy: 'legacy-per-iteration-v1',
+    actualIterations, perIterationMaximumMeters, perIterationMaximumSq,
+    substepTotalTravelUpperBoundMeters: perIterationMaximumMeters * actualIterations,
+    sharedSubstepMaximumMeters
+  });
 }
 
 function clamp(v: number, lo: number, hi: number): number {
