@@ -6,10 +6,12 @@ import * as THREE from 'three';
 import type { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import {
   indexPoints,
+  artworkSourceProblem,
   pieceInternalPolylines,
   pieceTransform,
   samePick,
   type Material,
+  type PieceArtwork,
   type Pattern,
   type SeamPick,
   type SeamToolState
@@ -41,6 +43,7 @@ import {
 } from '@atelier/viewport';
 import { createGarmentMaterial, createAvatarMaterial, hasSeparateBack, disposeGarmentMaterial } from './materials';
 import { createPieceTexture, pieceNeedsBake } from './pieceTexture';
+import { pieceArtworkFingerprint, type ArtworkTextureBounds } from './pieceArtworkTexture';
 import { SeamerLighting } from './seamerLighting';
 import {
   SeamerOverlays,
@@ -360,6 +363,9 @@ export class PatternRenderer {
   }
 
   private pattern: Pattern | null = null;
+  private artworkDocumentId: string | null = null;
+  private currentArtwork: readonly PieceArtwork[] = [];
+  private artworkKey = '';
   private readonly buildsByPattern = new WeakMap<Pattern, Promise<boolean>>();
   private buildQueue: Promise<boolean> = Promise.resolve(true);
   private disposed = false;
@@ -1221,12 +1227,10 @@ export class PatternRenderer {
       const localIndex = piece.triangles.map((g) => g - piece.start);
       geo.setIndex(localIndex);
       const pieceMat = matById.get(piece.materialId);
-      const separateBack = hasSeparateBack(pieceMat);
       // visualizationThickness extrudes the sheet into front/back shells + an edge strip
       const shellMm = pieceMat?.visualizationThickness ?? 0;
-      const dualShell = separateBack || shellMm > 0;
       const shellM = shellMm > 0 ? docToWorld({ x: shellMm / 2, y: 0 }).x : 0;
-      const srcPiece = pattern.pieces.find((p) => p.id === piece.pieceId);
+      const srcPiece = pattern.pieces.find((p) => p.id === piece.pieceId.replace(/#M$/, ''));
       const name = srcPiece?.name ?? 'Piece';
       const hidden = !!srcPiece?.hidden; // object-browser visibility toggle
 
@@ -1243,40 +1247,13 @@ export class PatternRenderer {
       // Baked piece maps (the original's buildPieceTextureCanvas): print anchored at the piece
       // origin + rotated by grain, internal style lines drawn in. Only built when there is a print
       // or lines to show — plain solid pieces keep the cheaper untextured material.
-      let pieceMapFront: THREE.Texture | undefined;
-      let pieceMapBack: THREE.Texture | undefined;
-      if (srcPiece) {
-        const mirror = piece.pieceId.includes('#M');
-        const sgn = mirror ? -1 : 1;
-        const pts = indexPoints(pattern);
-        const visibleInternals = { ...srcPiece, internalPaths: srcPiece.internalPaths.filter((ip) => ip.showIn3d !== false) };
-        const internals = pieceInternalPolylines(pattern, visibleInternals, undefined, pts, 4)
-          .map((poly) => poly.map((p) => ({ x: sgn * p.x, y: p.y })));
-        const origin = pts.get(srcPiece.originPoint);
-        const g = srcPiece.grainVector;
-        const grainDeg0 = (Math.atan2(g.y, g.x) * 180) / Math.PI;
-        const bakeBase = {
-          internalPolys: internals,
-          originUV: { x: sgn * (origin?.x ?? 0), y: origin?.y ?? 0 },
-          grainDeg: mirror ? 180 - grainDeg0 : grainDeg0,
-          uMin: bbox.uMin, vMin: bbox.vMin, wMM: bbox.wMM, hMM: bbox.hMM,
-          anisotropy: Math.min(this.renderer.capabilities.getMaxAnisotropy(), 8)
-        };
-        const frontSlot = pieceMat?.frontTexture ?? null;
-        const frontBake = { ...bakeBase, slot: frontSlot, fillColor: frontSlot?.color ?? '#6b7a8f' };
-        if (pieceNeedsBake(frontBake)) pieceMapFront = createPieceTexture(frontBake);
-        if (dualShell) {
-          const backSlot = pieceMat?.backTexture ?? frontSlot;
-          const backBake = { ...bakeBase, slot: backSlot, fillColor: backSlot?.color ?? '#6b7a8f' };
-          if (pieceNeedsBake(backBake)) pieceMapBack = createPieceTexture(backBake);
-        }
-      }
+      const { front: pieceMapFront, back: pieceMapBack, dualShell } = this.createPieceMaps(pattern, piece.pieceId, bbox);
 
       // Our cloth triangles wind with their geometric front face pointing INWARD, so the outward
       // surface the camera sees is the BackSide. For a separate back texture we therefore render the
       // FACE (front) texture on a BackSide mesh (shows outward) and the back texture on a FrontSide
       // mesh (shows inward). With a single double-sided material this doesn't matter (both sides same).
-      const mat = createGarmentMaterial(pieceMat, flat, { side: dualShell ? THREE.BackSide : THREE.DoubleSide, labelTexture: faceLabelTex, labelTextureBack: backLabelTex, labelOpacity, labelFlipFace, pieceMap: pieceMapFront, shellOffset: shellM > 0 ? shellM : undefined });
+      const mat = createGarmentMaterial(pieceMat, flat, { side: dualShell ? (labelFlipFace ? THREE.FrontSide : THREE.BackSide) : THREE.DoubleSide, labelTexture: faceLabelTex, labelTextureBack: backLabelTex, labelOpacity, labelFlipFace, pieceMap: pieceMapFront, shellOffset: shellM > 0 ? shellM : undefined });
       const mesh = new THREE.Mesh(geo, mat);
       mesh.castShadow = true;
       mesh.receiveShadow = true;
@@ -1288,7 +1265,7 @@ export class PatternRenderer {
       // the inner face of a thick fabric (offset inward by half the visual thickness)
       let backMesh: THREE.Mesh | undefined;
       if (dualShell) {
-        const backMat = createGarmentMaterial(pieceMat, flat, { side: THREE.FrontSide, back: true, labelTexture: faceLabelTex, labelTextureBack: backLabelTex, labelOpacity, labelFlipFace, pieceMap: pieceMapBack, shellOffset: shellM > 0 ? -shellM : undefined });
+        const backMat = createGarmentMaterial(pieceMat, flat, { side: labelFlipFace ? THREE.BackSide : THREE.FrontSide, back: true, labelTexture: faceLabelTex, labelTextureBack: backLabelTex, labelOpacity, labelFlipFace, pieceMap: pieceMapBack, shellOffset: shellM > 0 ? -shellM : undefined });
         backMesh = new THREE.Mesh(geo, backMat);
         backMesh.castShadow = true; backMesh.receiveShadow = true; backMesh.frustumCulled = false;
         backMesh.visible = !hidden;
@@ -1345,6 +1322,91 @@ export class PatternRenderer {
       })) throw new Error('The body or garment changed during refined mesh preparation. Start again.');
       commitPrepared({ ...nextPrepared!, simData });
     });
+  }
+
+  /** Front prints and fabric tiles share the mesh's canonical UV frame. */
+  private createPieceMaps(pattern: Pattern, pieceId: string, bbox: ArtworkTextureBounds) {
+    const sourceId = pieceId.replace(/#M$/, '');
+    const piece = pattern.pieces.find(item => item.id === sourceId);
+    const material = pattern.materials.find(item => item.id === piece?.materialId);
+    const artwork = (this.artworkDocumentId === pattern.id ? this.currentArtwork : pattern.artwork ?? [])
+      .filter(item => item.pieceId === sourceId && !artworkSourceProblem(item) && item.opacity > 0);
+    const dualShell = hasSeparateBack(material) || (material?.visualizationThickness ?? 0) > 0 || artwork.length > 0;
+    if (!piece) return { front: undefined, back: undefined, dualShell };
+    const mirrored = pieceId.endsWith('#M');
+    const sign = mirrored ? -1 : 1;
+    const points = indexPoints(pattern);
+    const visibleInternals = { ...piece, internalPaths: piece.internalPaths.filter(path => path.showIn3d !== false) };
+    const internalPolys = pieceInternalPolylines(pattern, visibleInternals, undefined, points, 4)
+      .map(poly => poly.map(point => ({ x: sign * point.x, y: point.y })));
+    const origin = points.get(piece.originPoint);
+    const grain = Math.atan2(piece.grainVector.y, piece.grainVector.x) * 180 / Math.PI;
+    const base = { ...bbox, internalPolys, originUV: { x: sign * (origin?.x ?? 0), y: origin?.y ?? 0 },
+      grainDeg: mirrored ? 180 - grain : grain, mirrored,
+      anisotropy: Math.min(this.renderer.capabilities.getMaxAnisotropy(), 8), onupdate: () => this.invalidate() };
+    const frontSlot = material?.frontTexture ?? null;
+    const frontBake = { ...base, slot: frontSlot, fillColor: frontSlot?.color ?? '#6b7a8f', artwork };
+    const front = pieceNeedsBake(frontBake) ? createPieceTexture(frontBake) : undefined;
+    const backSlot = hasSeparateBack(material) ? material!.backTexture : frontSlot;
+    const backBake = { ...base, slot: backSlot, fillColor: backSlot?.color ?? '#6b7a8f' };
+    const back = dualShell && pieceNeedsBake(backBake) ? createPieceTexture(backBake) : undefined;
+    return { front, back, dualShell };
+  }
+
+  /** Appearance-only edit: preserve live particle positions, preparation, worker and checkpoints. */
+  setArtwork(pattern: Pick<Pattern, 'id' | 'artwork'>): void {
+    this.assertNotFrozen();
+    if (this.disposed) return;
+    const artwork = pattern.artwork ?? [];
+    const key = `${pattern.id}:${pieceArtworkFingerprint(artwork)}`;
+    if (key === this.artworkKey) return;
+    this.artworkDocumentId = pattern.id;
+    this.currentArtwork = artwork;
+    this.artworkKey = key;
+    if (!this.pattern || this.pattern.id !== pattern.id) return;
+    for (const entry of this.clothMeshes) {
+      const uv = entry.geometry.getAttribute('uv');
+      const bbox = this.addLabelUVs(entry.geometry, uv.array as Float32Array, entry.count);
+      const maps = this.createPieceMaps(this.pattern, entry.pieceId, bbox);
+      const source = this.pattern.pieces.find(piece => piece.id === entry.pieceId.replace(/#M$/, ''));
+      const material = this.pattern.materials.find(item => item.id === source?.materialId);
+      const flipFace = entry.pieceId.endsWith('#M') !== !!source?.settings3d.flipNormals;
+      const front = entry.mesh.material as THREE.MeshPhysicalMaterial;
+      const setMap = (target: THREE.MeshPhysicalMaterial, map: THREE.Texture | undefined, color: string) => {
+        target.map?.dispose();
+        target.map = map ?? null;
+        target.userData.pieceMapOverride = !!map;
+        target.color.set(map ? '#ffffff' : color);
+        target.needsUpdate = true;
+      };
+      setMap(front, maps.front, material?.frontTexture?.color ?? '#6b7a8f');
+      front.side = maps.dualShell ? (flipFace ? THREE.FrontSide : THREE.BackSide) : THREE.DoubleSide;
+      if (maps.dualShell && !entry.backMesh) {
+        const labels = front.userData.labelUniforms;
+        const backMaterial = createGarmentMaterial(material, this.pattern.settings3d.lightingMode === 'flat', {
+          side: flipFace ? THREE.BackSide : THREE.FrontSide, back: true, pieceMap: maps.back,
+          labelTexture: labels?.uLabelMap.value, labelTextureBack: labels?.uLabelMapBack.value,
+          labelOpacity: labels?.uLabelOpacity.value, labelOpacityBack: labels?.uLabelOpacityBack.value,
+          labelFlipFace: flipFace, shellOffset: entry.shellM ? -entry.shellM : undefined
+        });
+        const backMesh = new THREE.Mesh(entry.geometry, backMaterial);
+        backMesh.castShadow = true; backMesh.receiveShadow = true; backMesh.frustumCulled = false;
+        backMesh.visible = entry.mesh.visible;
+        entry.backMesh = backMesh;
+        this.clothGroup.add(backMesh);
+        this.clothBackMeshes.push(backMesh);
+      } else if (maps.dualShell && entry.backMesh) {
+        const back = entry.backMesh.material as THREE.MeshPhysicalMaterial;
+        const slot = hasSeparateBack(material) ? material!.backTexture : material?.frontTexture;
+        setMap(back, maps.back, slot?.color ?? '#6b7a8f');
+      } else if (entry.backMesh) {
+        this.clothGroup.remove(entry.backMesh);
+        this.clothBackMeshes = this.clothBackMeshes.filter(mesh => mesh !== entry.backMesh);
+        disposeGarmentMaterial(entry.backMesh.material as THREE.Material, true);
+        entry.backMesh = undefined;
+      }
+    }
+    this.invalidate();
   }
 
   /** Add a per-piece `uvLabel` attribute (0..1 across the piece's pattern bbox); returns the bbox. */

@@ -1,4 +1,4 @@
-import type { Pattern, TextureSlot } from '@seamer/pattern-model';
+import { validateDocumentExtensions, type Pattern, type TextureSlot } from '@seamer/pattern-model';
 import { textureUrlCandidates } from '$lib/scene/textureUrl';
 
 export const SSP_FORMAT = 'seamer-project' as const;
@@ -116,6 +116,7 @@ function isEnvelope(value: unknown): value is SSPProjectEnvelope {
 }
 
 function normalizeImportedPattern(pattern: Pattern): Pattern {
+  validateDocumentExtensions(pattern);
   const hasLegacySettledMesh = (pattern.pieces ?? []).some((piece) => {
     const settings = piece.settings3d as typeof piece.settings3d & { savedMeshSnapshot?: unknown };
     return settings?.savedMeshSnapshot != null;
@@ -296,6 +297,7 @@ export async function patternToSSP(pattern: Pattern, options: SSPExportOptions =
 export async function sspToPattern(blob: Blob): Promise<Pattern> {
   const decoded = await readCompressedJson(blob);
   if (!isEnvelope(decoded)) return normalizeImportedPattern(decoded as Pattern);
+  validateDocumentExtensions(decoded.pattern);
   const schemaVersion = Number(decoded.manifest.schemaVersion);
   if (!Number.isInteger(schemaVersion) || schemaVersion < 1) {
     throw new Error('This SSP has an invalid or missing schema version.');

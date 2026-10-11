@@ -41,7 +41,7 @@ export function hasSeparateBack(material: Material | undefined): boolean {
 export function createGarmentMaterial(material: Material | undefined, flat: boolean, opts: GarmentMatOpts = {}): THREE.MeshPhysicalMaterial {
   const dRough = flat ? 0 : 0.08;
   const pSpec = flat ? 1 : 0.65;
-  const slot = opts.back ? (material?.backTexture ?? material?.frontTexture) : material?.frontTexture;
+  const slot = opts.back && hasSeparateBack(material) ? material?.backTexture : material?.frontTexture;
   const color = slot?.color ?? '#6b7a8f';
   const mat = createSurfaceMaterial({
     color,
@@ -54,6 +54,9 @@ export function createGarmentMaterial(material: Material | undefined, flat: bool
   });
   mat.side = opts.side ?? THREE.DoubleSide;
   mat.shadowSide = THREE.DoubleSide;
+  mat.userData.pieceMapOverride = !!opts.pieceMap;
+  let disposed = false;
+  mat.addEventListener('dispose', () => { disposed = true; });
   // Note: the source garment material does not set sheen/clearcoat/ior; keep MeshPhysicalMaterial defaults.
 
   // Texture maps. UVs are in mm, so repeat = 1/scale tiles every `scale` mm. Best-effort loads
@@ -74,6 +77,7 @@ export function createGarmentMaterial(material: Material | undefined, flat: bool
     };
     if (slot.url && !opts.pieceMap) {
       loader.load(slot.url, (tex) => {
+        if (disposed || mat.userData.pieceMapOverride) { tex.dispose(); return; }
         tile(tex, true);
         mat.map = tex; mat.color.set('#ffffff'); mat.needsUpdate = true;
       }, undefined, () => {});
@@ -81,6 +85,7 @@ export function createGarmentMaterial(material: Material | undefined, flat: bool
     // Normal map — gives the fabric weave depth under the new image-based lighting (linear, not sRGB).
     if (slot.normalUrl) {
       loader.load(slot.normalUrl, (tex) => {
+        if (disposed) { tex.dispose(); return; }
         tile(tex, false);
         const ns = material?.normalScale ?? slot.normalMapScale ?? 1;
         mat.normalMap = tex; mat.normalScale = new THREE.Vector2(ns, ns); mat.needsUpdate = true;
@@ -89,6 +94,7 @@ export function createGarmentMaterial(material: Material | undefined, flat: bool
     // Opacity / cutwork map — alphaMap drives per-texel transparency (lace, eyelets, sheers).
     if (slot.opacityUrl) {
       loader.load(slot.opacityUrl, (tex) => {
+        if (disposed) { tex.dispose(); return; }
         tile(tex, false);
         mat.alphaMap = tex; mat.transparent = true; mat.needsUpdate = true;
       }, undefined, () => {});
@@ -149,14 +155,16 @@ export function createGarmentMaterial(material: Material | undefined, flat: bool
 }
 
 /** Dispose a garment material and the textures it owns (map/normal/alpha + baked label badge). */
-export function disposeGarmentMaterial(material: THREE.Material): void {
+export function disposeGarmentMaterial(material: THREE.Material, keepLabels = false): void {
   const m = material as THREE.MeshPhysicalMaterial;
   m.map?.dispose();
   m.normalMap?.dispose();
   m.alphaMap?.dispose();
   const u = m.userData?.labelUniforms as { uLabelMap: { value: THREE.Texture | null }; uLabelMapBack: { value: THREE.Texture | null } } | undefined;
-  u?.uLabelMap.value?.dispose();
-  if (u && u.uLabelMapBack.value !== u.uLabelMap.value) u.uLabelMapBack.value?.dispose();
+  if (!keepLabels) {
+    u?.uLabelMap.value?.dispose();
+    if (u && u.uLabelMapBack.value !== u.uLabelMap.value) u.uLabelMapBack.value?.dispose();
+  }
   m.dispose();
 }
 

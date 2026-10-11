@@ -3,6 +3,11 @@
 // This file is the single source of truth consumed by the 2D canvas, the panels and the
 // 3D renderer (avatar reconstruction, arrangement, triangulation and cloth simulation).
 
+import type { PieceArtwork } from './artwork';
+import type { ColorwayState } from './colorways';
+import type { TechPackDocument } from './techPack';
+import type { WorkspaceLayout } from './workspace';
+
 export interface Formula {
   formula: string;
   unit: 'inch' | 'cm' | 'mm' | 'degrees' | 'radians' | string;
@@ -730,6 +735,14 @@ export interface Pattern {
   // Optional for patterns saved before the Measure tool existed.
   measurements?: Measurement[];
   productionSpec?: ProductionSpec;
+  /** Production document metadata, size values, construction instructions and manual costing. */
+  techPack?: TechPackDocument;
+  /** Named appearance variants over the same editable geometry. */
+  colorways?: ColorwayState;
+  /** Raster artwork positioned in each piece's canonical draft coordinates (millimeters). */
+  artwork?: PieceArtwork[];
+  /** Optional custom arrangement of the supported 2D, 3D and Specs panes. */
+  workspaceLayout?: WorkspaceLayout;
   // Optional sewing order driving the assembly timeline; absent = seams sew in `seams` order.
   assembly?: Assembly;
 

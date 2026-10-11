@@ -481,6 +481,10 @@ export function convertSimplePatternWithLegacyProject(
     restored.enable3d = legacyProject.enable3d !== false;
     restored.viewMode = legacyProject.viewMode ?? restored.viewMode;
     if (legacyProject.productionSpec) restored.productionSpec = structuredClone(legacyProject.productionSpec);
+    if (legacyProject.techPack) restored.techPack = structuredClone(legacyProject.techPack);
+    if (legacyProject.colorways) restored.colorways = structuredClone(legacyProject.colorways);
+    if (legacyProject.artwork) restored.artwork = structuredClone(legacyProject.artwork);
+    if (legacyProject.workspaceLayout) restored.workspaceLayout = structuredClone(legacyProject.workspaceLayout);
     return restored;
   }
   const pattern = convertSimplePattern(json, canonicalPencilSkirt);
@@ -679,10 +683,13 @@ export function convertSimplePatternWithLegacyProject(
     useLegacyDefaultAvatar: legacyProject.body.useLegacyDefaultAvatar ?? true
   };
 
-  // Copy garment-level project settings that do not reference the discarded legacy drafting graph.
+  // Preserve document data independently of the rebuilt drafting graph. Piece/annotation links
+  // in production, colorway and artwork records may remain stale in this paired legacy path;
+  // their panels expose missing references for explicit repair rather than guessing owner IDs or
+  // artwork coordinate frames. Complete native JSON/SSP restores retain the original identities.
   const transferable = [
     'lengthUnit', 'angleUnit', 'defaultNotchSize', 'currentSize', 'seamAllowance', 'settings3d',
-    'gradingProfile', 'markerSettings', 'productionSpec', 'graphicsOffset', 'graphicsScale', 'enable3d', 'viewMode',
+    'gradingProfile', 'markerSettings', 'productionSpec', 'techPack', 'colorways', 'artwork', 'workspaceLayout', 'graphicsOffset', 'graphicsScale', 'enable3d', 'viewMode',
     'showCompass', 'showGrid', 'snapToGrid', 'snapToGuides', 'showPieceNames', 'useBodyMeasurementsForSizes'
   ] as const;
   const sourceRecord = legacyProject as unknown as Record<string, unknown>;

@@ -8,6 +8,9 @@
     advanceSeamToolPhase,
     applySeamPick,
     breakoutPiece,
+    artworkDraftPoint,
+    artworkPlacementProblem,
+    artworkSourceProblem,
     deletePiece as deletePieceCascade,
     layerDashPattern,
     layerStrokeColor,
@@ -16,6 +19,7 @@
     piecePointUpdate,
     samePick,
     type BreakoutMode,
+    type ArtworkSource,
     type LayerStyle,
     type Measurement,
     type Pattern,
@@ -23,7 +27,8 @@
     type SeamPick
   } from '@seamer/pattern-model';
   import { buildSilhouette, type Silhouette } from '@seamer/avatar';
-  import { isAppShortcutBlocked, isSpecsKeyboardTarget, scene3dOwnsKeyboard } from '$lib/utils/keyboard';
+  import { isAppShortcutBlocked, isDocumentKeyboardTarget, scene3dOwnsKeyboard } from '$lib/utils/keyboard';
+  import { artworkImageMatchesSource } from '$lib/scene/pieceTextureImages';
   import { isDarkTheme, onThemeChange } from '$lib/utils/theme';
   import DrawingTools from '$lib/components/DrawingTools.svelte';
   import ContextMenu, { type MenuItem } from '$lib/components/ContextMenu.svelte';
@@ -378,6 +383,17 @@
   // Material front textures are remote media URLs; we serve a local copy by
   // basename under /textures and tile it in world-mm space on the piece fill.
   const texImages = new Map<string, HTMLImageElement>(); // url -> loaded image
+  const artworkImages = new Map<string, HTMLImageElement>();
+  function artworkImageFor(source: ArtworkSource): HTMLImageElement | null {
+    const url = source.dataUrl;
+    const existing = artworkImages.get(url);
+    if (existing) return existing.complete && artworkImageMatchesSource(existing, source) ? existing : null;
+    const image = new Image();
+    image.onload = () => render();
+    image.src = url;
+    artworkImages.set(url, image);
+    return null;
+  }
   function textureFor(url: string | undefined | null): HTMLImageElement | null {
     if (!url) return null;
     if (texImages.has(url)) {
@@ -394,6 +410,29 @@
   function materialOf(id: string) {
     const mats = currentPattern.materials ?? [];
     return mats.find((m) => m.id === id) ?? mats[0] ?? null;
+  }
+
+  /** Each raster follows the owner's actual drafting-to-plan transform, including mirrors and
+   * shrinkage. Three transformed UV corners give the exact canvas affine map; boundary clipping
+   * prevents a print from appearing on another piece or the background.
+   */
+  function drawPieceArtwork(c: CanvasRenderingContext2D, piece: Piece, outline: Vec2[], transform: (point: Vec2) => Vec2) {
+    for (const artwork of currentPattern.artwork ?? []) {
+      if (artwork.pieceId !== piece.id || artworkSourceProblem(artwork) || artworkPlacementProblem(artwork)) continue;
+      const image = artworkImageFor(artwork);
+      if (!image) continue;
+      const origin = toCanvas(transform(artworkDraftPoint(artwork, 0, 0)));
+      const right = toCanvas(transform(artworkDraftPoint(artwork, 1, 0)));
+      const bottom = toCanvas(transform(artworkDraftPoint(artwork, 0, 1)));
+      c.save();
+      tracePoly(c, outline, true);
+      c.clip();
+      c.globalAlpha = artwork.opacity;
+      c.transform((right.x - origin.x) / image.naturalWidth, (right.y - origin.y) / image.naturalWidth,
+        (bottom.x - origin.x) / image.naturalHeight, (bottom.y - origin.y) / image.naturalHeight, origin.x, origin.y);
+      c.drawImage(image, 0, 0);
+      c.restore();
+    }
   }
 
   // ---- layers: visibility / lock --------------------------------------------
@@ -759,7 +798,7 @@
       render();
     });
     const onKey = (e: KeyboardEvent) => {
-      if (isAppShortcutBlocked(e) || isSpecsKeyboardTarget(e.target) || scene3dOwnsKeyboard()) return;
+      if (isAppShortcutBlocked(e) || isDocumentKeyboardTarget(e.target) || scene3dOwnsKeyboard()) return;
       const drawing = isDrawingTool($selectedTool);
       if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
         if (penDraft.length > 0) { e.preventDefault(); finishDraft(); }
@@ -969,6 +1008,11 @@
     // touching component-owned derived selections; Svelte correctly warns when stale effects read
     // those values after teardown.
     if (!mounted || !ctx) return;
+    const activeArtworkSources = new Set((currentPattern.artwork ?? []).map(artwork => artwork.dataUrl));
+    for (const [url, image] of artworkImages) if (!activeArtworkSources.has(url)) {
+      image.onload = null; image.onerror = null;
+      artworkImages.delete(url);
+    }
     const c = ctx;
     c.clearRect(0, 0, canvasW, canvasH);
     c.fillStyle = isDark ? '#15191e' : '#fafafa';
@@ -1083,6 +1127,7 @@
         c.fillStyle = 'rgba(255,255,255,0.55)';
         tracePoly(c, outline, true);
         c.fill();
+        drawPieceArtwork(c, piece, outline, tf);
         for (const pp of piece.mainPaths) {
           if (seamPP.has(pp.id)) { c.strokeStyle = seamPathColor.get(pp.id) ?? PATH_MAGENTA; c.lineWidth = 2; c.setLineDash([]); }
           else { c.strokeStyle = 'rgba(15,23,42,0.9)'; c.lineWidth = 1.5; c.setLineDash([6, 4]); }
@@ -1106,6 +1151,7 @@
         tracePoly(c, outline, true);
         c.fillStyle = pieceFill(c, materialOf(piece.materialId), piece, points);
         c.fill();
+        drawPieceArtwork(c, piece, outline, tf);
         for (const pp of piece.mainPaths) {
           if (seamPP.has(pp.id)) { c.strokeStyle = seamPathColor.get(pp.id) ?? PATH_MAGENTA; c.lineWidth = 2; c.setLineDash([]); }
           else { c.strokeStyle = 'rgba(30,41,59,0.85)'; c.lineWidth = 1.5; c.setLineDash([]); }

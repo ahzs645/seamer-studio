@@ -11,6 +11,11 @@ export function isSpecsKeyboardTarget(target: EventTarget | null): boolean {
   return target instanceof Element && Boolean(target.closest('[data-keyboard-scope="specs"]'));
 }
 
+/** Production, appearance and layout controls own their keys while a canvas remains visible. */
+export function isDocumentKeyboardTarget(target: EventTarget | null): boolean {
+  return target instanceof Element && Boolean(target.closest('[data-keyboard-scope="specs"], [data-keyboard-scope="artwork"], [data-keyboard-scope="colorways"], [data-keyboard-scope="workspace"]'));
+}
+
 /** Dialogs keep app shortcuts from acting on the pattern underneath them. */
 export function isDialogKeyboardTarget(target: EventTarget | null): boolean {
   return Boolean(
@@ -36,6 +41,6 @@ export function scene3dOwnsKeyboard(): boolean {
 
 /** Shared guard for single-key 2D drawing shortcuts. Shift is checked by each binding. */
 export function canUseDrawingShortcut(event: KeyboardEvent): boolean {
-  return !isAppShortcutBlocked(event) && !isSpecsKeyboardTarget(event.target) &&
+  return !isAppShortcutBlocked(event) && !isDocumentKeyboardTarget(event.target) &&
     !event.metaKey && !event.ctrlKey && !event.altKey && !scene3dOwnsKeyboard();
 }

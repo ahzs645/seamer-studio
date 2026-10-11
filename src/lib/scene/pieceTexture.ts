@@ -6,8 +6,9 @@
 
 import * as THREE from 'three';
 import { base as pathsBase } from '$app/paths';
-import type { TextureSlot, Vec2 } from '@seamer/pattern-model';
-import { loadImageFromCandidates, textureUrlCandidates } from './textureUrl';
+import { artworkSourceProblem, type PieceArtwork, type TextureSlot, type Vec2 } from '@seamer/pattern-model';
+import { drawPieceArtwork } from './pieceArtworkTexture';
+import { artworkImageMatchesSource, bindPieceTextureImages } from './pieceTextureImages';
 
 export interface PieceBake {
   /** material texture slot driving the print (null = solid color piece) */
@@ -27,17 +28,23 @@ export interface PieceBake {
   hMM: number;
   /** renderer anisotropy for the map (the original: 8 desktop, 2 mobile) */
   anisotropy: number;
+  /** Front-face prints, in canonical draft coordinates before instance reflection. */
+  artwork?: readonly PieceArtwork[];
+  mirrored?: boolean;
+  /** Texture decoding can finish after the scene stops rendering continuously. */
+  onupdate?: () => void;
 }
 
 const isMobile = (): boolean =>
   typeof navigator !== 'undefined' && /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
 
 /** A piece needs a bake when it has a print to align or internal lines to show. */
-export function pieceNeedsBake(bake: Pick<PieceBake, 'slot' | 'internalPolys'>): boolean {
-  return !!bake.slot?.url || bake.internalPolys.some((p) => p.length >= 2);
+export function pieceNeedsBake(bake: Pick<PieceBake, 'slot' | 'internalPolys' | 'artwork'>): boolean {
+  return !!bake.slot?.url || bake.internalPolys.some((p) => p.length >= 2) ||
+    !!bake.artwork?.some(item => !artworkSourceProblem(item) && item.opacity > 0);
 }
 
-function drawBake(canvas: HTMLCanvasElement, bake: PieceBake, image: HTMLImageElement | null): void {
+function drawBake(canvas: HTMLCanvasElement, bake: PieceBake, images: ReadonlyMap<string, HTMLImageElement>): void {
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
   const ppm = canvas.width / bake.wMM; // px per mm
@@ -48,6 +55,7 @@ function drawBake(canvas: HTMLCanvasElement, bake: PieceBake, image: HTMLImageEl
   ctx.fillStyle = bake.fillColor;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
+  const image = bake.slot?.url ? images.get(bake.slot.url) : null;
   if (image && bake.slot) {
     const pat = ctx.createPattern(image, 'repeat');
     if (pat) {
@@ -61,6 +69,8 @@ function drawBake(canvas: HTMLCanvasElement, bake: PieceBake, image: HTMLImageEl
       ctx.fillRect(0, 0, canvas.width, canvas.height);
     }
   }
+
+  drawPieceArtwork(ctx, bake.artwork ?? [], images, bake, canvas.width, canvas.height, bake.mirrored);
 
   // internal style lines (darts, fold lines, style seams) baked into the print
   if (bake.internalPolys.length) {
@@ -93,7 +103,10 @@ export function createPieceTexture(bake: PieceBake): THREE.CanvasTexture {
   canvas.width = Math.max(8, Math.ceil(bake.wMM * ppm));
   canvas.height = Math.max(8, Math.ceil(bake.hMM * ppm));
 
-  drawBake(canvas, bake, null);
+  const artwork = bake.artwork?.filter(item => !artworkSourceProblem(item) && item.opacity > 0) ?? [];
+  const safeBake = { ...bake, artwork };
+  const images = new Map<string, HTMLImageElement>();
+  drawBake(canvas, safeBake, images);
 
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
@@ -105,14 +118,18 @@ export function createPieceTexture(bake: PieceBake): THREE.CanvasTexture {
   tex.repeat.set(1 / bake.wMM, 1 / bake.hMM);
   tex.offset.set(-bake.uMin / bake.wMM, -bake.vMin / bake.hMM);
 
-  if (bake.slot?.url) {
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.onload = () => {
-      drawBake(canvas, bake, img);
+  // Each bake owns its decoders. Disposing an old material cancels its callbacks so a late
+  // image cannot repaint/upload a released texture or invalidate a replacement scene.
+  bindPieceTextureImages(tex, [...(bake.slot?.url ? [bake.slot.url] : []), ...artwork.map(item => item.dataUrl)],
+    images, () => {
+      drawBake(canvas, safeBake, images);
       tex.needsUpdate = true;
-    };
-    loadImageFromCandidates(img, textureUrlCandidates(bake.slot.url, pathsBase));
-  }
+      bake.onupdate?.();
+    }, pathsBase, undefined, (source, image) => {
+      const prints = artwork.filter(item => item.dataUrl === source);
+      // Existing fabric images retain their own loading policy. Artwork must match a valid
+      // declaration; each print is checked again at drawing time for shared-source records.
+      return prints.length ? prints.some(item => artworkImageMatchesSource(image, item)) : true;
+    });
   return tex;
 }

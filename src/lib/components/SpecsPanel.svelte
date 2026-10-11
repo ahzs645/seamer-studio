@@ -1,13 +1,17 @@
 <script lang="ts">
   import type { Pattern, ProductionMeasurement, ProductionMeasurementUnit, ProductionSpec, ProcurementCategory, ProcurementRow } from '@seamer/pattern-model';
   import { assignedMaterialRows, changeSpecUnit, convertSpecValue, evaluateSpecMeasurement } from '$lib/utils/productionSpec';
+  import TechPackPanel from '$lib/components/TechPackPanel.svelte';
+  import { convertTechPackMeasurementUnits } from '$lib/utils/techPack';
 
   interface Props {
     pattern: Pattern;
     onchange: (pattern: Pattern, label?: string) => void;
+    request?: { tab: 'measurements' | 'bom' | 'techpack'; revision: number };
   }
-  let { pattern, onchange }: Props = $props();
-  let tab = $state<'measurements' | 'bom'>('measurements');
+  let { pattern, onchange, request }: Props = $props();
+  let tab = $state<'measurements' | 'bom' | 'techpack'>('measurements');
+  $effect(() => { if (request) { void request.revision; tab = request.tab; } });
   const spec = $derived(pattern.productionSpec ?? { measurements: [], procurement: [] });
   const fabrics = $derived(assignedMaterialRows(pattern));
   const categories: ProcurementCategory[] = ['material', 'trim', 'thread', 'fusing', 'label', 'packaging'];
@@ -19,7 +23,12 @@
     const fieldLabels: Record<string, string> = { name: 'name', manualValue: 'sample actual', target: 'target', tolMinus: 'minus tolerance', tolPlus: 'plus tolerance', notes: 'notes', annotationId: 'source', unit: 'unit' };
     const index = spec.measurements.findIndex(row => row.id === id);
     const field = fieldLabels[Object.keys(patch)[0]] ?? 'values';
-    save({ ...spec, measurements: spec.measurements.map(row => row.id === id ? { ...row, ...patch } : row) }, label ?? `Edit measurement ${index + 1} ${field}`);
+    const next = { ...spec, measurements: spec.measurements.map(row => row.id === id ? { ...row, ...patch } : row) };
+    const previous = spec.measurements[index];
+    if (pattern.techPack && previous && patch.unit && patch.unit !== previous.unit) {
+      onchange({ ...($state.snapshot(pattern) as Pattern), productionSpec: next,
+        techPack: convertTechPackMeasurementUnits(pattern.techPack, id, previous.unit, patch.unit), hasChanged: true }, label ?? `Edit measurement ${index + 1} ${field}`);
+    } else save(next, label ?? `Edit measurement ${index + 1} ${field}`);
   }
   function addMeasurement() {
     const unit = pattern.lengthUnit;
@@ -55,9 +64,10 @@
       <div><h2 class="font-semibold">Specs</h2><p class="text-xs opacity-60 mt-1">{pattern.name} · Measurements and bill of materials</p></div>
       <span class="badge badge-outline text-xs">{spec.measurements.length} POMs · {spec.procurement.length} BOM items</span>
     </div>
-    <div class="flex gap-2 mt-3" role="tablist" aria-label="Specification sections">
+    <div class="flex flex-wrap gap-2 mt-3" role="tablist" aria-label="Specification sections">
       <button class="btn btn-sm" class:btn-primary={tab === 'measurements'} role="tab" aria-selected={tab === 'measurements'} aria-controls="spec-measurements" id="spec-measurements-tab" onclick={() => tab = 'measurements'}>Measurements</button>
       <button class="btn btn-sm" class:btn-primary={tab === 'bom'} role="tab" aria-selected={tab === 'bom'} aria-controls="spec-bom" id="spec-bom-tab" onclick={() => tab = 'bom'}>Bill of materials</button>
+      <button class="btn btn-sm" class:btn-primary={tab === 'techpack'} role="tab" aria-selected={tab === 'techpack'} aria-controls="spec-techpack" id="spec-techpack-tab" onclick={() => tab = 'techpack'}>Tech Pack</button>
     </div>
   </header>
   <div class="overflow-auto flex-1 min-h-0 p-4">
@@ -100,7 +110,7 @@
           </div>
         {/if}
       </div>
-    {:else}
+    {:else if tab === 'bom'}
       <div id="spec-bom" role="tabpanel" aria-labelledby="spec-bom-tab">
         <h3 class="text-sm font-semibold mb-2">Assigned fabrics</h3>
         <p class="text-xs opacity-60 mb-3">Linked live to piece assignments. Cut copies are piece counts; fabric consumption must be estimated separately.</p>
@@ -124,6 +134,8 @@
           </tbody></table></div>
         {/if}
       </div>
+    {:else}
+      <div id="spec-techpack" role="tabpanel" aria-labelledby="spec-techpack-tab"><TechPackPanel {pattern} {onchange} /></div>
     {/if}
   </div>
 </section>

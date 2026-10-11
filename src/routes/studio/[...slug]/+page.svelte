@@ -10,6 +10,8 @@
   import { frozenReadOnlyAutomation } from '$lib/scene/frozenAppRender';
   import PatternScene3D from '$lib/components/PatternScene3D.svelte';
   import WorkspaceSplit from '$lib/components/WorkspaceSplit.svelte';
+  import WorkspaceDock from '$lib/components/WorkspaceDock.svelte';
+  import { layoutPanes, layoutViewMode, normalizeWorkspaceLayout, workspacePreset } from '$lib/utils/workspaceLayout';
   import SpecsPanel from '$lib/components/SpecsPanel.svelte';
   import ContextualSelectionToolbar from '$lib/components/ContextualSelectionToolbar.svelte';
   import GlobeLanternDialog from '$lib/components/GlobeLanternDialog.svelte';
@@ -19,6 +21,8 @@
   import LayerPanel from '$lib/components/LayerPanel.svelte';
   import BodyPanel from '$lib/components/BodyPanel.svelte';
   import MaterialPanel from '$lib/components/MaterialPanel.svelte';
+  import ColorwayPanel from '$lib/components/ColorwayPanel.svelte';
+  import ArtworkPanel from '$lib/components/ArtworkPanel.svelte';
   import SeamPanel from '$lib/components/SeamPanel.svelte';
   import ObjectBrowser from '$lib/components/ObjectBrowser.svelte';
   import { pattern, patternEditor, pushUndo, undo, redo, undoLabel, redoLabel, restoreHistory, clearPersistedHistory, pendingPaste, panelRequest, installSeamerAutomation, getPatternEditor } from '$lib/stores/pattern';
@@ -32,14 +36,16 @@
   import { GARMENTCODE_EXAMPLES, GARMENTCODE_PRESETS, type GarmentCodeRequest } from '$lib/data/garmentCode';
   import { attachGarmentCodeBody, unitKind } from '@seamer/avatar';
   import { compatibleSourceBodyCheckpoint, capturedSourceStretchPolicy, capturedSourceAssemblyComplete, SOURCE_BODY_FIT_REVISION, GARMENT_CODE_ASSEMBLY_REVISION } from '$lib/scene/sourceBodyCheckpoint';
-  import { isAppShortcutBlocked, isSpecsKeyboardTarget, scene3dOwnsKeyboard } from '$lib/utils/keyboard';
+  import { isAppShortcutBlocked, isDocumentKeyboardTarget, scene3dOwnsKeyboard } from '$lib/utils/keyboard';
   import {
     EMPTY_PATTERN,
     deletePath,
     deletePiece,
     deletePoint,
     syncLinkedPaths,
+    validateDocumentExtensions,
     type Pattern,
+    type WorkspaceLayout,
     type Piece,
     type ConstrainablePoint,
     type ConstrainablePath
@@ -159,6 +165,12 @@
   }
   type WorkspaceView = NonNullable<Pattern['viewMode']>;
   let viewMode = $state<WorkspaceView>('both');
+  const customWorkspace = $derived(normalizeWorkspaceLayout(currentPattern.workspaceLayout));
+  const workspacePanes = $derived(customWorkspace ? layoutPanes(customWorkspace) : layoutPanes(workspacePreset(viewMode)));
+  const draftVisible = $derived(workspacePanes.includes('2d'));
+  const specsOnly = $derived(workspacePanes.length === 1 && workspacePanes[0] === 'specs');
+  let specsRequest = $state<{ tab: 'measurements' | 'bom' | 'techpack'; revision: number }>();
+  let specsRequestRevision = 0;
   type Project3DCapture = {
     sourceStretchPolicy: Parameters<typeof capturedSourceStretchPolicy>[1];
     sourceAssemblyComplete: boolean | null;
@@ -172,7 +184,7 @@
     previewDataUrl: string | null;
   };
   let scene3d = $state<{ captureProjectState: () => Project3DCapture | null; beginCameraDocument: () => void } | null>(null);
-  let leftTab = $state<'layers' | 'body' | 'materials' | 'seams'>('layers');
+  let leftTab = $state<'layers' | 'body' | 'materials' | 'seams' | 'colorways' | 'artwork'>('layers');
   let showRightPanel = $state(true);
   let showLeftPanel = $state(true);
   let workspaceWidth = $state(1280);
@@ -279,11 +291,31 @@
 
   function setViewMode(mode: WorkspaceView) {
     applyWorkspaceView(mode);
-    if (currentPattern.viewMode !== mode) {
-      currentPattern = { ...currentPattern, viewMode: mode, hasChanged: true };
+    if (currentPattern.viewMode !== mode || currentPattern.workspaceLayout) {
+      const updated = { ...($state.snapshot(currentPattern) as Pattern), viewMode: mode, workspaceLayout: undefined, hasChanged: true };
+      if (currentPattern.workspaceLayout) pushUndo($state.snapshot(currentPattern) as Pattern, 'Choose workspace preset');
+      currentPattern = updated;
       pattern.set(currentPattern);
       markUnsaved();
     }
+  }
+
+  function handleWorkspaceLayout(layout: WorkspaceLayout) {
+    const valid = normalizeWorkspaceLayout(layout);
+    if (!valid || frozenDiagnosticActive || documentLoading) return;
+    const mode = layoutViewMode(valid);
+    applyWorkspaceView(mode);
+    handleDocumentUpdate({ ...($state.snapshot(currentPattern) as Pattern), workspaceLayout: valid, viewMode: mode }, 'Arrange workspace panes');
+  }
+  function openWorkspaceLayout() {
+    if (frozenDiagnosticActive || documentLoading) return;
+    handleWorkspaceLayout(customWorkspace ?? workspacePreset(viewMode));
+    closeMoreActions();
+  }
+  function openTechPack() {
+    setViewMode('specs');
+    specsRequest = { tab: 'techpack', revision: ++specsRequestRevision };
+    finishExportActions();
   }
 
   const workspaceActions: WorkspaceAction[] = [
@@ -292,7 +324,9 @@
     { id: 'view.3d', label: 'Show 3D garment view', keywords: ['fit', 'workspace'], run: () => setViewMode('3d') },
     { id: 'view.specs', label: 'Show production Specs', keywords: ['measurements', 'bom', 'techpack'], run: () => setViewMode('specs') },
     { id: 'view.all', label: 'Show 2D, 3D and Specs together', keywords: ['all', 'workspace', 'techpack'], run: () => setViewMode('all') },
-    ...(['layers', 'body', 'materials', 'seams'] as const).map((tab) => ({
+    { id: 'workspace.layout', label: 'Arrange workspace panes', keywords: ['dock', 'layout', 'move', 'workspace'], run: openWorkspaceLayout },
+    { id: 'production.techpack', label: 'Open Tech Pack and production export', keywords: ['production', 'specifications', 'costing', 'pdf', 'csv'], run: openTechPack },
+    ...(['layers', 'body', 'materials', 'seams', 'colorways', 'artwork'] as const).map((tab) => ({
       id: `panel.${tab}`,
       label: `Open ${tab === 'materials' ? 'Fabric' : tab.charAt(0).toUpperCase() + tab.slice(1)} panel`,
       keywords: tab === 'materials' ? ['materials', 'texture'] : [tab],
@@ -303,7 +337,8 @@
   ];
 
   function restoreWorkspace(patternData: Pattern) {
-    applyWorkspaceView(patternData.viewMode ?? 'both');
+    const layout = normalizeWorkspaceLayout(patternData.workspaceLayout);
+    applyWorkspaceView(layout ? layoutViewMode(layout) : patternData.viewMode ?? 'both');
     // A pattern that turns piece names off means it in 3D too — names baked across the cloth are
     // an aid on a garment and clutter on a lantern.
     labelDisplay = patternData.showPieceNames === false ? 'off' : 'flat';
@@ -419,6 +454,7 @@
     const disposeCommandApi = installSeamerAutomation();
     const unsubscribeEditor = pattern.subscribe((next) => {
       if (JSON.stringify(next) !== JSON.stringify(currentPattern)) {
+        if (next.viewMode !== currentPattern.viewMode || JSON.stringify(next.workspaceLayout) !== JSON.stringify(currentPattern.workspaceLayout)) restoreWorkspace(next);
         currentPattern = next;
         patternName = next.name;
         markUnsaved();
@@ -444,6 +480,7 @@
           } catch { /* offline — fall through to blank editor */ }
         }
         if (loaded) {
+          validateDocumentExtensions(loaded);
           documentRevision += 1;
           currentPattern = loaded; patternName = loaded.name; restoreWorkspace(loaded);
           saved = true;
@@ -456,7 +493,7 @@
       } else {
         await loadTemplate(DEFAULT_STUDIO_TEMPLATE);
       }
-    })().finally(() => { documentLoading = false; });
+    })().catch((error) => { toastError(error instanceof Error ? error.message : 'Could not open the document.'); }).finally(() => { documentLoading = false; });
 
     const startAutosave = (seconds: number) => {
       clearInterval(autoSaveTimer);
@@ -484,6 +521,7 @@
 
   function handlePatternUpdate(updated: Pattern, label = 'Edit') {
     if (frozenDiagnosticActive) return;
+    validateDocumentExtensions(updated);
     if (JSON.stringify(currentPattern) !== JSON.stringify(updated)) pushUndo($state.snapshot(currentPattern) as Pattern, label);
     // live re-draft: recompute formula-constrained points from variables/measurements.
     // Frozen during alteration edit mode so manual point drags stick (they become the captured delta).
@@ -496,6 +534,15 @@
     // linked paths follow their source's shape (cheap no-op when the pattern has none)
     if (!alterationEdit) updated = syncLinkedPaths(updated);
     currentPattern = updated; markUnsaved(); pattern.set(updated);
+  }
+
+  /** Appearance and production edits preserve the drafting graph and its solved metadata. */
+  function handleDocumentUpdate(updated: Pattern, label = 'Edit document') {
+    if (frozenDiagnosticActive || documentLoading) return;
+    const snapshot = $state.snapshot(updated) as Pattern;
+    if (JSON.stringify(getPatternEditor().content) === JSON.stringify(snapshot)) return;
+    pushUndo($state.snapshot(currentPattern) as Pattern, label);
+    pattern.set({ ...snapshot, hasChanged: true });
   }
 
   // Cache the latest user-run drape for reopening. A saved checkpoint does not certify fit
@@ -634,6 +681,7 @@
   }
 
   async function convertImportedJson(raw: unknown, name?: string): Promise<Pattern> {
+    validateDocumentExtensions(raw);
     if (isGarmentCodeFormat(raw)) return convertGarmentCodePattern(raw, name);
     if (!isSimpleFormat(raw)) return raw as Pattern;
     const canonical = isCanonicalPencilSkirtExport(raw) ? await loadCanonicalPencilSkirt() : undefined;
@@ -686,6 +734,7 @@
 
   async function applyImported(data: Pattern) {
     if (frozenDiagnosticActive) return;
+    validateDocumentExtensions(data);
     // Build the candidate cloth topology before touching canonical editor state. A failed import
     // therefore leaves both the 2D document and the renderer on the same last-valid pattern.
     assertPatternBuildable3d(data);
@@ -710,6 +759,7 @@
   }
 
   function applyRestoredVersion(data: Pattern) {
+    validateDocumentExtensions(data);
     // A version restore stays in the same document and should be undoable; unlike a file import it
     // neither changes the route nor discards the document's history.
     assertPatternBuildable3d(data);
@@ -969,6 +1019,7 @@
 
   /** Fill any arrays/fields a template may omit, so all components can render it safely. */
   function normalizePattern(data: Pattern): Pattern {
+    validateDocumentExtensions(data);
     return {
       ...EMPTY_PATTERN,
       ...data,
@@ -1044,7 +1095,7 @@
       e.preventDefault(); openWorkspacePanel('right'); panelRequest.set({ section: 'sizes' });
     }
     if (e.key === '?' && !e.metaKey && !e.ctrlKey) { e.preventDefault(); showShortcuts = !showShortcuts; }
-    if (viewMode === 'specs' || isSpecsKeyboardTarget(e.target)) return;
+    if (specsOnly || isDocumentKeyboardTarget(e.target)) return;
     if ((e.metaKey || e.ctrlKey) && (e.key === 'd' || e.key === 'D')) { e.preventDefault(); duplicateSelectedPiece(); }
     if ((e.metaKey || e.ctrlKey) && (e.key === 'c' || e.key === 'C')) { e.preventDefault(); handleCopy(); }
     if ((e.metaKey || e.ctrlKey) && (e.key === 'v' || e.key === 'V')) { e.preventDefault(); handlePaste(e.shiftKey); } // Shift = "Paste as copy"
@@ -1172,6 +1223,12 @@
 {#snippet garmentView()}
   <div class="studio-canvas flex-1 min-w-0 min-h-0 relative" data-tour-id="tour-canvas-3d"><PatternScene3D onfrozendiagnosticchange={handleFrozenDiagnostic} bind:this={scene3d} {currentPattern} selectedPieceId={[...pieceIds][0] ?? null} onpieceselect={handlePieceSelect} ondrapesettled={handleDrapeSettled} onpatternupdate={handlePatternUpdate} oncamerachange={handleCameraChange} {labelDisplay} onlabeldisplaychange={(v) => (labelDisplay = v)} /></div>
 {/snippet}
+{#snippet specsView()}
+  <div class="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden" inert={frozenDiagnosticActive}>
+    {#if specsOnly}<div class="px-2 py-1 border-b"><button class="btn btn-ghost btn-xs" onclick={() => setViewMode('all')}>Show 2D + 3D + Specs</button></div>{/if}
+    <div class="flex-1 min-h-0"><SpecsPanel pattern={currentPattern} onchange={handleDocumentUpdate} request={specsRequest} /></div>
+  </div>
+{/snippet}
 {#snippet designViews()}
   <WorkspaceSplit disabled={frozenDiagnosticActive}>
     {#snippet first()}{@render draftView()}{/snippet}
@@ -1258,6 +1315,7 @@
         <ul id="studio-export-menu" class="dropdown-content menu bg-base-200 rounded-box z-50 w-72 p-2 shadow text-sm">
           <li><button onclick={handleExport}>JSON (.seamer.json)</button></li>
           <li><button onclick={exportSSP}>Seamer Project — 2D + 3D (.ssp)</button></li>
+          <li><button onclick={openTechPack}>Tech Pack…</button></li>
           <li><button onclick={() => exportAs('svg')}>SVG</button></li>
           <li><button onclick={() => exportAs('svg2')}>Export SVG 2 (Beta)</button></li>
           <li><button onclick={() => exportAs('dxf')}>DXF</button></li>
@@ -1276,6 +1334,7 @@
         {/if}
       </div>
       <button class="btn btn-ghost btn-xs" onclick={handleNew}>New</button>
+      <button class="btn btn-ghost btn-xs" onclick={openWorkspaceLayout} aria-label="Workspace layout">Layout</button>
       <button class="btn btn-ghost btn-xs" onclick={(e) => { e.currentTarget.focus(); toggleWorkspacePanel('right'); }} title="Toggle properties panel" aria-label="Properties panel" aria-expanded={(narrowWorkspace ? mobilePanel === 'right' : showRightPanel) ? 'true' : 'false'} aria-controls="studio-right-panel"><span class="studio-desktop-label" aria-hidden="true">&#x25B6;</span><span class="studio-mobile-label">Properties</span></button>
 
       <button class="btn btn-xs" aria-label="Object browser" class:btn-active={showObjectBrowser} onclick={() => showObjectBrowser = !showObjectBrowser} title="Toggle object browser" data-testid="object-browser-toggle">
@@ -1316,24 +1375,28 @@
           <span class="font-semibold text-sm">Pattern panels</span>
           <button class="btn btn-ghost btn-xs" aria-label="Close pattern panels" onclick={() => closeWorkspacePanel('left')}>✕</button>
         </div>
-        <div class="tabs tabs-boxed tabs-xs bg-base-200 px-1 pt-1">
+        <div class="tabs tabs-boxed tabs-xs bg-base-200 px-1 pt-1 flex-wrap">
           <button class="tab" class:tab-active={leftTab === 'layers'} onclick={() => leftTab = 'layers'}>Layers</button>
           <button class="tab" class:tab-active={leftTab === 'body'} onclick={() => leftTab = 'body'}>Body</button>
           <button class="tab" class:tab-active={leftTab === 'materials'} onclick={() => leftTab = 'materials'}>Fabric</button>
           <button class="tab" class:tab-active={leftTab === 'seams'} onclick={() => leftTab = 'seams'}>Seams</button>
+          <button class="tab" class:tab-active={leftTab === 'colorways'} onclick={() => leftTab = 'colorways'}>Colorways</button>
+          <button class="tab" class:tab-active={leftTab === 'artwork'} onclick={() => leftTab = 'artwork'}>Artwork</button>
         </div>
         <div class="flex-1 overflow-y-auto p-2">
           {#if leftTab === 'layers'}<LayerPanel {currentPattern} onchange={handlePatternUpdate} />
           {:else if leftTab === 'body'}<BodyPanel {currentPattern} onchange={handlePatternUpdate} />
-          {:else if leftTab === 'materials'}<MaterialPanel {currentPattern} selectedPieceIds={[...pieceIds]} onchange={handlePatternUpdate} />
+          {:else if leftTab === 'materials'}<MaterialPanel {currentPattern} selectedPieceIds={[...pieceIds]} onchange={handleDocumentUpdate} />
           {:else if leftTab === 'seams'}{#key $patternEditor}<SeamPanel {currentPattern} editor={$patternEditor} onchange={handlePatternUpdate} />{/key}
+          {:else if leftTab === 'colorways'}<ColorwayPanel {currentPattern} selectedPieceIds={[...pieceIds]} onchange={handleDocumentUpdate} />
+          {:else if leftTab === 'artwork'}<ArtworkPanel {currentPattern} selectedPieceIds={[...pieceIds]} onchange={handleDocumentUpdate} />
           {/if}
         </div>
       </aside>
     {/if}
 
     <div class="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
-      {#if viewMode !== 'specs'}
+      {#if !specsOnly}
         {#key $patternEditor}<ContextualSelectionToolbar {currentPattern} editor={$patternEditor} disabled={frozenDiagnosticActive}
           onduplicate={duplicateSelectedPiece} onproperties={(kind) => {
             if (kind === 'seam') { leftTab = 'seams'; openWorkspacePanel('left'); }
@@ -1344,17 +1407,17 @@
           }} />{/key}
       {/if}
       <div class="studio-canvases flex-1 min-w-0 flex overflow-hidden" class:split-view={viewMode === 'both' || viewMode === 'all'}>
-        {#if viewMode === 'all'}
+        {#if customWorkspace}
+          <WorkspaceDock layout={customWorkspace} onchange={handleWorkspaceLayout} disabled={frozenDiagnosticActive}
+            draft={draftView} garment={garmentView} specs={specsView} />
+        {:else if viewMode === 'all'}
           <WorkspaceSplit disabled={frozenDiagnosticActive} firstLabel="Design" secondLabel="Specs"
             firstId="studio-design-view" secondId="studio-specs-view" preferenceKey="seamer.workspaceSpecSplit" defaultPercentage={70}>
             {#snippet first()}<div class="flex-1 min-w-0 min-h-0 flex">{@render designViews()}</div>{/snippet}
-            {#snippet second()}<div class="flex-1 min-w-0 min-h-0 overflow-hidden" inert={frozenDiagnosticActive}><SpecsPanel pattern={currentPattern} onchange={handlePatternUpdate} /></div>{/snippet}
+            {#snippet second()}{@render specsView()}{/snippet}
           </WorkspaceSplit>
         {:else if viewMode === 'specs'}
-          <div class="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden" inert={frozenDiagnosticActive}>
-            <div class="px-2 py-1 border-b"><button class="btn btn-ghost btn-xs" onclick={() => setViewMode('all')}>Show 2D + 3D + Specs</button></div>
-            <div class="flex-1 min-h-0"><SpecsPanel pattern={currentPattern} onchange={handlePatternUpdate} /></div>
-          </div>
+          {@render specsView()}
         {:else if viewMode === 'both'}
           {@render designViews()}
         {:else if viewMode === '2d'}
@@ -1372,7 +1435,7 @@
     {/if}
   </div>
 
-  {#if viewMode === '2d' || viewMode === 'both' || viewMode === 'all'}
+  {#if draftVisible}
     <div class="studio-toolbar h-10 border-t bg-base-200 shrink-0" data-tour-id="tour-toolbar">
       <div inert={frozenDiagnosticActive}>{#key $patternEditor}<StudioToolbar {currentPattern} editor={$patternEditor} onchange={handlePatternUpdate} />{/key}</div>
     </div>

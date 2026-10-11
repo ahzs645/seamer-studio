@@ -6,6 +6,7 @@ import {
   EMPTY_PATTERN,
   EMPTY_SEAM_TOOL,
   createPatternRegistry,
+  validateDocumentExtensions,
   type SeamToolState
 } from '@seamer/pattern-model';
 import {
@@ -29,7 +30,10 @@ const replaceSilent: CommandDef<Pattern, ReplaceParams> = {
   summary: 'Replace the pattern without recording history.',
   inputs: ['pattern'],
   mutating: false,
-  run: (_content, params) => params.pattern
+  run: (_content, params) => {
+    validateDocumentExtensions(params.pattern);
+    return params.pattern;
+  }
 };
 
 const replaceWithHistory: CommandDef<Pattern, ReplaceParams> = {
@@ -52,6 +56,7 @@ function registry(): CommandRegistry<Pattern> {
 }
 
 function makeEditor(content: Pattern, docId = content.id): Editor<Pattern> {
+  validateDocumentExtensions(content);
   return new Editor(createDoc(content, { id: docId, name: content.name }), {
     registry: registry(),
     history: {

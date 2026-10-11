@@ -19,7 +19,7 @@
   import { isDarkTheme, toggleTheme, applyStoredTheme, onThemeChange } from '$lib/utils/theme';
   import { show3dStats, simAnchors, selectedTool, seamTool, selectedSeamId, bodyZoomRequest } from '$lib/stores/pattern';
   import { get } from 'svelte/store';
-  import { isAppShortcutBlocked, isSpecsKeyboardTarget } from '$lib/utils/keyboard';
+  import { isAppShortcutBlocked, isDocumentKeyboardTarget } from '$lib/utils/keyboard';
   import { downloadBlob, sceneToGLTF } from '$lib/utils/exporters';
   import { toast, toastError, toastSuccess } from '$lib/stores/toast';
   import { confirm } from '$lib/stores/confirm';
@@ -329,6 +329,13 @@
         renderer?.setShowSeams(snapshot.settings3d.showSeams ?? false);
       });
     }, 350);
+  });
+
+  // Prints update only the existing surface maps. Keeping them out of patternKey is deliberate:
+  // an appearance edit must not restart the worker or replace the garment's current drape.
+  $effect(() => {
+    if (frozenReadOnly) return;
+    renderer?.setArtwork({ id: currentPattern.id, artwork: currentPattern.artwork });
   });
 
   // push external (2D) selection into the 3D view
@@ -745,7 +752,7 @@
     }
     // Typing or using buttons inside the drawer must not trigger viewport shortcuts.
     if (mobileControlsOpen) return;
-    if (isAppShortcutBlocked(e) || isSpecsKeyboardTarget(e.target) || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+    if (isAppShortcutBlocked(e) || isDocumentKeyboardTarget(e.target) || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
     if (e.key === 'a' || e.key === 'A') { e.preventDefault(); toggleArrangeMode(); }
     if (e.key === 'm' || e.key === 'M') {
       // like the 2D toolbar, M defers to "mirror selection" while a piece is selected outside arrange mode
