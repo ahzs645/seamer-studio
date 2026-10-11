@@ -6,6 +6,11 @@ export function isEditableKeyboardTarget(target: EventTarget | null): boolean {
   return editable instanceof HTMLElement && editable.isContentEditable;
 }
 
+/** Production-table focus belongs to Specs even when a drawing pane is still visible. */
+export function isSpecsKeyboardTarget(target: EventTarget | null): boolean {
+  return target instanceof Element && Boolean(target.closest('[data-keyboard-scope="specs"]'));
+}
+
 /** Dialogs keep app shortcuts from acting on the pattern underneath them. */
 export function isDialogKeyboardTarget(target: EventTarget | null): boolean {
   return Boolean(
@@ -31,6 +36,6 @@ export function scene3dOwnsKeyboard(): boolean {
 
 /** Shared guard for single-key 2D drawing shortcuts. Shift is checked by each binding. */
 export function canUseDrawingShortcut(event: KeyboardEvent): boolean {
-  return !isAppShortcutBlocked(event) &&
+  return !isAppShortcutBlocked(event) && !isSpecsKeyboardTarget(event.target) &&
     !event.metaKey && !event.ctrlKey && !event.altKey && !scene3dOwnsKeyboard();
 }

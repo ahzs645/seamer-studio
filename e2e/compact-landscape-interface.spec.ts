@@ -111,15 +111,16 @@ for(const viewport of [{width:667,height:375},{width:768,height:375},{width:390,
         await page.setViewportSize(viewport);
       }
       const header=page.locator('.studio-topbar'),scene=page.getByTestId('pattern-scene-3d');
+      const viewButtons=await header.getByRole('group',{name:'Workspace view',exact:true}).getByRole('button').all();
       const labels:Locator[]=[header.getByRole('link',{name:'Back to patterns',exact:true}),page.getByTestId('templates-menu-trigger'),
-        ...await header.getByRole('group',{name:'Workspace view',exact:true}).getByRole('button').all(),page.getByTestId('import-menu-trigger'),header.locator('[data-tour-id="tour-save"]')];
+        ...viewButtons,page.getByTestId('import-menu-trigger'),header.locator('[data-tour-id="tour-save"]')];
       if(touch)labels.push(header.getByRole('button',{name:'More',exact:true}));
       const buttons=[];
       for(const button of labels)buttons.push({label:await button.innerText(),bounds:await target(button,touch)});
       const viewGroup=header.getByRole('group',{name:'Workspace view',exact:true});
       // Joined view buttons share their one-pixel border; their individual center
       // hit-tests stay strict, while spatial clearance compares whole control groups.
-      const groups=[buttons[0],buttons[1],{label:'Workspace view',bounds:await viewGroup.boundingBox()},...buttons.slice(5)];
+      const groups=[buttons[0],buttons[1],{label:'Workspace view',bounds:await viewGroup.boundingBox()},...buttons.slice(2+viewButtons.length)];
       const observed={viewport,touchEmulation:touch,header:await header.boundingBox(),scene:await scene.boundingBox(),buttons,groups};
       await writeFile(info.outputPath('actual-header-layout.json'),JSON.stringify(observed,null,2));
       await page.screenshot({path:info.outputPath('normal-header.png')});
@@ -149,7 +150,8 @@ for(const viewport of [{width:667,height:375},{width:768,height:375},{width:390,
         // A menu action restores More; the directly visible portrait action
         // restores its own Fabric trigger. Both actual focus paths stay asserted.
         await expect(fabricIsMenuAction ? more : fabric).toBeFocused();
-        const primary=scene.getByRole('group',{name:'Primary 3D controls',exact:true});await expect(primary.getByRole('button')).toHaveCount(3);
+        const primary=scene.getByRole('group',{name:'Primary 3D controls',exact:true});await expect(primary.getByRole('button')).toHaveCount(4);
+        await expect(primary.getByRole('button',{name:'Zoom to garment',exact:true})).toBeVisible();
         for(const button of await primary.getByRole('button').all())await target(button,true);
       }
       await actualFraming(page,touch,info);

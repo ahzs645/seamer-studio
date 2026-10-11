@@ -2,14 +2,68 @@
   import type { Pattern, Material, TextureSlot } from '@seamer/pattern-model';
   import MaterialPreview3D from '$lib/components/MaterialPreview3D.svelte';
   import TextureMapSource from '$lib/components/TextureMapSource.svelte';
+  import { materialLibrary, instantiateFromLibrary, saveNewLibraryItem } from '$lib/stores/materialLibrary';
+  import { applyFabric, removeFabric, type FabricSource } from '$lib/utils/fabricApplication';
 
   interface Props {
     currentPattern: Pattern;
-    onchange: (p: Pattern) => void;
+    onchange: (p: Pattern, label?: string) => void;
+    selectedPieceIds?: readonly string[];
   }
 
-  let { currentPattern, onchange }: Props = $props();
+  let { currentPattern, onchange, selectedPieceIds = [] }: Props = $props();
   let editingId: string | null = $state(null);
+  let query = $state('');
+  let sourceTab = $state<'project' | 'library'>('project');
+  let chosen = $state<{ kind: 'project' | 'library'; id: string } | null>(null);
+  let status = $state('');
+  const matches = (name: string) => name.toLowerCase().includes(query.trim().toLowerCase());
+  const projectResults = $derived(currentPattern.materials.filter(material => material.id === editingId || matches(material.name)));
+  const libraryResults = $derived($materialLibrary.filter(item => matches(item.name)));
+  const selectedIds = $derived(currentPattern.pieces.filter(piece => selectedPieceIds.includes(piece.id)).map(piece => piece.id));
+  const activeSource: FabricSource | null = $derived.by(() => {
+    const selected = chosen;
+    if (!selected || selected.kind !== sourceTab) return null;
+    if (selected.kind === 'project') return currentPattern.materials.some(material => material.id === selected.id)
+      ? { kind: 'project', id: selected.id } : null;
+    const item = $materialLibrary.find(item => item.id === selected.id);
+    return item ? { kind: 'library', item } : null;
+  });
+  const activeName = $derived(activeSource?.kind === 'library' ? activeSource.item.name
+    : activeSource ? currentPattern.materials.find(material => material.id === activeSource.id)?.name : undefined);
+
+  function choose(kind: 'project' | 'library', id: string) {
+    chosen = { kind, id };
+    status = '';
+  }
+
+  function apply(scope: 'selected' | 'all') {
+    if (!activeSource) return;
+    const targets = scope === 'all' ? currentPattern.pieces.map(piece => piece.id) : selectedIds;
+    const result = applyFabric($state.snapshot(currentPattern) as Pattern, activeSource.kind === 'library'
+      ? { kind: 'library', item: structuredClone($state.snapshot(activeSource.item)) } : activeSource, targets);
+    if (result.count) {
+      const sourceLabel = activeSource.kind === 'library'
+        ? `${activeName} (library copy ${currentPattern.materials.filter(material => material.libraryItemId === activeSource.item.id).length + 1})`
+        : `${activeName} (fabric ${currentPattern.materials.findIndex(material => material.id === activeSource.id) + 1})`;
+      const scopeLabel = scope === 'all' ? 'all pieces' : currentPattern.pieces.filter(piece => targets.includes(piece.id)).map(piece => piece.name || 'Unnamed piece').join(', ');
+      onchange(result.pattern, `Apply ${sourceLabel} to ${scopeLabel}`);
+      status = `Applied ${activeName} to ${result.count} ${result.count === 1 ? 'piece' : 'pieces'}.`;
+    } else status = targets.length ? 'These pieces already use this fabric.' : 'Select a piece to apply fabric.';
+  }
+
+  function createFromLibrary() {
+    if (activeSource?.kind !== 'library') return;
+    const material = structuredClone(instantiateFromLibrary($state.snapshot(activeSource.item), crypto.randomUUID()));
+    onchange({ ...currentPattern, materials: [...currentPattern.materials, material], hasChanged: true }, 'Create fabric from library');
+    sourceTab = 'project'; query = ''; choose('project', material.id); editingId = material.id;
+  }
+
+  function saveToLibrary(material: Material) {
+    const link = saveNewLibraryItem($state.snapshot(material), new Date().toISOString());
+    patch(material.id, value => ({ ...value, ...link }));
+    status = `Saved ${material.name} to the local fabric library.`;
+  }
 
   function defaultSlot(color: string): TextureSlot {
     return {
@@ -48,12 +102,16 @@
       libraryVersion: null,
       libraryUpdatedAt: null
     };
-    onchange({ ...currentPattern, materials: [...currentPattern.materials, mat], hasChanged: true });
+    onchange({ ...currentPattern, materials: [...currentPattern.materials, mat], hasChanged: true }, 'Create fabric');
+    sourceTab = 'project'; query = ''; choose('project', id);
     editingId = id;
   }
 
   function removeMaterial(id: string) {
-    onchange({ ...currentPattern, materials: currentPattern.materials.filter((m) => m.id !== id), hasChanged: true });
+    onchange(removeFabric($state.snapshot(currentPattern) as Pattern, id), 'Remove fabric');
+    if (editingId === id) editingId = null;
+    if (chosen?.id === id && chosen.kind === 'project') chosen = null;
+    status = 'Fabric removed. Pieces using it now use the first remaining fabric, or have no fabric.';
   }
 
   function patch(id: string, fn: (m: Material) => Material) {
@@ -102,9 +160,16 @@
 
 <div class="material-panel text-xs">
   <h3 class="font-bold mb-2">Fabric</h3>
+  <label class="block mb-2"><span class="sr-only">Search fabrics</span><input class="input input-bordered input-xs w-full" type="search" aria-label="Search fabrics" placeholder="Search fabrics…" bind:value={query} /></label>
+  <div class="flex gap-1 mb-2" role="group" aria-label="Fabric sources">
+    <button class="btn btn-xs flex-1" class:btn-active={sourceTab === 'project'} aria-pressed={sourceTab === 'project'} onclick={() => { sourceTab = 'project'; status = ''; }}>Project fabrics</button>
+    <button class="btn btn-xs flex-1" class:btn-active={sourceTab === 'library'} aria-pressed={sourceTab === 'library'} onclick={() => { sourceTab = 'library'; status = ''; }}>Saved library</button>
+  </div>
+  <p class="mb-2 opacity-70">{selectedIds.length} selected {selectedIds.length === 1 ? 'piece' : 'pieces'} · {currentPattern.pieces.length} total</p>
 
   <div class="material-list space-y-1 mb-2 max-h-72 overflow-y-auto">
-    {#each currentPattern.materials as mat (mat.id)}
+    {#if sourceTab === 'project'}
+    {#each projectResults as mat (mat.id)}
       {#if editingId === mat.id}
         <div class="bg-base-200 p-2 rounded space-y-1">
           <MaterialPreview3D material={mat} />
@@ -183,31 +248,57 @@
               <input type="number" min="0" max="1" step="0.05" class="input input-bordered input-xs w-full" value={mat.alphaCutoff}
                 onchange={(e) => commitNumber(e, mat.alphaCutoff, (v) => patch(mat.id, (m) => ({ ...m, alphaCutoff: v })))} /></label>
           </div>
+          <button class="btn btn-xs btn-outline w-full" onclick={() => saveToLibrary(mat)}>Save to library</button>
           <button class="btn btn-xs btn-ghost w-full" onclick={() => (editingId = null)}>Done</button>
         </div>
       {:else}
-        <div role="button" tabindex="0" class="flex items-center gap-1 p-1 rounded hover:bg-base-200 cursor-pointer w-full text-left"
-          onclick={() => (editingId = mat.id)}
+        <div role="button" tabindex="0" class="fabric-card flex items-center gap-1 p-1 rounded hover:bg-base-200 cursor-pointer w-full text-left"
+          class:chosen={chosen?.kind === 'project' && chosen.id === mat.id}
+          data-testid="project-fabric-card" aria-pressed={chosen?.kind === 'project' && chosen.id === mat.id}
+          onclick={() => choose('project', mat.id)} ondblclick={() => { choose('project', mat.id); editingId = mat.id; }}
           onkeydown={(e: KeyboardEvent) => {
-            if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); editingId = mat.id; }
+            if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); choose('project', mat.id); }
           }}>
-          <span class="w-3 h-3 rounded-full inline-block border" style="background: {swatch(mat)}"></span>
+          <span class="fabric-swatch" style:background={swatch(mat)}>{#if mat.frontTexture?.url}<img src={mat.frontTexture.url} alt="" loading="lazy" />{/if}</span>
           <span class="flex-1 truncate">{mat.name}</span>
           <span class="text-xs opacity-50">↔{mat.stretchWarpValue}/{mat.stretchWeftValue}</span>
-          <button class="btn btn-xs btn-ghost px-1" aria-label={`Edit fabric ${mat.name}`} onclick={(e: MouseEvent) => { e.stopPropagation(); editingId = mat.id; }}>✎</button>
+          <button class="btn btn-xs btn-ghost px-1" aria-label={`Edit fabric ${mat.name}`} onclick={(e: MouseEvent) => { e.stopPropagation(); choose('project', mat.id); editingId = mat.id; }}>✎</button>
           <button class="btn btn-xs btn-ghost px-0.5 text-error" aria-label={`Remove fabric ${mat.name}`} onclick={(e: MouseEvent) => { e.stopPropagation(); removeMaterial(mat.id); }}>&times;</button>
         </div>
       {/if}
     {/each}
-    {#if currentPattern.materials.length === 0}
-      <p class="text-xs opacity-50 my-1">No fabrics defined.</p>
+    {#if projectResults.length === 0}
+      <p class="text-xs opacity-50 my-1">{query.trim() ? 'No project fabrics match your search.' : 'No fabrics defined.'}</p>
+    {/if}
+    {:else}
+      {#each libraryResults as item (item.id)}
+        <button type="button" class="fabric-card flex items-center gap-2 p-1 rounded hover:bg-base-200 w-full text-left"
+          class:chosen={chosen?.kind === 'library' && chosen.id === item.id} aria-pressed={chosen?.kind === 'library' && chosen.id === item.id}
+          data-testid="library-fabric-card" onclick={() => choose('library', item.id)}>
+          <span class="fabric-swatch" style:background={item.material.frontTexture?.color ?? '#7c8aa0'}>{#if item.material.frontTexture?.url}<img src={item.material.frontTexture.url} alt="" loading="lazy" />{/if}</span>
+          <span class="min-w-0 flex-1"><strong class="block truncate">{item.name}</strong><span class="opacity-60">Version {item.version} · {item.material.weight} g/m²</span></span>
+        </button>
+      {/each}
+      {#if libraryResults.length === 0}<p class="opacity-60 py-2">{query.trim() ? 'No saved fabrics match your search.' : 'No saved fabrics yet. Edit a project fabric and save it to your library.'}</p>{/if}
     {/if}
   </div>
-
+  <div class="border-t pt-2 space-y-1" aria-label="Apply fabric">
+    <p>{activeName ? `Chosen: ${activeName}` : 'Choose a fabric to apply.'}</p>
+    {#if sourceTab === 'library'}<p class="opacity-60">Applying creates a linked copy in this project.</p>{/if}
+    <button class="btn btn-xs btn-primary w-full" disabled={!activeSource || selectedIds.length === 0} onclick={() => apply('selected')}>Apply to selected pieces</button>
+    <button class="btn btn-xs btn-outline w-full" disabled={!activeSource || currentPattern.pieces.length === 0} onclick={() => apply('all')}>Apply to all pieces</button>
+    {#if !selectedIds.length}<p class="opacity-60">Select pieces in 2D, 3D or the object browser to apply only to them.</p>{/if}
+    {#if status}<p role="status" class="py-1">{status}</p>{/if}
+  </div>
+  {#if sourceTab === 'library'}<button class="btn btn-xs btn-ghost w-full mt-2" disabled={activeSource?.kind !== 'library'} onclick={createFromLibrary}>Create from library</button>{/if}
   <button class="btn btn-xs btn-ghost w-full" onclick={addMaterial}>+ Add Fabric</button>
 </div>
 
 <style>
+  .fabric-card { border: 1px solid transparent; min-width: 0; }
+  .fabric-card.chosen { border-color: oklch(var(--p)); background: oklch(var(--b2)); }
+  .fabric-swatch { display: block; width: 40px; height: 40px; flex-shrink: 0; border-radius: 0.35rem; overflow: hidden; border: 1px solid oklch(var(--bc) / 0.15); }
+  .fabric-swatch img { width: 100%; height: 100%; object-fit: cover; }
   @media (max-width: 1023px) {
     .material-list { max-height: none; overflow: visible; }
     .material-panel :global(button), .material-panel :global([role="button"]) { min-height: 44px; min-width: 44px; }

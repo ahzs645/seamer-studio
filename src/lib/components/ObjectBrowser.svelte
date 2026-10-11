@@ -1,8 +1,6 @@
 <script lang="ts">
-	import { get } from 'svelte/store';
 	import type { Editor } from '@atelier/core';
 	import { editorState } from '@atelier/svelte';
-	import { selectedSeamId } from '$lib/stores/pattern';
 	import {
 		deletePath,
 		deletePoint,
@@ -30,12 +28,23 @@
 	const pointIds = $derived(editorView.selection.get('point'));
 	const pathIds = $derived(editorView.selection.get('path'));
 	const pieceIds = $derived(editorView.selection.get('piece'));
+	const seamIds = $derived(editorView.selection.get('seam'));
+	const textIds = $derived(editorView.selection.get('text'));
 
 	// ---- Panel chrome (drag + minimize) -------------------------------------
 	let pos = $state({ x: 524, y: 69 });
 	let dragging = $state(false);
 	let dragOffset = { x: 0, y: 0 };
 	let minimized = $state(false);
+	let panel = $state<HTMLDivElement>();
+	function clampPanel() {
+		if (!panel) return;
+		const bounds = panel.getBoundingClientRect();
+		const x = Math.max(8, Math.min(pos.x, window.innerWidth - bounds.width - 8));
+		const y = Math.max(8, Math.min(pos.y, window.innerHeight - bounds.height - 8));
+		if (x !== pos.x || y !== pos.y) pos = { x, y };
+	}
+	$effect(() => { minimized; if (open && panel) clampPanel(); });
 
 	function startDrag(e: PointerEvent) {
 		if ((e.target as HTMLElement).closest('button')) return; // let header buttons work
@@ -59,7 +68,6 @@
 	let collapsed = $state<Record<string, boolean>>({});
 	let expanded = $state<Record<string, boolean>>({});
 	let search = $state('');
-	let selectedKey = $state<string | null>(null); // local highlight for seams / text
 
 	const toggleGroup = (k: GroupKey) => (collapsed = { ...collapsed, [k]: !collapsed[k] });
 	const toggleItem = (id: string) => (expanded = { ...expanded, [id]: !expanded[id] });
@@ -82,22 +90,18 @@
 
 	// ---- Selection (drives the canvas through the shared Editor) ------------
 	function selectPoint(id: string) {
-		editor.setSelection(editor.selection.replace('point', [id]).clear('path').clear('piece'));
-		selectedKey = id;
+		editor.setSelection(editor.selection.replace('point', [id]).clear('path').clear('piece').clear('seam').clear('text'));
 	}
 	function selectPath(id: string) {
-		editor.setSelection(editor.selection.replace('path', [id]).clear('point').clear('piece'));
-		selectedKey = id;
+		editor.setSelection(editor.selection.replace('path', [id]).clear('point').clear('piece').clear('seam').clear('text'));
 	}
 	function selectPiece(id: string) {
-		editor.setSelection(editor.selection.replace('piece', [id]).clear('point').clear('path'));
-		selectedKey = id;
+		editor.setSelection(editor.selection.replace('piece', [id]).clear('point').clear('path').clear('seam').clear('text'));
 	}
-	const selectOther = (id: string) => (selectedKey = id);
+	const selectText = (id: string) => editor.setSelection(editor.selection.clear().replace('text', [id]));
 	// Seam rows also drive the cross-view seam highlight (2D emphasis + 3D display-when-selected).
 	const selectSeamRow = (id: string) => {
-		selectedKey = id;
-		selectedSeamId.set(get(selectedSeamId) === id ? null : id);
+		editor.setSelection(editor.selection.clear().replace('seam', editor.selection.has('seam', id) ? [] : [id]));
 	};
 
 	// ---- Mutations (mirror the page's onchange contract) --------------------
@@ -106,6 +110,11 @@
 
 	/** Cascading delete: removes the object AND anything that can't exist without it (see patternMutations). */
 	function removeFrom(group: GroupKey, id: string) {
+		if (group === 'texts') {
+			const result = editor.execute('element.delete', { id });
+			if (result.ok && result.changed) editor.setSelection(editor.selection.remove('text', id));
+			return;
+		}
 		const del =
 			group === 'paths'
 				? deletePath
@@ -116,6 +125,9 @@
 						: group === 'seams'
 							? deleteSeam
 							: deleteText;
+		if (group === 'seams' && editor.selection.has('seam', id)) {
+			editor.setSelection(editor.selection.remove('seam', id));
+		}
 		onchange(del(currentPattern, id));
 	}
 	function toggleHidden(id: string) {
@@ -135,8 +147,11 @@
 	}
 </script>
 
+<svelte:window onresize={clampPanel} />
+
 {#if open}
 	<div
+		bind:this={panel}
 		class="fixed max-w-[95vw] md:max-w-[80vw] max-h-[80dvh] z-[65] bg-base-100 flex flex-col border border-base-300 rounded-md shadow-lg shadow-black/30 text-sm w-[95vw] md:w-[25rem] overflow-hidden"
 		class:cursor-grabbing={dragging}
 		class:cursor-grab={!dragging}
@@ -329,13 +344,13 @@
 									{#each seams as seam (seam.id)}
 										<div role="listitem" draggable="true"
 											class="select-none rounded-md px-2 py-1 transition-colors hover:bg-base-200 active:bg-base-300 flex items-center gap-2 cursor-[ns-resize]"
-											class:bg-base-200={selectedKey === seam.id}
+											class:bg-base-200={seamIds.has(seam.id)}
 											ondragstart={() => rowDragStart('seams', seam.id)}
 											ondragover={(e) => e.preventDefault()}
 											ondrop={(e) => { e.preventDefault(); rowDrop('seams', seam.id); }}>
 											<span class="material-symbols-rounded text-base-content/70 notranslate" title="Drag to reorder">drag_indicator</span>
 											<div class="flex flex-col w-full">
-												<div role="button" tabindex="0" class="flex items-center h-8 cursor-pointer select-none" title="Select"
+												<div role="button" tabindex="0" class="flex items-center h-8 cursor-pointer select-none" title="Select" aria-pressed={seamIds.has(seam.id)}
 													onclick={() => selectSeamRow(seam.id)}
 													onkeydown={(e) => e.key === 'Enter' && selectSeamRow(seam.id)}>
 													<span class="text-sm">{seamLabel(seam)}</span>
@@ -367,15 +382,15 @@
 									{#each texts as text (text.id)}
 										<div role="listitem" draggable="true"
 											class="select-none rounded-md px-2 py-1 transition-colors hover:bg-base-200 active:bg-base-300 flex items-center gap-2 cursor-[ns-resize]"
-											class:bg-base-200={selectedKey === text.id}
+											class:bg-base-200={textIds.has(text.id)}
 											ondragstart={() => rowDragStart('texts', text.id)}
 											ondragover={(e) => e.preventDefault()}
 											ondrop={(e) => { e.preventDefault(); rowDrop('texts', text.id); }}>
 											<span class="material-symbols-rounded text-base-content/70 notranslate" title="Drag to reorder">drag_indicator</span>
 											<div class="flex flex-col w-full">
-												<div role="button" tabindex="0" class="flex items-center h-8 cursor-pointer select-none" title="Select"
-													onclick={() => selectOther(text.id)}
-													onkeydown={(e) => e.key === 'Enter' && selectOther(text.id)}>
+												<div role="button" tabindex="0" class="flex items-center h-8 cursor-pointer select-none" title="Select" aria-pressed={textIds.has(text.id)}
+													onclick={() => selectText(text.id)}
+													onkeydown={(e) => e.key === 'Enter' && selectText(text.id)}>
 													<span class="text-sm">{textLabel(text)}</span>
 													<div class="ml-auto">
 														<button class="ml-1" title="Delete" onclick={(e) => { e.stopPropagation(); removeFrom('texts', text.id); }}>

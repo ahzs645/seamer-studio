@@ -593,10 +593,11 @@
 
   type Txt = Pattern['texts'][number];
   function updateText(id: string, partial: Partial<Txt>) {
-    updatePattern({ texts: currentPattern.texts.map((t) => (t.id === id ? { ...t, ...partial } : t)) });
+    editor.execute('text.update', { textId: id, ...partial });
   }
   function removeText(id: string) {
-    updatePattern({ texts: currentPattern.texts.filter((t) => t.id !== id) });
+    const result = editor.execute('element.delete', { id });
+    if (result.ok && result.changed) editor.setSelection(editor.selection.remove('text', id));
   }
   type Img = Pattern['images'][number];
   function updateImage(id: string, partial: Partial<Img>) {

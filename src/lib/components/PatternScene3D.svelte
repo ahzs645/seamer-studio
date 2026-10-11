@@ -19,7 +19,7 @@
   import { isDarkTheme, toggleTheme, applyStoredTheme, onThemeChange } from '$lib/utils/theme';
   import { show3dStats, simAnchors, selectedTool, seamTool, selectedSeamId, bodyZoomRequest } from '$lib/stores/pattern';
   import { get } from 'svelte/store';
-  import { isAppShortcutBlocked } from '$lib/utils/keyboard';
+  import { isAppShortcutBlocked, isSpecsKeyboardTarget } from '$lib/utils/keyboard';
   import { downloadBlob, sceneToGLTF } from '$lib/utils/exporters';
   import { toast, toastError, toastSuccess } from '$lib/stores/toast';
   import { confirm } from '$lib/stores/confirm';
@@ -745,7 +745,7 @@
     }
     // Typing or using buttons inside the drawer must not trigger viewport shortcuts.
     if (mobileControlsOpen) return;
-    if (isAppShortcutBlocked(e) || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+    if (isAppShortcutBlocked(e) || isSpecsKeyboardTarget(e.target) || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
     if (e.key === 'a' || e.key === 'A') { e.preventDefault(); toggleArrangeMode(); }
     if (e.key === 'm' || e.key === 'M') {
       // like the 2D toolbar, M defers to "mirror selection" while a piece is selected outside arrange mode
@@ -1088,7 +1088,7 @@
   <!-- Camera view presets -->
   <div class="scene-camera absolute top-2 right-2 z-10 join join-horizontal bg-base-200/85 backdrop-blur rounded-lg shadow" role="group" aria-label="Camera views">
     {#each [['front', 'Front'], ['back', 'Back'], ['left', 'Left'], ['right', 'Right'], ['top', 'Top']] as [v, label]}
-      <button class="join-item btn btn-xs" title={`${label} view`} onclick={() => setView(v as 'front')}>{label[0]}</button>
+      <button class="join-item btn btn-xs" title={`${label} view`} aria-label={`${label} view`} onclick={() => setView(v as 'front')}>{label}</button>
     {/each}
     {#if currentPattern.garmentCodeSource && bodyEnabled}
       <button class="join-item btn btn-xs" title="Zoom to garment" aria-label="Zoom to garment" onclick={zoomToGarment}>

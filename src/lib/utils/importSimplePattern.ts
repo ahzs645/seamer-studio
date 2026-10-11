@@ -480,6 +480,7 @@ export function convertSimplePatternWithLegacyProject(
     };
     restored.enable3d = legacyProject.enable3d !== false;
     restored.viewMode = legacyProject.viewMode ?? restored.viewMode;
+    if (legacyProject.productionSpec) restored.productionSpec = structuredClone(legacyProject.productionSpec);
     return restored;
   }
   const pattern = convertSimplePattern(json, canonicalPencilSkirt);
@@ -681,7 +682,7 @@ export function convertSimplePatternWithLegacyProject(
   // Copy garment-level project settings that do not reference the discarded legacy drafting graph.
   const transferable = [
     'lengthUnit', 'angleUnit', 'defaultNotchSize', 'currentSize', 'seamAllowance', 'settings3d',
-    'gradingProfile', 'markerSettings', 'graphicsOffset', 'graphicsScale', 'enable3d', 'viewMode',
+    'gradingProfile', 'markerSettings', 'productionSpec', 'graphicsOffset', 'graphicsScale', 'enable3d', 'viewMode',
     'showCompass', 'showGrid', 'snapToGrid', 'snapToGuides', 'showPieceNames', 'useBodyMeasurementsForSizes'
   ] as const;
   const sourceRecord = legacyProject as unknown as Record<string, unknown>;

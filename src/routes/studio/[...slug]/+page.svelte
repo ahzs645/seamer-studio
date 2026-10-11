@@ -9,6 +9,9 @@
   import PatternCanvas2D from '$lib/components/PatternCanvas2D.svelte';
   import { frozenReadOnlyAutomation } from '$lib/scene/frozenAppRender';
   import PatternScene3D from '$lib/components/PatternScene3D.svelte';
+  import WorkspaceSplit from '$lib/components/WorkspaceSplit.svelte';
+  import SpecsPanel from '$lib/components/SpecsPanel.svelte';
+  import ContextualSelectionToolbar from '$lib/components/ContextualSelectionToolbar.svelte';
   import GlobeLanternDialog from '$lib/components/GlobeLanternDialog.svelte';
   import GarmentCodeDialog from '$lib/components/GarmentCodeDialog.svelte';
   import StudioToolbar from '$lib/components/StudioToolbar.svelte';
@@ -29,7 +32,7 @@
   import { GARMENTCODE_EXAMPLES, GARMENTCODE_PRESETS, type GarmentCodeRequest } from '$lib/data/garmentCode';
   import { attachGarmentCodeBody, unitKind } from '@seamer/avatar';
   import { compatibleSourceBodyCheckpoint, capturedSourceStretchPolicy, capturedSourceAssemblyComplete, SOURCE_BODY_FIT_REVISION, GARMENT_CODE_ASSEMBLY_REVISION } from '$lib/scene/sourceBodyCheckpoint';
-  import { isAppShortcutBlocked, scene3dOwnsKeyboard } from '$lib/utils/keyboard';
+  import { isAppShortcutBlocked, isSpecsKeyboardTarget, scene3dOwnsKeyboard } from '$lib/utils/keyboard';
   import {
     EMPTY_PATTERN,
     deletePath,
@@ -80,7 +83,7 @@
   import { redraft, hasConstraints, makeParametric, solvePoints, resolveVariables, captureAlterationDelta } from '@seamer/pattern-model/solver/solve';
   import AlterationsPanel from '$lib/components/AlterationsPanel.svelte';
   import type { AlterationTrack, BezierHandle } from '@seamer/pattern-model';
-  import CommandPalette from '$lib/components/CommandPalette.svelte';
+  import CommandPalette, { type WorkspaceAction } from '$lib/components/CommandPalette.svelte';
   import BugReportModal from '$lib/components/BugReportModal.svelte';
   import CuttingRoomModal from '$lib/components/CuttingRoomModal.svelte';
   import VersionsModal from '$lib/components/VersionsModal.svelte';
@@ -133,6 +136,7 @@
     editor.setSelection(update(editor.selection));
   }
   let saved = $state(true);
+  let documentLoading = $state(true);
   let documentRevision = 0;
   const documentSaver = createDocumentSaver<Pattern>(saveToDB);
   let autosaving = false;
@@ -153,7 +157,8 @@
     autosaveErrorShown = false;
     return receipt;
   }
-  let viewMode = $state<'2d' | '3d' | 'both'>('both');
+  type WorkspaceView = NonNullable<Pattern['viewMode']>;
+  let viewMode = $state<WorkspaceView>('both');
   type Project3DCapture = {
     sourceStretchPolicy: Parameters<typeof capturedSourceStretchPolicy>[1];
     sourceAssemblyComplete: boolean | null;
@@ -192,7 +197,7 @@
     showExportMenu = false;
     if (restoreFocus) moreActionsTrigger?.focus({ preventScroll: true });
   }
-  let panelsBefore3d: { left: boolean; right: boolean } | null = null;
+  let panelsBeforeFocus: { left: boolean; right: boolean } | null = null;
   let panelTrigger: HTMLElement | null = null;
   let leftPanelElement = $state<HTMLElement | null>(null);
   let rightPanelElement = $state<HTMLElement | null>(null);
@@ -251,15 +256,16 @@
     if (!narrowWorkspace && mobilePanel) mobilePanel = null;
   });
 
-  function applyWorkspaceView(mode: '2d' | '3d' | 'both') {
-    if (mode === '3d' && viewMode !== '3d') {
-      panelsBefore3d = { left: showLeftPanel, right: showRightPanel };
+  function applyWorkspaceView(mode: WorkspaceView) {
+    const focused = (v: WorkspaceView) => v === '3d' || v === 'specs' || v === 'all';
+    if (focused(mode) && !focused(viewMode)) {
+      panelsBeforeFocus = { left: showLeftPanel, right: showRightPanel };
       showLeftPanel = false;
       showRightPanel = false;
-    } else if (mode !== '3d' && viewMode === '3d' && panelsBefore3d) {
-      showLeftPanel = panelsBefore3d.left;
-      showRightPanel = panelsBefore3d.right;
-      panelsBefore3d = null;
+    } else if (!focused(mode) && focused(viewMode) && panelsBeforeFocus) {
+      showLeftPanel = panelsBeforeFocus.left;
+      showRightPanel = panelsBeforeFocus.right;
+      panelsBeforeFocus = null;
     }
     mobilePanel = null;
     viewMode = mode;
@@ -271,7 +277,7 @@
   let showGrading = $state(false);
   let showAlterations = $state(false);
 
-  function setViewMode(mode: '2d' | '3d' | 'both') {
+  function setViewMode(mode: WorkspaceView) {
     applyWorkspaceView(mode);
     if (currentPattern.viewMode !== mode) {
       currentPattern = { ...currentPattern, viewMode: mode, hasChanged: true };
@@ -279,6 +285,22 @@
       markUnsaved();
     }
   }
+
+  const workspaceActions: WorkspaceAction[] = [
+    { id: 'view.2d', label: 'Show 2D pattern view', keywords: ['draft', 'workspace'], run: () => setViewMode('2d') },
+    { id: 'view.both', label: 'Show 2D and 3D together', keywords: ['both', 'split', 'workspace'], run: () => setViewMode('both') },
+    { id: 'view.3d', label: 'Show 3D garment view', keywords: ['fit', 'workspace'], run: () => setViewMode('3d') },
+    { id: 'view.specs', label: 'Show production Specs', keywords: ['measurements', 'bom', 'techpack'], run: () => setViewMode('specs') },
+    { id: 'view.all', label: 'Show 2D, 3D and Specs together', keywords: ['all', 'workspace', 'techpack'], run: () => setViewMode('all') },
+    ...(['layers', 'body', 'materials', 'seams'] as const).map((tab) => ({
+      id: `panel.${tab}`,
+      label: `Open ${tab === 'materials' ? 'Fabric' : tab.charAt(0).toUpperCase() + tab.slice(1)} panel`,
+      keywords: tab === 'materials' ? ['materials', 'texture'] : [tab],
+      run: () => { leftTab = tab; openWorkspacePanel('left'); }
+    })),
+    { id: 'panel.properties', label: 'Open Properties panel', keywords: ['selection', 'inspector'], run: () => openWorkspacePanel('right') },
+    { id: 'help.shortcuts', label: 'Show keyboard shortcuts', keywords: ['help', 'keys'], run: () => { showShortcuts = true; } }
+  ];
 
   function restoreWorkspace(patternData: Pattern) {
     applyWorkspaceView(patternData.viewMode ?? 'both');
@@ -434,7 +456,7 @@
       } else {
         await loadTemplate(DEFAULT_STUDIO_TEMPLATE);
       }
-    })();
+    })().finally(() => { documentLoading = false; });
 
     const startAutosave = (seconds: number) => {
       clearInterval(autoSaveTimer);
@@ -999,21 +1021,18 @@
   function handlePieceSelect(id: string | null) {
     // Avoid redundant 3D highlight work when this is already the exact cross-view selection.
     const cur = pieceIds;
-    if ((id ? cur.size === 1 && cur.has(id) : cur.size === 0) && pointIds.size === 0 && pathIds.size === 0) return;
-    setSelection((current) => current.replace('piece', id ? [id] : []).clear('point').clear('path'));
+    if ((id ? cur.size === 1 && cur.has(id) : cur.size === 0) && pointIds.size === 0 && pathIds.size === 0 && selection.get('seam').size === 0 && selection.get('text').size === 0) return;
+    setSelection((current) => current.replace('piece', id ? [id] : []).clear('point').clear('path').clear('seam').clear('text'));
   }
 
   function handleUndo() { const prev = undo($state.snapshot(currentPattern) as Pattern); if (prev) { currentPattern = prev; patternName = prev.name; restoreWorkspace(prev); pattern.set(prev); markUnsaved(); } }
   function handleRedo() { const next = redo($state.snapshot(currentPattern) as Pattern); if (next) { currentPattern = next; patternName = next.name; restoreWorkspace(next); pattern.set(next); markUnsaved(); } }
 
   function handleKeydown(e: KeyboardEvent) {
-    if (frozenDiagnosticActive) return;
+    if (frozenDiagnosticActive || documentLoading) return;
     if (isAppShortcutBlocked(e)) return;
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); e.shiftKey ? handleRedo() : handleUndo(); }
     if ((e.metaKey || e.ctrlKey) && e.key === 's') { e.preventDefault(); handleSave(); }
-    if ((e.metaKey || e.ctrlKey) && (e.key === 'd' || e.key === 'D')) { e.preventDefault(); duplicateSelectedPiece(); }
-    if ((e.metaKey || e.ctrlKey) && (e.key === 'c' || e.key === 'C')) { e.preventDefault(); handleCopy(); }
-    if ((e.metaKey || e.ctrlKey) && (e.key === 'v' || e.key === 'V')) { e.preventDefault(); handlePaste(e.shiftKey); } // Shift = "Paste as copy"
     if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); showCommandPalette = !showCommandPalette; }
     if ((e.metaKey || e.ctrlKey) && !e.shiftKey && (e.key === 'b' || e.key === 'B')) { e.preventDefault(); toggleWorkspacePanel('right'); }
     if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'l' || e.key === 'L')) {
@@ -1025,6 +1044,10 @@
       e.preventDefault(); openWorkspacePanel('right'); panelRequest.set({ section: 'sizes' });
     }
     if (e.key === '?' && !e.metaKey && !e.ctrlKey) { e.preventDefault(); showShortcuts = !showShortcuts; }
+    if (viewMode === 'specs' || isSpecsKeyboardTarget(e.target)) return;
+    if ((e.metaKey || e.ctrlKey) && (e.key === 'd' || e.key === 'D')) { e.preventDefault(); duplicateSelectedPiece(); }
+    if ((e.metaKey || e.ctrlKey) && (e.key === 'c' || e.key === 'C')) { e.preventDefault(); handleCopy(); }
+    if ((e.metaKey || e.ctrlKey) && (e.key === 'v' || e.key === 'V')) { e.preventDefault(); handlePaste(e.shiftKey); } // Shift = "Paste as copy"
     // The scene handles its own keys. It leaves M unconsumed for a selected
     // pattern's mirror command when it is not arranging pieces.
     const selectedMirror = e.key.toLowerCase() === 'm' && (pointIds.size || pathIds.size || pieceIds.size);
@@ -1143,7 +1166,20 @@
     handleWorkspacePanelKeydown(event); if (!event.defaultPrevented) handleKeydown(event);
   }} />
 
-<div class="studio-shell flex flex-col h-screen overflow-hidden">
+{#snippet draftView()}
+  <div class="studio-canvas flex-1 min-w-0 min-h-0 relative" data-tour-id="tour-canvas-2d" inert={frozenDiagnosticActive}>{#key $patternEditor}<PatternCanvas2D {currentPattern} editor={$patternEditor} onchange={handlePatternUpdate} />{/key}</div>
+{/snippet}
+{#snippet garmentView()}
+  <div class="studio-canvas flex-1 min-w-0 min-h-0 relative" data-tour-id="tour-canvas-3d"><PatternScene3D onfrozendiagnosticchange={handleFrozenDiagnostic} bind:this={scene3d} {currentPattern} selectedPieceId={[...pieceIds][0] ?? null} onpieceselect={handlePieceSelect} ondrapesettled={handleDrapeSettled} onpatternupdate={handlePatternUpdate} oncamerachange={handleCameraChange} {labelDisplay} onlabeldisplaychange={(v) => (labelDisplay = v)} /></div>
+{/snippet}
+{#snippet designViews()}
+  <WorkspaceSplit disabled={frozenDiagnosticActive}>
+    {#snippet first()}{@render draftView()}{/snippet}
+    {#snippet second()}{@render garmentView()}{/snippet}
+  </WorkspaceSplit>
+{/snippet}
+
+<div class="studio-shell flex flex-col h-screen overflow-hidden" inert={documentLoading} aria-busy={documentLoading} data-testid="studio-workspace">
   <div inert={frozenDiagnosticActive} class="studio-topbar flex items-center justify-between px-3 py-1.5 bg-base-200 border-b shrink-0">
     <div class="studio-home flex items-center gap-2">
       <a href="{base}/" class="btn btn-ghost btn-xs" aria-label="Back to patterns">&larr;</a>
@@ -1164,6 +1200,8 @@
         <button class="join-item btn btn-xs" class:btn-active={viewMode === '2d'} aria-pressed={viewMode === '2d'} onclick={() => setViewMode('2d')}>2D</button>
         <button class="join-item btn btn-xs" class:btn-active={viewMode === 'both'} aria-pressed={viewMode === 'both'} onclick={() => setViewMode('both')}>Both</button>
         <button class="join-item btn btn-xs" class:btn-active={viewMode === '3d'} aria-pressed={viewMode === '3d'} onclick={() => setViewMode('3d')}>3D</button>
+        <button class="join-item btn btn-xs" class:btn-active={viewMode === 'specs'} aria-pressed={viewMode === 'specs'} onclick={() => setViewMode('specs')}>Specs</button>
+        <button class="join-item btn btn-xs hidden sm:inline-flex" class:btn-active={viewMode === 'all'} aria-pressed={viewMode === 'all'} onclick={() => setViewMode('all')}>All</button>
       </div>
     </div>
     <div class="studio-actions flex items-center gap-1">
@@ -1287,22 +1325,44 @@
         <div class="flex-1 overflow-y-auto p-2">
           {#if leftTab === 'layers'}<LayerPanel {currentPattern} onchange={handlePatternUpdate} />
           {:else if leftTab === 'body'}<BodyPanel {currentPattern} onchange={handlePatternUpdate} />
-          {:else if leftTab === 'materials'}<MaterialPanel {currentPattern} onchange={handlePatternUpdate} />
-          {:else if leftTab === 'seams'}<SeamPanel {currentPattern} onchange={handlePatternUpdate} />
+          {:else if leftTab === 'materials'}<MaterialPanel {currentPattern} selectedPieceIds={[...pieceIds]} onchange={handlePatternUpdate} />
+          {:else if leftTab === 'seams'}{#key $patternEditor}<SeamPanel {currentPattern} editor={$patternEditor} onchange={handlePatternUpdate} />{/key}
           {/if}
         </div>
       </aside>
     {/if}
 
-    <div class="studio-canvases flex-1 min-w-0 flex overflow-hidden" class:split-view={viewMode === 'both'}>
-      {#if viewMode === 'both'}
-        <div class="studio-canvas w-1/2 min-w-0 border-r relative" data-tour-id="tour-canvas-2d" inert={frozenDiagnosticActive}>{#key $patternEditor}<PatternCanvas2D {currentPattern} editor={$patternEditor} onchange={handlePatternUpdate} />{/key}</div>
-        <div class="studio-canvas w-1/2 min-w-0 relative" data-tour-id="tour-canvas-3d"><PatternScene3D onfrozendiagnosticchange={handleFrozenDiagnostic} bind:this={scene3d} {currentPattern} selectedPieceId={[...pieceIds][0] ?? null} onpieceselect={handlePieceSelect} ondrapesettled={handleDrapeSettled} onpatternupdate={handlePatternUpdate} oncamerachange={handleCameraChange} {labelDisplay} onlabeldisplaychange={(v) => (labelDisplay = v)} /></div>
-      {:else if viewMode === '2d'}
-        <div class="flex-1 min-w-0 relative" data-tour-id="tour-canvas-2d" inert={frozenDiagnosticActive}>{#key $patternEditor}<PatternCanvas2D {currentPattern} editor={$patternEditor} onchange={handlePatternUpdate} />{/key}</div>
-      {:else}
-        <div class="flex-1 min-w-0 relative" data-tour-id="tour-canvas-3d"><PatternScene3D onfrozendiagnosticchange={handleFrozenDiagnostic} bind:this={scene3d} {currentPattern} selectedPieceId={[...pieceIds][0] ?? null} onpieceselect={handlePieceSelect} ondrapesettled={handleDrapeSettled} onpatternupdate={handlePatternUpdate} oncamerachange={handleCameraChange} {labelDisplay} onlabeldisplaychange={(v) => (labelDisplay = v)} /></div>
+    <div class="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
+      {#if viewMode !== 'specs'}
+        {#key $patternEditor}<ContextualSelectionToolbar {currentPattern} editor={$patternEditor} disabled={frozenDiagnosticActive}
+          onduplicate={duplicateSelectedPiece} onproperties={(kind) => {
+            if (kind === 'seam') { leftTab = 'seams'; openWorkspacePanel('left'); }
+            else {
+              if (selection.get('text').size > 0) panelRequest.set({ section: 'texts' });
+              openWorkspacePanel('right');
+            }
+          }} />{/key}
       {/if}
+      <div class="studio-canvases flex-1 min-w-0 flex overflow-hidden" class:split-view={viewMode === 'both' || viewMode === 'all'}>
+        {#if viewMode === 'all'}
+          <WorkspaceSplit disabled={frozenDiagnosticActive} firstLabel="Design" secondLabel="Specs"
+            firstId="studio-design-view" secondId="studio-specs-view" preferenceKey="seamer.workspaceSpecSplit" defaultPercentage={70}>
+            {#snippet first()}<div class="flex-1 min-w-0 min-h-0 flex">{@render designViews()}</div>{/snippet}
+            {#snippet second()}<div class="flex-1 min-w-0 min-h-0 overflow-hidden" inert={frozenDiagnosticActive}><SpecsPanel pattern={currentPattern} onchange={handlePatternUpdate} /></div>{/snippet}
+          </WorkspaceSplit>
+        {:else if viewMode === 'specs'}
+          <div class="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden" inert={frozenDiagnosticActive}>
+            <div class="px-2 py-1 border-b"><button class="btn btn-ghost btn-xs" onclick={() => setViewMode('all')}>Show 2D + 3D + Specs</button></div>
+            <div class="flex-1 min-h-0"><SpecsPanel pattern={currentPattern} onchange={handlePatternUpdate} /></div>
+          </div>
+        {:else if viewMode === 'both'}
+          {@render designViews()}
+        {:else if viewMode === '2d'}
+          {@render draftView()}
+        {:else}
+          {@render garmentView()}
+        {/if}
+      </div>
     </div>
 
     {#if showRightPanel || mobilePanel === 'right'}
@@ -1312,7 +1372,7 @@
     {/if}
   </div>
 
-  {#if viewMode !== '3d'}
+  {#if viewMode === '2d' || viewMode === 'both' || viewMode === 'all'}
     <div class="studio-toolbar h-10 border-t bg-base-200 shrink-0" data-tour-id="tour-toolbar">
       <div inert={frozenDiagnosticActive}>{#key $patternEditor}<StudioToolbar {currentPattern} editor={$patternEditor} onchange={handlePatternUpdate} />{/key}</div>
     </div>
@@ -1321,7 +1381,7 @@
   <div class="studio-status">{#key $patternEditor}<StatusBar {currentPattern} {saved} editor={$patternEditor} />{/key}</div>
 
   {#if showObjectBrowser}
-    {#key $patternEditor}<ObjectBrowser {currentPattern} editor={$patternEditor} onchange={handlePatternUpdate} bind:open={showObjectBrowser} />{/key}
+    <div inert={frozenDiagnosticActive}>{#key $patternEditor}<ObjectBrowser {currentPattern} editor={$patternEditor} onchange={handlePatternUpdate} bind:open={showObjectBrowser} />{/key}</div>
   {/if}
 </div>
 
@@ -1330,7 +1390,7 @@
 {#if showTour}<StudioTour onclose={() => (showTour = false)} />{/if}
 <WhatsNewModal />
 <ReviewPromptDialog {saveCount} />
-{#if showCommandPalette}<CommandPalette onclose={() => (showCommandPalette = false)} />{/if}
+{#if showCommandPalette}<CommandPalette actions={workspaceActions} onclose={() => (showCommandPalette = false)} />{/if}
 {#if showBugReport}<BugReportModal {currentPattern} onclose={() => (showBugReport = false)} />{/if}
 {#if showCuttingRoom}<CuttingRoomModal {currentPattern} onchange={handlePatternUpdate} onclose={() => (showCuttingRoom = false)} />{/if}
 {#if showVersions}<VersionsModal {currentPattern} onrestore={applyRestoredVersion} onchange={handlePatternUpdate} onclose={() => (showVersions = false)} />{/if}
@@ -1409,12 +1469,6 @@
     .studio-drawer-header :global(button), .studio-left-panel :global(.tab) { min-height: 44px; min-width: 44px; }
     .studio-toolbar { height: 48px; }
     .studio-toolbar :global(button) { min-height: 44px; min-width: 44px; }
-  }
-
-  @media (max-width: 767px) and (orientation: portrait) {
-    .studio-canvases.split-view { flex-direction: column; }
-    .studio-canvases.split-view > .studio-canvas { width: 100%; height: 50%; border-right: 0; }
-    .studio-canvases.split-view > .studio-canvas:first-child { border-bottom: 1px solid hsl(var(--bc) / 0.15); }
   }
 
   /* Short touch screens need two rows rather than a portrait header above a small canvas. */

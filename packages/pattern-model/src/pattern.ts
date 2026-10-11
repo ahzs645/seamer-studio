@@ -501,6 +501,35 @@ export interface Measurement {
   targetMm: number | null;
 }
 
+/** Production POM values are expressed in this row's unit, independently of canvas display units. */
+export type ProductionMeasurementUnit = 'mm' | 'cm' | 'inch' | 'deg';
+export interface ProductionMeasurement {
+  id: string;
+  name: string;
+  /** null selects a manually entered sample measurement. References remain visible when deleted. */
+  annotationId: string | null;
+  unit: ProductionMeasurementUnit;
+  manualValue: number | null;
+  target: number | null;
+  tolMinus: number;
+  tolPlus: number;
+  notes: string;
+}
+export type ProcurementCategory = 'material' | 'trim' | 'thread' | 'fusing' | 'label' | 'packaging';
+export interface ProcurementRow {
+  id: string;
+  name: string;
+  category: ProcurementCategory;
+  quantity: number | null;
+  unit: string;
+  notes: string;
+}
+/** Optional for older projects; assigned fabrics are derived live, not copied into procurement. */
+export interface ProductionSpec {
+  measurements: ProductionMeasurement[];
+  procurement: ProcurementRow[];
+}
+
 export interface Body {
   // Map of measurement name -> value. Always includes age (years), height, weight.
   // Lengths are in the unit indicated by unitType (imperial => inch/lb, metric => cm/kg).
@@ -700,6 +729,7 @@ export interface Pattern {
   materials: Material[];
   // Optional for patterns saved before the Measure tool existed.
   measurements?: Measurement[];
+  productionSpec?: ProductionSpec;
   // Optional sewing order driving the assembly timeline; absent = seams sew in `seams` order.
   assembly?: Assembly;
 
@@ -734,7 +764,7 @@ export interface Pattern {
   // Show construction geometry (points/paths not used by any piece). When false the 2D canvas hides
   // helper/reference geometry to declutter the view. Faithful to the source's showConstruction flag.
   showConstruction?: boolean;
-  viewMode: '2d' | '3d' | 'both';
+  viewMode: '2d' | '3d' | 'both' | 'specs' | 'all';
   interactionMode: 'fast' | 'accurate' | string;
   settings3d: PatternSettings3D;
   // small JPEG data URL of the 2D layout, refreshed on save, shown on the pattern list

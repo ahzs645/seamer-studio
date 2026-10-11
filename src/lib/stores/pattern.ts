@@ -218,9 +218,17 @@ export const pendingPaste = writable<PendingPaste | null>(null);
  *  The panel consumes it and resets the store to null. */
 export const panelRequest = writable<{ section: string } | null>(null);
 
-/** The seam highlighted across views (SeamPanel/ObjectBrowser row → 2D emphasis + direction arrows,
- *  3D display even when "Show seams" is off — the original's shouldDisplaySeams behavior). */
-export const selectedSeamId = writable<string | null>(null);
+/** Compatibility surface for the 3D scene; seam selection lives only in the canonical Editor.
+ * Existing editor selection events notify patternValue through syncEditorState. */
+const canonicalSeamId = derived(patternValue, () => [...activeEditor.selection.get('seam')][0] ?? null);
+function selectCanonicalSeam(id: string | null): void {
+  activeEditor.setSelection(Selection.empty().replace('seam', id ? [id] : []));
+}
+export const selectedSeamId: Writable<string | null> = {
+  subscribe: canonicalSeamId.subscribe,
+  set: selectCanonicalSeam,
+  update: (updater) => selectCanonicalSeam(updater([...activeEditor.selection.get('seam')][0] ?? null))
+};
 
 /** In-progress seam tool selection, shared by the 2D canvas and the 3D viewport (both can pick
  *  edges for the same seam, like the original's 2D/3D seam tools). */

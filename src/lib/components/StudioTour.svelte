@@ -4,9 +4,19 @@
   // element's bounding rect. Steps whose anchor isn't currently rendered are skipped, so the tour
   // adapts to view mode / collapsed panels. Completion persists in localStorage ('seamer.tourDone')
   // so the first-run flow only offers it once.
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
+  import { containModalTab } from '$lib/utils/focus';
 
   const DONE_KEY = 'seamer.tourDone';
+  const instanceId = $props.id();
+  let dialog = $state<HTMLDialogElement>();
+  let card = $state<HTMLDivElement>();
+  let nextButton = $state<HTMLButtonElement>();
+  let launcher: HTMLElement | null = null;
+  let mounted = false;
+  let finished = false;
+  let cardHeight = $state(180);
+  let viewport = $state({ width: 0, height: 0 });
   let { onclose }: { onclose: () => void } = $props();
 
   interface TourStep { target: string; title: string; body: string }
@@ -22,42 +32,86 @@
     { target: 'tour-save', title: 'Save your work', body: 'Patterns auto-save locally, and this button saves on demand (Ctrl+S works too).' }
   ];
 
-  /** Steps whose anchor element exists right now. */
+  /** Steps whose anchor is visible in the current workspace. */
   let steps = $state<TourStep[]>([]);
   let index = $state(0);
   let rect = $state<DOMRect | null>(null);
 
   const findEl = (id: string) => document.querySelector<HTMLElement>(`[data-tour-id="${id}"]`);
 
+  function visibleAnchor(id: string): HTMLElement | null {
+    const el = findEl(id);
+    if (!el || getComputedStyle(el).visibility === 'hidden') return null;
+    const bounds = el.getBoundingClientRect();
+    return bounds.width > 0 && bounds.height > 0 && bounds.bottom > 0 && bounds.right > 0 &&
+      bounds.top < window.innerHeight && bounds.left < window.innerWidth ? el : null;
+  }
+
   function measure() {
-    const step = steps[index];
-    if (!step) { rect = null; return; }
-    const el = findEl(step.target);
-    if (!el) { rect = null; return; }
-    el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-    rect = el.getBoundingClientRect();
+    if (!mounted) return;
+    viewport = { width: window.innerWidth, height: window.innerHeight };
+    const el = steps[index] && visibleAnchor(steps[index].target);
+    rect = el ? el.getBoundingClientRect() : null;
+  }
+
+  function refreshSteps() {
+    if (!mounted) return;
+    const previousTarget = steps[index]?.target;
+    steps = allSteps.filter((step) => visibleAnchor(step.target));
+    const previousIndex = steps.findIndex((step) => step.target === previousTarget);
+    index = previousIndex >= 0 ? previousIndex : Math.min(index, Math.max(0, steps.length - 1));
+    if (!steps.length) { finish(); return; }
+    measure();
   }
 
   onMount(() => {
-    steps = allSteps.filter((s) => findEl(s.target));
-    if (!steps.length) { finish(); return; }
-    measure();
+    mounted = true;
+    launcher = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    refreshSteps();
+    let observer: ResizeObserver | null = null;
+    void tick().then(() => {
+      if (!mounted || finished || !dialog || !card || !nextButton) return;
+      dialog.showModal();
+      nextButton.focus();
+      observer = new ResizeObserver(() => { if (card) cardHeight = card.getBoundingClientRect().height; });
+      observer.observe(card);
+    });
+    return () => {
+      mounted = false;
+      observer?.disconnect();
+      if (dialog?.open) dialog.close();
+      if (launcher?.isConnected) launcher.focus({ preventScroll: true });
+    };
   });
 
-  $effect(() => { index; steps; measure(); });
+  $effect(() => { index; steps; if (mounted) measure(); });
 
   function finish() {
+    if (finished) return;
+    finished = true;
     try { localStorage.setItem(DONE_KEY, '1'); } catch { /* storage unavailable */ }
+    if (dialog?.open) dialog.close();
+    if (launcher?.isConnected) launcher.focus({ preventScroll: true });
     onclose();
   }
 
   const next = () => { if (index < steps.length - 1) index += 1; else finish(); };
-  const back = () => { if (index > 0) index -= 1; };
+  const back = () => {
+    if (index <= 0) return;
+    const focusedButton = document.activeElement;
+    index -= 1;
+    if (index === 0) void tick().then(() => {
+      if (mounted && !finished && focusedButton instanceof HTMLButtonElement && focusedButton.disabled) nextButton?.focus();
+    });
+  };
 
-  function handleKeydown(e: KeyboardEvent) {
-    if (e.key === 'Escape') { e.preventDefault(); finish(); }
-    else if (e.key === 'ArrowRight' || e.key === 'Enter') { e.preventDefault(); next(); }
-    else if (e.key === 'ArrowLeft') { e.preventDefault(); back(); }
+  function handleKeydown(event: KeyboardEvent) {
+    event.stopPropagation();
+    if (event.key === 'Escape') { event.preventDefault(); finish(); }
+    else if (!event.isComposing && !event.ctrlKey && !event.metaKey && !event.altKey && event.key === 'ArrowRight') { event.preventDefault(); next(); }
+    else if (!event.isComposing && !event.ctrlKey && !event.metaKey && !event.altKey && event.key === 'ArrowLeft') { event.preventDefault(); back(); }
+    else if (dialog) containModalTab(event, dialog);
+    // Enter/Space activate the focused native button (including Back and Skip).
   }
 
   const PAD = 6; // highlight padding around the target rect
@@ -65,19 +119,22 @@
 
   /** Tooltip card position: below the target if there's room, otherwise above; clamped to viewport. */
   let cardStyle = $derived.by(() => {
-    if (!rect) return `left:50%;top:50%;transform:translate(-50%,-50%);width:${CARD_W}px`;
-    const vw = window.innerWidth, vh = window.innerHeight;
-    const left = Math.min(Math.max(8, rect.left + rect.width / 2 - CARD_W / 2), vw - CARD_W - 8);
-    const below = rect.bottom + PAD + 12;
-    const top = below + 180 < vh ? below : Math.max(8, rect.top - PAD - 12 - 180);
-    return `left:${left}px;top:${top}px;width:${CARD_W}px`;
+    const width = Math.min(CARD_W, Math.max(0, viewport.width - 16));
+    const height = Math.min(cardHeight, Math.max(0, viewport.height - 16));
+    const left = rect ? Math.min(Math.max(8, rect.left + rect.width / 2 - width / 2), viewport.width - width - 8) : Math.max(8, (viewport.width - width) / 2);
+    const below = rect ? rect.bottom + PAD + 12 : (viewport.height - height) / 2;
+    const idealTop = rect && below + height > viewport.height - 8 ? rect.top - PAD - 12 - height : below;
+    const top = Math.max(8, Math.min(idealTop, viewport.height - height - 8));
+    return `left:${left}px;top:${top}px;width:${width}px;max-height:calc(100dvh - 16px);overflow-y:auto`;
   });
 </script>
 
-<svelte:window onresize={measure} onkeydown={handleKeydown} />
+<svelte:window onresize={refreshSteps} onscroll={measure} />
 
 {#if steps.length}
-  <div class="fixed inset-0 z-[300]" role="dialog" aria-modal="true" aria-label="Guided tour">
+  <dialog bind:this={dialog} class="fixed inset-0 z-[300] m-0 p-0 border-0 w-screen h-[100dvh] max-w-none max-h-none bg-transparent text-base-content overflow-hidden backdrop:bg-transparent" aria-label="Guided tour" aria-describedby={`${instanceId}-body`}
+    onkeydown={handleKeydown} oncancel={(event) => { event.preventDefault(); finish(); }}
+  >
     <!-- dimmer with a cutout: the highlight box casts a huge shadow over everything else -->
     {#if rect}
       <div
@@ -88,12 +145,12 @@
       <div class="absolute inset-0 bg-black/55 pointer-events-none"></div>
     {/if}
 
-    <div class="absolute bg-base-100 rounded-lg shadow-2xl p-4" style={cardStyle}>
+    <div bind:this={card} class="absolute bg-base-100 rounded-lg shadow-2xl p-4" style={cardStyle}>
       <div class="flex items-start justify-between gap-2 mb-1">
-        <h3 class="font-lexend font-semibold text-sm">{steps[index].title}</h3>
+        <h3 aria-live="polite" class="font-lexend font-semibold text-sm">{steps[index].title}</h3>
         <span class="text-xs opacity-50 shrink-0">{index + 1}/{steps.length}</span>
       </div>
-      <p class="text-xs opacity-80 mb-3">{steps[index].body}</p>
+      <p id={`${instanceId}-body`} class="text-xs opacity-80 mb-3">{steps[index].body}</p>
       <div class="flex items-center gap-1 mb-3" aria-hidden="true">
         {#each steps as _, i}
           <span class="w-1.5 h-1.5 rounded-full {i === index ? 'bg-primary' : 'bg-base-300'}"></span>
@@ -103,9 +160,9 @@
         <button class="btn btn-ghost btn-xs" onclick={finish}>Skip</button>
         <div class="flex gap-1">
           <button class="btn btn-ghost btn-xs" onclick={back} disabled={index === 0}>Back</button>
-          <button class="btn btn-primary btn-xs" onclick={next}>{index === steps.length - 1 ? 'Done' : 'Next'}</button>
+          <button bind:this={nextButton} class="btn btn-primary btn-xs" onclick={next}>{index === steps.length - 1 ? 'Done' : 'Next'}</button>
         </div>
       </div>
     </div>
-  </div>
+  </dialog>
 {/if}

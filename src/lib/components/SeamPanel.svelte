@@ -6,14 +6,19 @@
     type Pattern,
     type Seam
   } from '@seamer/pattern-model';
-  import { selectedSeamId } from '$lib/stores/pattern';
+  import type { Editor } from '@atelier/core';
+  import { editorState } from '@atelier/svelte';
 
   interface Props {
     currentPattern: Pattern;
+    editor: Editor<Pattern>;
     onchange: (p: Pattern) => void;
   }
 
-  let { currentPattern, onchange }: Props = $props();
+  let { currentPattern, editor, onchange }: Props = $props();
+  // svelte-ignore state_referenced_locally -- parent keys this component by Editor identity
+  const editorView = editorState(editor);
+  const seamIds = $derived(editorView.selection.get('seam'));
   let fromId = $state('');
   let toId = $state('');
   let fromMirror = $state(false);
@@ -54,11 +59,12 @@
       toPaths: [{ id: toId, mirrored: toMirror, reversed: false }]
     };
     onchange({ ...currentPattern, seams: [...currentPattern.seams, seam], hasChanged: true });
+    editor.setSelection(editor.selection.clear().replace('seam', [seam.id]));
     fromId = ''; toId = ''; fromMirror = false; toMirror = false;
   }
 
   function removeSeam(id: string) {
-    if ($selectedSeamId === id) selectedSeamId.set(null);
+    if (editor.selection.has('seam', id)) editor.setSelection(editor.selection.remove('seam', id));
     onchange({ ...currentPattern, seams: currentPattern.seams.filter((s) => s.id !== id), hasChanged: true });
   }
 
@@ -69,7 +75,7 @@
   }
 
   function selectSeam(id: string) {
-    selectedSeamId.set($selectedSeamId === id ? null : id);
+    editor.setSelection(editor.selection.clear().replace('seam', editor.selection.has('seam', id) ? [] : [id]));
   }
 </script>
 
@@ -78,9 +84,9 @@
 
   <div class="space-y-1 mb-2 max-h-56 overflow-y-auto">
     {#each currentPattern.seams as seam (seam.id)}
-      {@const isSel = $selectedSeamId === seam.id}
+      {@const isSel = seamIds.has(seam.id)}
       <div class="p-1 rounded bg-base-200" class:ring-1={isSel} class:ring-primary={isSel}>
-        <button class="w-full text-left truncate text-[11px]" title={seamLabel(currentPattern, seam, owners)} onclick={() => selectSeam(seam.id)}>
+        <button class="w-full text-left truncate text-[11px]" data-testid={`seam-select-${seam.id}`} aria-pressed={isSel} title={seamLabel(currentPattern, seam, owners)} onclick={() => selectSeam(seam.id)}>
           {seamLabel(currentPattern, seam, owners)}
         </button>
         {#if isSel}

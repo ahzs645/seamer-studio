@@ -23,13 +23,13 @@
     type SeamPick
   } from '@seamer/pattern-model';
   import { buildSilhouette, type Silhouette } from '@seamer/avatar';
-  import { isAppShortcutBlocked, scene3dOwnsKeyboard } from '$lib/utils/keyboard';
+  import { isAppShortcutBlocked, isSpecsKeyboardTarget, scene3dOwnsKeyboard } from '$lib/utils/keyboard';
   import { isDarkTheme, onThemeChange } from '$lib/utils/theme';
   import DrawingTools from '$lib/components/DrawingTools.svelte';
   import ContextMenu, { type MenuItem } from '$lib/components/ContextMenu.svelte';
   import NumericInput from '$lib/components/NumericInput.svelte';
   import { toast } from '$lib/stores/toast';
-  import { selectedTool, zoom, panOffset, selectedSeamId, seamTool, pathPickRequest, cursorMm, interactionMode, frozenSnapshotOpacity, pendingPaste, type PendingPaste } from '$lib/stores/pattern';
+  import { selectedTool, zoom, panOffset, seamTool, pathPickRequest, cursorMm, interactionMode, frozenSnapshotOpacity, pendingPaste, type PendingPaste } from '$lib/stores/pattern';
   import {
     indexPoints,
     indexPaths,
@@ -74,11 +74,27 @@
   const pointIds = $derived(editorView.selection.get('point'));
   const pathIds = $derived(editorView.selection.get('path'));
   const pieceIds = $derived(editorView.selection.get('piece'));
-  const setPointIds = (ids: Iterable<string>) => editor.setSelection(editor.selection.replace('point', ids));
-  const setPathIds = (ids: Iterable<string>) => editor.setSelection(editor.selection.replace('path', ids));
-  const setPieceIds = (ids: Iterable<string>) => editor.setSelection(editor.selection.replace('piece', ids));
+  const seamIds = $derived(editorView.selection.get('seam'));
+  const setPointIds = (ids: Iterable<string>) => {
+    const next = [...ids];
+    let selection = editor.selection.replace('point', next);
+    if (next.length) selection = selection.clear('seam').clear('text');
+    editor.setSelection(selection);
+  };
+  const setPathIds = (ids: Iterable<string>) => {
+    const next = [...ids];
+    let selection = editor.selection.replace('path', next);
+    if (next.length) selection = selection.clear('seam').clear('text');
+    editor.setSelection(selection);
+  };
+  const setPieceIds = (ids: Iterable<string>) => {
+    const next = [...ids];
+    let selection = editor.selection.replace('piece', next);
+    if (next.length) selection = selection.clear('seam').clear('text');
+    editor.setSelection(selection);
+  };
 
-  let canvasEl: HTMLCanvasElement;
+  let canvasEl = $state<HTMLCanvasElement>(undefined!);
   let ctx: CanvasRenderingContext2D | null = $state(null);
   let isDark = $state(false); // follows the app theme (utils/theme); themes the canvas bg/grid
   let canvasW = $state(800);
@@ -737,14 +753,13 @@
     const unsubZoom = zoom.subscribe((v) => { currentZoom = v; render(); });
     const unsubPan = panOffset.subscribe((v) => { currentPanX = v.x; currentPanY = v.y; render(); });
     const unsubTool = selectedTool.subscribe(() => render());
-    const unsubSelSeam = selectedSeamId.subscribe(() => render());
     // mirror the shared seam-tool selection (2D + 3D picks) into the render locals
     const unsubSeamTool = seamTool.subscribe((s) => {
       seamFromPicks = s.from; seamToPicks = s.to; seamPhase = s.phase;
       render();
     });
     const onKey = (e: KeyboardEvent) => {
-      if (isAppShortcutBlocked(e) || scene3dOwnsKeyboard()) return;
+      if (isAppShortcutBlocked(e) || isSpecsKeyboardTarget(e.target) || scene3dOwnsKeyboard()) return;
       const drawing = isDrawingTool($selectedTool);
       if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
         if (penDraft.length > 0) { e.preventDefault(); finishDraft(); }
@@ -775,7 +790,6 @@
       unsubZoom();
       unsubPan();
       unsubTool();
-      unsubSelSeam();
       unsubSeamTool();
       unsubTheme();
       window.removeEventListener('keydown', onKey);
@@ -1316,7 +1330,7 @@
     // (golden-angle hue spacing) so matching colours = same seam; faint dashed "rungs" link them.
     // A selected seam shows even when "Show seams" is off (the original's shouldDisplaySeams),
     // with extra emphasis + direction arrows on both sides.
-    const selSeam = $selectedSeamId;
+    const selSeam = [...seamIds][0] ?? null;
     if (showSeams || isSeamToolActive() || selSeam) {
       const onlySelected = !showSeams && !isSeamToolActive();
       const sel = pieceIds;
@@ -2480,7 +2494,7 @@
       toPaths: to.map((r) => ({ ...r }))
     };
     onchange({ ...p, seams: [...p.seams, seam], hasChanged: true }, 'Add seam');
-    selectedSeamId.set(seam.id); // the original selects the seam it just created
+    editor.setSelection(editor.selection.clear().replace('seam', [seam.id])); // select the newly created seam
     resetSeamTool();
   }
 
@@ -3139,6 +3153,8 @@
   }
 
   function handleMouseDown(e: MouseEvent) {
+    // Context-menu presses must not draw, drag, or refit selection before the menu resolves its hit.
+    if (e.button === 2) return;
     const pos = getPos(e);
     dragStartX = pos.x; dragStartY = pos.y;
     if ($pathPickRequest && e.button === 0) {
@@ -3281,7 +3297,7 @@
         isMarquee = true;
         marqueeStart = { ...pos };
         marqueeCur = { ...pos };
-        if (!e.shiftKey) { setPointIds([]); setPathIds([]); setPieceIds([]); }
+        if (!e.shiftKey) { editor.setSelection(editor.selection.clear()); }
       }
     }
     render();
@@ -3430,6 +3446,8 @@
 <canvas
   bind:this={canvasEl}
   data-testid="pattern-canvas-2d"
+  tabindex="-1"
+  aria-label="2D pattern canvas"
   width={canvasW}
   height={canvasH}
   class="w-full h-full block"
@@ -3460,7 +3478,7 @@
 {/if}
 
 {#if contextMenu}
-  <ContextMenu x={contextMenu.x} y={contextMenu.y} items={contextMenu.items} onclose={() => (contextMenu = null)} />
+  <ContextMenu x={contextMenu.x} y={contextMenu.y} items={contextMenu.items} returnFocusTo={canvasEl} onclose={() => (contextMenu = null)} />
 {/if}
 
 <div class="absolute top-2 left-2 flex gap-1">
