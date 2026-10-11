@@ -20,11 +20,29 @@ export interface PieceArtwork {
   widthMm: number;
   heightMm: number;
   rotation: number;
+  /** Reflect raster U within the print without changing its piece or physical dimensions. */
+  flipX?: boolean;
   opacity: number;
+  /** Local repeating ink, clipped to the owner; dimensions describe one tile. */
+  repeat?: { mode: 'grid' | 'brick' | 'half-drop'; gapXmm: number; gapYmm: number };
+  treatment?: { blend: 'source-over' | 'multiply' | 'screen'; tint?: string };
+  /** Optional polygon in raw draft millimetres restricts the print zone. */
+  zone?: Vec2[];
+  vectorDesign?: VectorArtworkDesign;
+}
+
+export interface VectorArtworkDesign {
+  width: number;
+  height: number;
+  shapes: Array<{
+    kind: 'rectangle' | 'ellipse' | 'line' | 'text';
+    x: number; y: number; width: number; height: number;
+    fill: string; stroke: string; strokeWidth: number; text?: string;
+  }>;
 }
 
 export type ArtworkSource = Pick<PieceArtwork, 'dataUrl' | 'mimeType' | 'pixelWidth' | 'pixelHeight'>;
-export type ArtworkPlacement = Pick<PieceArtwork, 'x' | 'y' | 'widthMm' | 'heightMm' | 'rotation'>;
+export type ArtworkPlacement = Pick<PieceArtwork, 'x' | 'y' | 'widthMm' | 'heightMm' | 'rotation' | 'flipX'>;
 export const MAX_ARTWORK_SOURCE_BYTES = 2 * 1024 * 1024;
 export const MAX_ARTWORK_PROJECT_BYTES = 8 * 1024 * 1024;
 export const MAX_ARTWORK_PIXELS = 16 * 1024 * 1024;
@@ -63,6 +81,7 @@ export function artworkSourceProblem(source: ArtworkSource): string | null {
 }
 
 export function artworkPlacementProblem(placement: ArtworkPlacement & { opacity: number }): string | null {
+  if (placement.flipX !== undefined && typeof placement.flipX !== 'boolean') return 'Artwork reflection must be a boolean.';
   if (![placement.x, placement.y, placement.rotation, placement.widthMm, placement.heightMm, placement.opacity].every(Number.isFinite)) return 'Artwork placement must use finite numbers.';
   if (placement.widthMm <= 0 || placement.heightMm <= 0 || placement.widthMm > 10000 || placement.heightMm > 10000) return 'Artwork width and height must be greater than zero and at most 10000 mm.';
   if (placement.opacity < 0 || placement.opacity > 1) return 'Artwork opacity must be between 0 and 1.';
@@ -71,7 +90,7 @@ export function artworkPlacementProblem(placement: ArtworkPlacement & { opacity:
 
 export function artworkDraftPoint(artwork: ArtworkPlacement, u: number, v: number): Vec2 {
   const angle = artwork.rotation * Math.PI / 180;
-  const dx = (u - .5) * artwork.widthMm, dy = (.5 - v) * artwork.heightMm;
+  const dx = (u - .5) * artwork.widthMm * (artwork.flipX ? -1 : 1), dy = (.5 - v) * artwork.heightMm;
   return { x: artwork.x + dx * Math.cos(angle) - dy * Math.sin(angle), y: artwork.y + dx * Math.sin(angle) + dy * Math.cos(angle) };
 }
 
@@ -81,7 +100,7 @@ export function artworkDraftPoint(artwork: ArtworkPlacement, u: number, v: numbe
 export function artworkSourceUV(artwork: ArtworkPlacement, point: Vec2): Vec2 {
   const angle = artwork.rotation * Math.PI / 180;
   const dx = point.x - artwork.x, dy = point.y - artwork.y;
-  return { x: .5 + (dx * Math.cos(angle) + dy * Math.sin(angle)) / artwork.widthMm,
+  return { x: .5 + (dx * Math.cos(angle) + dy * Math.sin(angle)) / artwork.widthMm * (artwork.flipX ? -1 : 1),
     y: .5 - (-dx * Math.sin(angle) + dy * Math.cos(angle)) / artwork.heightMm };
 }
 
@@ -127,6 +146,7 @@ export function updatePieceArtwork(pattern: Pattern, id: string, patch: Partial<
   const previous = (pattern.artwork ?? []).find(item => item.id === id);
   if (!previous) return pattern;
   const next = { ...previous, ...patch };
+  validateArtworkSurface(next);
   const placementProblem = artworkPlacementProblem(next);
   if (placementProblem) throw Error(placementProblem);
   // Geometry remains editable on imported records whose image is missing; replacement restores it.
@@ -144,4 +164,36 @@ export function updatePieceArtwork(pattern: Pattern, id: string, patch: Partial<
 export function removePieceArtwork(pattern: Pattern, id: string): Pattern {
   if (!(pattern.artwork ?? []).some(item => item.id === id)) return pattern;
   return { ...pattern, artwork: (pattern.artwork ?? []).filter(item => item.id !== id), hasChanged: true };
+}
+
+export function artworkSurfaceProblem(item: PieceArtwork): string | null {
+  if (item.flipX !== undefined && typeof item.flipX !== 'boolean') return 'Artwork reflection must be a boolean.';
+  if (item.repeat && (!['grid', 'brick', 'half-drop'].includes(item.repeat.mode) ||
+    ![item.repeat.gapXmm, item.repeat.gapYmm].every(v => Number.isFinite(v) && v >= 0 && v <= 10000))) return 'Repeat spacing must be between 0 and 10000 mm.';
+  if (item.treatment && (!['source-over', 'multiply', 'screen'].includes(item.treatment.blend) ||
+    (item.treatment.tint !== undefined && !/^#[0-9a-f]{6}$/i.test(item.treatment.tint)))) return 'Choose a supported ink blend and hex colour.';
+  if (item.zone && (item.zone.length < 3 || item.zone.length > 64 || !item.zone.every(p => p && Number.isFinite(p.x) && Number.isFinite(p.y)))) return 'A print zone needs 3–64 finite draft points.';
+  return null;
+}
+
+
+export function vectorDesignProblem(design: VectorArtworkDesign): string | null {
+  if (!design || !Number.isInteger(design.width) || !Number.isInteger(design.height) || design.width<1 || design.height<1 || design.width>2048 || design.height>2048 || !Array.isArray(design.shapes) || design.shapes.length>128) return 'Use a vector canvas up to 2048 × 2048 pixels and 128 shapes.';
+  for (const shape of design.shapes) {
+    if (!shape || !['rectangle','ellipse','line','text'].includes(shape.kind) || ![shape.x,shape.y,shape.width,shape.height,shape.strokeWidth].every(Number.isFinite) || shape.width<0 || shape.height<0 || shape.strokeWidth<0 || shape.strokeWidth>100 || !/^#[0-9a-f]{6}$/i.test(shape.fill) || !/^#[0-9a-f]{6}$/i.test(shape.stroke) || (shape.text!==undefined && (typeof shape.text!=='string' || shape.text.length>200))) return 'Vector shapes need finite dimensions, supported shapes and hex colours.';
+  }
+  return null;
+}
+
+
+/** Admission guard accepts unknown input and never executes vector markup. */
+export function validateArtworkSurface(value: unknown): void {
+  if(!value || typeof value!=='object'||Array.isArray(value))throw Error('Invalid artwork surface record.');
+  const row=value as PieceArtwork;
+  if(row.flipX!==undefined&&typeof row.flipX!=='boolean')throw Error('Artwork reflection must be a boolean.');
+  if(row.repeat!==undefined && (!row.repeat||typeof row.repeat!=='object'||Array.isArray(row.repeat)))throw Error('Invalid artwork repeat.');
+  if(row.treatment!==undefined && (!row.treatment||typeof row.treatment!=='object'||Array.isArray(row.treatment)))throw Error('Invalid artwork treatment.');
+  if(row.zone!==undefined&&!Array.isArray(row.zone))throw Error('Invalid artwork print zone.');
+  const problem=artworkSurfaceProblem(row);if(problem)throw Error(problem);
+  if(row.vectorDesign!==undefined){const vectorProblem=vectorDesignProblem(row.vectorDesign);if(vectorProblem)throw Error(vectorProblem);}
 }

@@ -21,7 +21,7 @@ async function openFabric(page: Page) {
   await expect(page.getByTestId('studio-workspace')).toHaveAttribute('aria-busy', 'false', { timeout: 60_000 });
   await expect(page.getByTestId('pattern-name-input')).toHaveValue('Pencil skirt - 3D');
   await page.getByRole('button', { name: '2D', exact: true }).click();
-  await page.locator('#studio-left-panel').getByRole('button', { name: 'Fabric', exact: true }).click();
+  await page.locator('#studio-left-panel').getByRole('tab', { name: 'Fabric', exact: true }).click();
   return page.locator('.material-panel');
 }
 

@@ -7,8 +7,10 @@
 
 import { writable } from 'svelte/store';
 import type { Material } from '@seamer/pattern-model';
+import { FABRIC_CATALOG_LIMIT, parseFabricCatalog } from '$lib/utils/fabricLibrary';
 
 const STORAGE_KEY = 'seamer.materialLibrary.v1';
+let storageReadProtected = false;
 
 export interface LibraryItem {
   id: string;
@@ -17,26 +19,37 @@ export interface LibraryItem {
   updatedAt: string; // ISO-8601
   writeProtected: boolean;
   ownerUserId: string | null;
+  collection?: string;
+  tags?: string[];
   /** the stored material body (without the library-link fields, which are pattern-local) */
   material: Omit<Material, 'libraryItemId' | 'libraryVersion' | 'libraryUpdatedAt'>;
 }
 
 function load(): LibraryItem[] {
+  let raw: string | null = null;
   try {
     if (typeof localStorage === 'undefined') return [];
-    const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? (JSON.parse(raw) as LibraryItem[]) : [];
-  } catch {
+    raw = localStorage.getItem(STORAGE_KEY);
+    return raw ? parseFabricCatalog({ version: 1, materials: JSON.parse(raw) }) : [];
+  } catch (error) {
+    // Preserve unreadable source data before allowing subsequent library writes.
+    storageReadProtected = true;
+    try { if (raw) { localStorage.setItem(`${STORAGE_KEY}.invalid-backup`, raw); storageReadProtected = false; } } catch { /* Keep the original entry protected when even a backup is unavailable. */ }
+    libraryPersistenceError.set(`Saved fabric library could not be read. ${storageReadProtected ? 'The original browser entry is protected; changes will stay in this session.' : 'The original browser entry was retained in an invalid-backup entry.'} ${error instanceof Error ? error.message : ''}`);
     return [];
   }
 }
 
+export const libraryPersistenceError = writable<string | null>(null);
+
 function persist(items: LibraryItem[]) {
   try {
     if (typeof localStorage === 'undefined') return;
+    if (storageReadProtected) throw new Error('Unreadable library data could not be backed up. Export or recover the original browser entry before replacing it.');
     localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
-  } catch {
-    /* quota / private mode — keep the in-memory store usable */
+    libraryPersistenceError.set(null);
+  } catch (error) {
+    libraryPersistenceError.set(`Library changes are available in this session but could not be saved: ${error instanceof Error ? error.message : 'Browser storage is unavailable.'}`);
   }
 }
 
@@ -47,6 +60,11 @@ let current: LibraryItem[] = [];
 materialLibrary.subscribe((v) => (current = v));
 
 function commit(next: LibraryItem[]) {
+  if (next.length > FABRIC_CATALOG_LIMIT) {
+    const message = `Saved fabric library is limited to ${FABRIC_CATALOG_LIMIT} fabrics. Remove existing fabrics or import a smaller catalog.`;
+    libraryPersistenceError.set(message);
+    throw new Error(message);
+  }
   next.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
   persist(next);
   materialLibrary.set(next);
@@ -83,6 +101,7 @@ export function saveNewLibraryItem(
     ownerUserId: opts.ownerUserId ?? null,
     material: bodyOf(m)
   };
+  parseFabricCatalog({ version: 1, materials: [item] });
   commit([...current, item]);
   return { libraryItemId: id, libraryVersion: 1, libraryUpdatedAt: now };
 }
@@ -98,6 +117,7 @@ export function overwriteLibraryItem(
   const item = getLibraryItem(m.libraryItemId);
   if (!item || item.writeProtected) return null;
   const version = item.version + 1;
+  parseFabricCatalog({ version: 1, materials: [{ ...item, name: m.name, version, updatedAt: now, material: bodyOf(m) }] });
   const next = current.map((i) =>
     i.id === item.id ? { ...i, name: m.name, version, updatedAt: now, material: bodyOf(m) } : i
   );
@@ -133,6 +153,21 @@ export function syncFromLibrary(m: Material): Material | null {
 
 export function deleteLibraryItem(id: string) {
   commit(current.filter((i) => i.id !== id));
+}
+
+export function organizeLibraryItem(id: string, collection: string, tags: string[]) {
+  commit(current.map(item => item.id === id && !item.writeProtected ? {
+    ...item, collection: collection.trim().slice(0, 120),
+    tags: [...new Set(tags.map(tag => tag.trim().slice(0, 120)).filter(Boolean))].slice(0, 30)
+  } : item));
+}
+
+/** Import copies into the local library. Provider IDs never overwrite an existing user's fabric. */
+export function importCatalogItems(items: LibraryItem[], collection: string, now: string): number {
+  const admitted = parseFabricCatalog({ version: 1, materials: items });
+  const additions = admitted.map(item => ({ ...item, id: `lib_${crypto.randomUUID()}`, version: 1, updatedAt: now, writeProtected: false, ownerUserId: null, collection: collection.trim().slice(0, 120) }));
+  commit([...current, ...additions]);
+  return additions.length;
 }
 
 export type LibraryStatus = 'local' | 'synced' | 'outdated' | 'missing';

@@ -226,7 +226,7 @@ export function piecePathPolyline(
  * (a→b). Interior points lying on the fold are dropped; the remaining free boundary is reflected and
  * appended so the result is a closed loop covering both halves. Used for first-edge symmetry.
  */
-export function mirrorHalfOutline(loop: Vec2[], a: Vec2, b: Vec2): Vec2[] {
+export function mirrorHalfOutline(loop: Vec2[], a: Vec2, b: Vec2, mirrorPoint = (point: Vec2) => reflectAcrossLine(point, a, b)): Vec2[] {
   if (loop.length < 2) return loop;
   const dx = b.x - a.x, dy = b.y - a.y;
   const len2 = dx * dx + dy * dy || 1;
@@ -236,15 +236,28 @@ export function mirrorHalfOutline(loop: Vec2[], a: Vec2, b: Vec2): Vec2[] {
     const perp = Math.hypot(p.x - fx, p.y - fy);
     return perp < 0.5 && t > 0.02 && t < 0.98; // on the fold, strictly between the endpoints
   };
-  const free = loop.filter((p) => !onFoldInterior(p));
-  const reflected = free.map((p) => reflectAcrossLine(p, a, b)).reverse();
+  let free = loop.filter((p) => !onFoldInterior(p));
+  if (free.length > 1 && dist(free[0], free[free.length - 1]) < 1e-4) free = free.slice(0, -1);
+  const nearest = (target: Vec2) => free.reduce((best, point, index) => dist(point, target) < dist(free[best], target) ? index : best, 0);
+  const aIndex = nearest(a), bIndex = nearest(b);
+  const arc = (start: number, end: number) => {
+    const points = [free[start]]; let index = start;
+    while (index !== end) { index = (index + 1) % free.length; points.push(free[index]); }
+    return points;
+  };
+  if (aIndex !== bIndex && dist(free[aIndex], a) < 0.5 && dist(free[bIndex], b) < 0.5) {
+    const first = arc(aIndex, bIndex), second = arc(bIndex, aIndex);
+    const score = (points: Vec2[]) => points.reduce((sum, point) => sum + Math.abs((point.x - a.x) * dy - (point.y - a.y) * dx), 0);
+    free = score(first) > score(second) ? first : second;
+  }
+  const reflected = free.map(mirrorPoint).reverse();
   const full = [...free, ...reflected];
-  // drop consecutive (near-)duplicate vertices created at the two fold endpoints
   const out: Vec2[] = [];
   for (const p of full) {
     const last = out[out.length - 1];
     if (!last || Math.hypot(last.x - p.x, last.y - p.y) > 1e-4) out.push(p);
   }
+  if (out.length > 1 && dist(out[0], out[out.length - 1]) < 1e-4) out.pop();
   return out;
 }
 
@@ -304,7 +317,7 @@ export function pieceOutline(
   }
   if (piece.firstEdgeSymmetry) {
     const fe = firstEdgeEndpoints(piece, points);
-    if (fe) return mirrorHalfOutline(loop, fe.a, fe.b);
+    if (fe) return mirrorHalfOutline(loop, fe.a, fe.b, piece.firstEdgeSymmetryAffine ? (point) => applyFoldAffine(piece.firstEdgeSymmetryAffine!, point) : undefined);
   }
   return loop;
 }
@@ -705,6 +718,32 @@ export function pieceOutlineTagged(
     for (let k = 1; k < e.length; k++) { loop.push(e[k]); edgeOf.push(edges[found].id); }
   }
   edgeOf.push(edgeOf[edgeOf.length - 1] ?? edges[0].id); // closing segment
+  if (piece.firstEdgeSymmetry) {
+    const fold = firstEdgeEndpoints(piece, points);
+    if (fold) {
+      const reflect = piece.firstEdgeSymmetryAffine ? (point: Vec2) => applyFoldAffine(piece.firstEdgeSymmetryAffine!, point) : (point: Vec2) => reflectAcrossLine(point, fold.a, fold.b);
+      const full = mirrorHalfOutline(loop, fold.a, fold.b, reflect);
+      const boundaries = edges.flatMap(edge => [{ id: edge.id, poly: edge.poly }, { id: edge.id, poly: edge.poly.map(reflect) }]);
+      const pointKey = (point: Vec2) => `${point.x.toFixed(6)},${point.y.toFixed(6)}`;
+      const segmentKey = (a: Vec2, b: Vec2) => { const x = pointKey(a), y = pointKey(b); return x < y ? `${x}|${y}` : `${y}|${x}`; };
+      const segmentOwners = new Map<string, string>();
+      for (const edge of boundaries) for (let i = 1; i < edge.poly.length; i++) segmentOwners.set(segmentKey(edge.poly[i - 1], edge.poly[i]), edge.id);
+      const fullEdgeOf = full.map((point, index) => {
+        const next = full[(index + 1) % full.length];
+        const direct = segmentOwners.get(segmentKey(point, next)); if (direct) return direct;
+        const middle = { x: (point.x + next.x) / 2, y: (point.y + next.y) / 2 };
+        let closest = Infinity, id = edges[0].id;
+        for (const edge of boundaries) for (let i = 1; i < edge.poly.length; i++) {
+          const a = edge.poly[i - 1], b = edge.poly[i], dx = b.x - a.x, dy = b.y - a.y;
+          const t = Math.max(0, Math.min(1, ((middle.x - a.x) * dx + (middle.y - a.y) * dy) / (dx * dx + dy * dy || 1)));
+          const distance = Math.hypot(middle.x - a.x - t * dx, middle.y - a.y - t * dy);
+          if (distance < closest) { closest = distance; id = edge.id; }
+        }
+        return id;
+      });
+      return { pts: full, edgeOf: fullEdgeOf };
+    }
+  }
   return { pts: loop, edgeOf };
 }
 
@@ -766,4 +805,21 @@ export function pieceAllowancePolygon(
     return null;
   };
   return applyCornerJoins(allow, outline, joinFor, Math.abs(signedDist));
+}
+
+export function applyFoldAffine(affine: NonNullable<Piece['firstEdgeSymmetryAffine']>, point: Vec2): Vec2 {
+  return { x: affine.a * point.x + affine.b * point.y + affine.tx, y: affine.c * point.x + affine.d * point.y + affine.ty };
+}
+/** Only finite affine involutions with determinant -1 are fold reflections. */
+export function foldAffineProblem(value: unknown): string | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return 'Fold reflection must be an affine record.';
+  const affine = value as Record<string, unknown>;
+  if (['a', 'b', 'c', 'd', 'tx', 'ty'].some(key => typeof affine[key] !== 'number' || !Number.isFinite(affine[key]))) return 'Fold reflection requires six finite coefficients.';
+  const { a, b, c, d, tx, ty } = affine as NonNullable<Piece['firstEdgeSymmetryAffine']>;
+  if (Math.abs(a * d - b * c + 1) > 1e-5 || Math.abs(a + d) > 1e-5) return 'Fold reflection must reverse orientation and be involutive.';
+  const norm = Math.max(1, Math.abs(a), Math.abs(b), Math.abs(c), Math.abs(d));
+  if ([a * a + b * c - 1, b * (a + d), c * (a + d), c * b + d * d - 1].some(value => Math.abs(value) > 1e-5 * norm)) return 'Fold reflection must be involutive.';
+  const translationScale = Math.max(1, Math.abs(tx), Math.abs(ty));
+  if (Math.abs(a * tx + b * ty + tx) > 1e-5 * translationScale || Math.abs(c * tx + d * ty + ty) > 1e-5 * translationScale) return 'Fold reflection translation must be involutive.';
+  return null;
 }

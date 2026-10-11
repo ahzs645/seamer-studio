@@ -60,7 +60,7 @@ test('piece actions share canonical selection and undo; toolbar arrow keys move 
 test('seam panel selection drives contextual reverse/delete and preserves undo semantics', async ({ page }) => {
   await openStudio(page);
   const first = await page.evaluate(() => window.seamer!.getPattern().seams[0]);
-  await page.locator('#studio-left-panel').getByRole('button', { name: 'Seams', exact: true }).click();
+  await page.locator('#studio-left-panel').getByRole('tab', { name: 'Seams', exact: true }).click();
   await page.getByTestId(`seam-select-${first.id}`).click();
   const bar = page.getByTestId('contextual-selection');
   await expect(bar.getByRole('status')).toHaveText('1 seam selected');

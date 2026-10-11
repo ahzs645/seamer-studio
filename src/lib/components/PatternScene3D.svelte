@@ -4,6 +4,8 @@
   import { docToWorld, type Viewport } from '@atelier/viewport';
   import {
     applySeamPick,
+    updatePieceArtwork,
+    type PieceArtwork,
     indexPoints,
     pieceGeometrySignature,
     placedPoints,
@@ -13,6 +15,11 @@
   import { PatternRenderer, type DrapeDebugState, type DrapeFailureDiagnostics, type RendererStatus, type SceneMode } from '$lib/scene/scene3d';
   import type { FrozenAppRenderRequest, FrozenAppRenderReceipt } from '$lib/scene/frozenAppRender';
   import { compatibleSourceBodyCheckpoint } from '$lib/scene/sourceBodyCheckpoint';
+  import { matchesShortcut } from '$lib/utils/shortcuts';
+  import { artworkEditing } from '$lib/stores/artworkEditing';
+  import { artworkGesture, artworkGestureCanStart } from '$lib/utils/artworkGestures';
+  import { applyFabricDrop, FABRIC_DRAG_TYPE } from '$lib/utils/fabricDrag';
+  import SimulationStageIndicator from './SimulationStageIndicator.svelte';
   import AssemblyTimeline from '$lib/components/AssemblyTimeline.svelte';
   import { createSeamerAoPass } from '$lib/scene/n8aoPost';
   import type { SimConfig } from '@seamer/cloth-sim';
@@ -40,6 +47,7 @@
 
   interface Props {
     currentPattern: Pattern;
+    readOnly?: boolean;
     onfrozendiagnosticchange?: (active: boolean) => void;
     selectedPieceId?: string | null;
     onpieceselect?: (id: string | null) => void;
@@ -49,27 +57,81 @@
     ondrapesettled?: (savedByPiece: Record<string, number[]>, sourceStretchPolicy: ReturnType<PatternRenderer['getSourceStretchPolicy']>, sourceAssemblyComplete: boolean | null, sourceGatherPolicy?: ReturnType<PatternRenderer['getSourceGatherCacheMarker']>, sourceGatherIntent?: 'manual') => void;
     /** Undo-aware pattern update (arrangement-point snaps, freeze toggle). */
     onpatternupdate?: (p: Pattern, label?: string) => void;
+    ondocumentchange?: (p: Pattern, label?: string) => void;
     /** Non-undo camera write-back so the view survives a reload. */
     oncamerachange?: (pos: [number, number, number], target: [number, number, number], fov: number) => void;
   }
 
-  let { currentPattern, selectedPieceId = null, onpieceselect, labelDisplay = 'flat', onlabeldisplaychange, ondrapesettled, onpatternupdate, oncamerachange, onfrozendiagnosticchange }: Props = $props();
+  let { currentPattern, readOnly = false, selectedPieceId = null, onpieceselect, labelDisplay = 'flat', onlabeldisplaychange, ondrapesettled, onpatternupdate, ondocumentchange, oncamerachange, onfrozendiagnosticchange }: Props = $props();
 
   const docMmToWorld = (mm: number): number => docToWorld({ x: mm, y: 0 }).x;
   const worldToDocMm = (metres: number): number =>
     metres / docToWorld({ x: 1, y: 0 }).x;
 
   let viewportInstance: Viewport | null = null;
-  let renderer: PatternRenderer | null = null;
+  let renderer = $state<PatternRenderer | null>(null);
   let sceneShell: HTMLDivElement;
 
+  export function captureSurfaceMeshes() { return sourceExportReady ? renderer?.captureSurfaceMeshes() ?? [] : []; }
+  let artworkDrag: { before: PieceArtwork; preview: PieceArtwork; start: {x:number;y:number}; mode: 'translate'|'rotate'|'resize'; document: Pattern; pointerId: number; captureElement:HTMLElement } | null = null;
+  function artworkPointerDown(event: PointerEvent) {
+    if(!(event.target instanceof HTMLCanvasElement) || !event.target.closest('.scene-viewport'))return;
+    if (artworkDrag || readOnly || frozenReadOnly || !renderer || !$artworkEditing || event.button !== 0) return;
+    const hit = renderer.pickArtworkDraftPoint(event);
+    const item = (currentPattern.artwork ?? []).find(row => row.id === $artworkEditing?.id);
+    if (!hit || !item || hit.pieceId !== item.pieceId) return;
+    if(!artworkGestureCanStart(item,hit))return;
+    event.preventDefault();event.stopImmediatePropagation();
+    const before=structuredClone($state.snapshot(item));
+    artworkDrag={before,preview:before,start:hit,mode:$artworkEditing.mode,document:currentPattern,pointerId:event.pointerId,captureElement:event.target as HTMLElement};
+    renderer.setArtworkDragging(true); (event.target as HTMLElement).setPointerCapture(event.pointerId);
+  }
+  function artworkPointerMove(event: PointerEvent) {
+    if(!artworkDrag || event.pointerId!==artworkDrag.pointerId || !renderer) return;
+    event.preventDefault();event.stopImmediatePropagation();
+    const point=renderer.pickArtworkDraftPoint(event); if(!point || point.pieceId!==artworkDrag.before.pieceId) return;
+    artworkDrag.preview=artworkGesture(artworkDrag.before,artworkDrag.mode,artworkDrag.start,point);
+    renderer.setArtwork({id:currentPattern.id,artwork:(currentPattern.artwork??[]).map(row=>row.id===artworkDrag?.before.id?artworkDrag.preview:row)});
+  }
+  function endArtworkDrag(cancel=false) {
+    const drag=artworkDrag;artworkDrag=null;renderer?.setArtworkDragging(false);
+    if(!drag)return;
+    if(drag.captureElement.hasPointerCapture(drag.pointerId))drag.captureElement.releasePointerCapture(drag.pointerId);
+    try {
+      if(!cancel && currentPattern===drag.document) (ondocumentchange??onpatternupdate)?.(updatePieceArtwork($state.snapshot(currentPattern) as Pattern,drag.preview.id,drag.preview),'Transform artwork');
+    } catch(cause) { toastError(cause instanceof Error ? cause.message : 'Artwork transform could not be committed'); }
+    // A rejected commit, cancellation or read-only transition always restores the canonical ink.
+    if(!frozenReadOnly)renderer?.setArtwork({id:currentPattern.id,artwork:currentPattern.artwork});
+  }
+  function dropFabric(event: DragEvent) {
+    if(readOnly||frozenReadOnly||!renderer||!event.dataTransfer)return;
+    event.preventDefault();const hit=renderer.pickArtworkDraftPoint(event,true);if(!hit)return;
+    try {const result=applyFabricDrop(event.dataTransfer,$state.snapshot(currentPattern) as Pattern,[hit.pieceId]);
+      if(result.count)(ondocumentchange??onpatternupdate)?.(result.pattern,'Drop fabric on garment');
+    }catch(cause){toast(cause instanceof Error?cause.message:'Fabric could not be assigned','error');}
+  }
+  onMount(()=>{
+    const capture=(event:Event)=>{const request=(event as CustomEvent<{respond:(meshes:ReturnType<PatternRenderer['captureSurfaceMeshes']>)=>void}>).detail;request?.respond?.(captureSurfaceMeshes());};
+    const key=(event:KeyboardEvent)=>{if(event.key==='Escape'&&artworkDrag){event.preventDefault();endArtworkDrag(true);}};
+    window.addEventListener('seamer:capture-surface',capture);window.addEventListener('keydown',key,true);
+    sceneShell.addEventListener('pointerdown',artworkPointerDown,true);sceneShell.addEventListener('pointermove',artworkPointerMove,true);
+    const up=(event:PointerEvent)=>{if(artworkDrag?.pointerId===event.pointerId)endArtworkDrag();},cancel=(event:PointerEvent)=>{if(artworkDrag?.pointerId===event.pointerId)endArtworkDrag(true);};
+    window.addEventListener('pointerup',up);window.addEventListener('pointercancel',cancel);sceneShell.addEventListener('lostpointercapture',cancel);
+    return()=>{endArtworkDrag(true);window.removeEventListener('seamer:capture-surface',capture);window.removeEventListener('keydown',key,true);
+      sceneShell.removeEventListener('pointerdown',artworkPointerDown,true);sceneShell.removeEventListener('pointermove',artworkPointerMove,true);
+      window.removeEventListener('pointerup',up);window.removeEventListener('pointercancel',cancel);sceneShell.removeEventListener('lostpointercapture',cancel);};
+  });
+
   /** File imports can replace a document while retaining its id. */
-  export function beginCameraDocument() { renderer?.beginCameraDocument(); }
+  export function beginCameraDocument() {
+    ++buildRevision; buildPending = true; preparedDocumentId = ''; lastKey = ''; lastDrapeKey = '';
+    renderer?.beginCameraDocument();
+  }
 
   /** Stable project-export checkpoint. Current particle positions are captured even while the
    *  solver is running; import resumes from this geometry with zero velocity. */
   export function captureProjectState() {
-    if (!renderer || frozenReadOnly) return null;
+    if (!renderer || !sourceExportReady) return null;
     const camera = renderer.getCameraState();
     let previewDataUrl: string | null = null;
     try { previewDataUrl = renderer.captureImage(); } catch { /* 2D preview remains the fallback */ }
@@ -94,10 +156,12 @@
     const target = renderer, document = currentPattern, requestRevision = ++frozenUiRevision;
     frozenReadOnly = true; onfrozendiagnosticchange?.(true);
     clearTimeout(rebuildTimer);
+    const preparationRevision = ++buildRevision; buildPending = true;
     try {
       // Flush the genuine pending document build; frozen data cannot create or approve preparation.
       if (!await target.setPattern(document) || currentPattern !== document || renderer !== target || requestRevision !== frozenUiRevision) throw new Error('The source document changed during preparation.');
-      builtSigs = pieceSigs(document); lastKey = patternKey(document); lastDrapeKey = drapeKey(document);
+      acceptPreparedDocument(document, target, preparationRevision);
+      builtSigs = pieceSigs(document); lastDocumentId = document.id; lastKey = patternKey(document); lastDrapeKey = drapeKey(document);
       const receipt = await target.presentFrozenCheckpoint(request);
       if (requestRevision !== frozenUiRevision) throw new Error('Frozen inspection was cancelled.');
       frozenReceipt = receipt; mobileControlsOpen = false; showSimPanel = false;
@@ -140,7 +204,25 @@
   ];
 
   let rebuildTimer: ReturnType<typeof setTimeout> | undefined;
+  let lastDocumentId = '';
   let lastKey = '';
+  let buildRevision = 0;
+  let buildPending = $state(true);
+  let preparedDocumentId = $state('');
+  let preparedKey = $state('');
+  let preparedDrapeKey = $state('');
+  // Comparing live signatures closes the interval before the debounced preparation effect runs.
+  const sourceExportReady = $derived(!frozenReadOnly && !!renderer && !buildPending
+    && (status === 'ready' || status === 'simulating') && preparedDocumentId === currentPattern.id
+    && preparedKey === patternKey(currentPattern) && preparedDrapeKey === drapeKey(currentPattern));
+  function acceptPreparedDocument(document: Pattern, target: PatternRenderer, revision: number): boolean {
+    if (renderer !== target || revision !== buildRevision || currentPattern.id !== document.id
+      || patternKey(currentPattern) !== patternKey(document)
+      || (drapeKey(currentPattern) !== drapeKey(document) && drapeKey(currentPattern) !== lastDrapeKey)) return false;
+    preparedDocumentId = document.id; preparedKey = patternKey(document); preparedDrapeKey = drapeKey(currentPattern);
+    buildPending = false;
+    return true;
+  }
   // Signature of the cached drapes (savedPositions) at the last accepted state. Watched separately
   // from the geometry key so EXTERNAL drape changes (version restore, undo, MCP pattern push) refresh
   // the 3D view — while the view's own drape-settle write is accepted without a rebuild (no loop).
@@ -207,6 +289,7 @@
       return;
     }
     renderer = new PatternRenderer(viewportInstance);
+    renderer.setInteractionReadOnly(readOnly);
     if (import.meta.env.DEV) {
       const target = window as DrapeDebugWindow;
       drapeDebugApi = { getState: () => renderer?.getDrapeDebugState() ?? null,
@@ -230,6 +313,7 @@
     renderer.onCameraChanged = (pos, target, fov) => { if (!frozenReadOnly) oncamerachange?.(pos, target, fov); };
     renderer.onArrangementPointHover = (name) => { hoveredArrangementPoint = name; };
     renderer.onArrangementPointPicked = ({ pieceId, name, cylinderName, uDegrees, v }) => {
+      if(readOnly)return;
       // bind the selected piece's arrangement to the clicked named point (rebuild re-seats it)
       const pieces = currentPattern.pieces.map((p) => (p.id !== pieceId ? p : {
         ...p,
@@ -245,13 +329,16 @@
       onpatternupdate?.({ ...currentPattern, pieces, hasChanged: true }, `Arrange on ${name}`);
     };
     renderer.onDrapeSettled = (savedByPiece) => {
+      if(readOnly)return;
       ondrapesettled?.(savedByPiece, renderer?.getSourceStretchPolicy() ?? null, renderer?.getSourceAssemblyComplete() ?? null, renderer?.getSourceGatherCacheMarker(), renderer?.getSourceGatherIntent());
       // the parent has now written savedPositions back into the pattern (synchronously); accept our
       // own echo so the drape watcher below doesn't rebuild what we just settled
       lastDrapeKey = drapeKey(currentPattern);
+      if (!buildPending && preparedDocumentId === currentPattern.id && preparedKey === patternKey(currentPattern)) preparedDrapeKey = lastDrapeKey;
     };
     // 3D seam tool: edge clicks on the draped garment route through the shared tool state
     renderer.onSeamEdgePick = (pick: SeamPick) => {
+      if(readOnly)return;
       const kind = get(selectedTool) === 'seam-multi' ? 'multi' : 'single';
       const res = applySeamPick(kind, get(seamTool), pick);
       if (res.commit) {
@@ -269,12 +356,14 @@
         seamTool.set(res.state);
       }
     };
-    builtSigs = pieceSigs(currentPattern);
-    lastKey = patternKey(currentPattern, builtSigs);
+    const initialDocument = currentPattern, target = renderer, revision = ++buildRevision;
+    buildPending = true; lastDocumentId = initialDocument.id;
+    builtSigs = pieceSigs(initialDocument);
+    lastKey = patternKey(initialDocument, builtSigs);
     lastDrapeKey = drapeKey(currentPattern);
     lightingMode = currentPattern.settings3d.lightingMode || 'flat';
-    renderer.setPattern(currentPattern).then((built) => {
-      if (!built) return;
+    renderer.setPattern(initialDocument).then((built) => {
+      if (!built || !acceptPreparedDocument(initialDocument, target, revision)) return;
       syncPoses();
       syncSimulationControls();
       renderer?.setHighlightedPiece(selectedPieceId);
@@ -288,7 +377,7 @@
   }
 
   onDestroy(() => {
-    ++frozenUiRevision;
+    ++frozenUiRevision; ++buildRevision; buildPending = true;
     if (frozenReadOnly) onfrozendiagnosticchange?.(false);
     clearTimeout(rebuildTimer);
     unsubscribeTheme?.();
@@ -307,7 +396,9 @@
     if (frozenReadOnly) return;
     const key = patternKey(currentPattern);
     const dKey = drapeKey(currentPattern);
-    if ((key === lastKey && dKey === lastDrapeKey) || !renderer) return;
+    if ((currentPattern.id === lastDocumentId && key === lastKey && dKey === lastDrapeKey) || !renderer) return;
+    const revision = ++buildRevision, target = renderer; buildPending = true;
+    lastDocumentId = currentPattern.id;
     lastKey = key;
     lastDrapeKey = dKey;
     clearTimeout(rebuildTimer);
@@ -319,8 +410,8 @@
       const sigs = pieceSigs(snapshot);
       const changed = new Set<string>();
       for (const [id, sig] of sigs) if (builtSigs.has(id) && builtSigs.get(id) !== sig) changed.add(id);
-      renderer?.setPattern(snapshot, changed).then((built) => {
-        if (!built) return;
+      target.setPattern(snapshot, changed).then((built) => {
+        if (!built || !acceptPreparedDocument(snapshot, target, revision)) return;
         builtSigs = sigs;
         syncPoses();
         syncSimulationControls();
@@ -338,6 +429,11 @@
     renderer?.setArtwork({ id: currentPattern.id, artwork: currentPattern.artwork });
   });
 
+  $effect(() => {
+    const tool = $artworkEditing;
+    if (!readOnly && !frozenReadOnly && tool && currentPattern.artwork?.some(row => row.id === tool.id)) renderer?.beginArtworkEditing();
+  });
+
   // push external (2D) selection into the 3D view
   $effect(() => {
     const id = selectedPieceId;
@@ -346,6 +442,8 @@
 
   // "Anchor to saved drape" toggle (persisted): ON preserves imported/source equilibria; grabbed
   // regions release it locally, while OFF opts into a fully free-running solve.
+  $effect(() => { renderer?.setInteractionReadOnly(readOnly); if(readOnly && artworkDrag)endArtworkDrag(true); });
+  $effect(() => { if(artworkDrag && currentPattern!==artworkDrag.document)endArtworkDrag(true); });
   $effect(() => { renderer?.setAnchorsEnabled($simAnchors); });
 
   // seam tool active? push the shared selection into the 3D overlay (tubes + direction cones)
@@ -377,6 +475,7 @@
     return !!id && (currentPattern.pieces.find((p) => p.id === id)?.settings3d.frozen ?? false);
   });
   function toggleFreezeSelected() {
+    if(readOnly) return;
     const id = activePieceId;
     if (!id) return;
     const pieces = currentPattern.pieces.map((p) =>
@@ -461,13 +560,16 @@
   });
 
   function toggleSimulate() {
-    if (!renderer) return;
+    if (readOnly || !renderer) return;
     if (status === 'simulating') renderer.pauseSimulation();
-    else if (status === 'ready') renderer.simulate();
+    else if (status === 'ready') {
+      if (!sourceExportReady) { toastError('Wait for the current 3D garment to finish preparing.'); return; }
+      renderer.simulate();
+    }
   }
-  function canReset() { return status === 'ready' || status === 'simulating' || status === 'invalid' || status === 'error'; }
+  function canReset() { return !readOnly && (status === 'ready' || status === 'simulating' || status === 'invalid' || status === 'error'); }
   async function reset() {
-    if (!renderer || !canReset()) return;
+    if (readOnly || !renderer || !canReset()) return;
     const accepted = await confirm({
       title: 'Reset all simulations?',
       message: 'Are you sure you want to reset all simulations? This will discard all simulated positions.',
@@ -485,19 +587,21 @@
   }
   // arrangeKind is kept in sync by renderer.onModeChange, so these just toggle/switch the tool.
   function toggleArrangeMode() {
+    if(readOnly) return;
     if (!renderer) return;
     if (sceneMode === 'arrange' && arrangeKind === 'arrange') { renderer.exitArrangeMode(); return; }
     if (sceneMode === 'arrange') renderer.exitArrangeMode(); // switching from the Move tool
     renderer.enterArrangeMode();
   }
   function toggleManipulateMode() {
+    if(readOnly) return;
     if (!renderer) return;
     if (sceneMode === 'arrange' && arrangeKind === 'manipulate') { renderer.exitArrangeMode(); return; }
     if (sceneMode === 'arrange') renderer.exitArrangeMode(); // switching from the Arrange tool
     renderer.enterManipulateMode();
   }
   function setGizmoMode(m: 'translate' | 'rotate') { gizmoMode = m; renderer?.setArrangeTransformMode(m); }
-  function drapeFromArrangement() { renderer?.simulateFromArrangement(); }
+  function drapeFromArrangement() { if(readOnly)return; renderer?.simulateFromArrangement(); }
   function setLighting(mode: string) {
     lightingMode = mode;
     renderer?.setLightingMode(mode);
@@ -517,6 +621,7 @@
     currentPose = renderer?.poseName() ?? '';
   }
   async function setPose(p: string) {
+    if(readOnly)return;
     const currentRenderer = renderer;
     if (!currentRenderer) return;
     const previousPose = currentPose;
@@ -550,6 +655,7 @@
   const bodyEnabled = $derived(currentPattern.settings3d.avatarEnabled !== false);
 
   function togglePerson() {
+    if(readOnly) return;
     const enabling = !bodyEnabled;
     onpatternupdate?.({
       ...currentPattern,
@@ -593,47 +699,48 @@
   $effect(() => { const on = currentPattern.settings3d.showSeams ?? false; renderer?.setShowSeams(on); });
   function zoomToGarment() { renderer?.zoomToGarment(); }
   function setView(v: 'front' | 'back' | 'left' | 'right' | 'top' | 'reset') { renderer?.setCameraView(v); }
+  function exportSource() {
+    if (!renderer || !sourceExportReady) { toastError('Wait for the current 3D garment to finish preparing.'); return null; }
+    const target = renderer, document = currentPattern, key = preparedKey, dKey = preparedDrapeKey, revision = buildRevision;
+    return { target, name: currentPattern.name.replace(/\s+/g, '_') || 'garment',
+      current: () => sourceExportReady && renderer === target && buildRevision === revision
+        && currentPattern === document && preparedKey === key && preparedDrapeKey === dKey };
+  }
   function downloadOBJ() {
-    if (!renderer) return;
-    const obj = renderer.exportOBJ();
-    downloadFile(new Blob([obj], { type: 'text/plain' }), 'obj');
+    const source = exportSource(); if (!source) return;
+    const obj = source.target.exportOBJ();
+    downloadFile(new Blob([obj], { type: 'text/plain' }), 'obj', source.name);
   }
   // Binary STL of the draped garment (+ avatar when shown) — for 3D printing / CAD handoff.
   async function downloadSTL() {
-    if (!renderer) return;
-    const stl = await renderer.exportSTL();
-    const bytes = new Uint8Array(stl.buffer as ArrayBuffer, stl.byteOffset, stl.byteLength);
-    downloadFile(new Blob([bytes], { type: 'model/stl' }), 'stl');
+    const source = exportSource(); if (!source) return;
+    try {
+      const stl = await source.target.exportSTL();
+      if (!source.current()) { toastError('The garment changed during export. Export the current garment again.'); return; }
+      const bytes = new Uint8Array(stl.buffer as ArrayBuffer, stl.byteOffset, stl.byteLength);
+      downloadFile(new Blob([bytes], { type: 'model/stl' }), 'stl', source.name);
+    } catch (error) { toastError(error instanceof Error ? error.message : 'STL export failed'); }
   }
   async function downloadGLTF() {
-    if (!renderer) return;
-    const base = currentPattern.name.replace(/\s+/g, '_') || 'garment';
+    const source = exportSource(); if (!source) return;
     try {
-      const gltf = await sceneToGLTF(renderer.exportScene());
+      const gltf = await sceneToGLTF(source.target.exportScene());
+      if (!source.current()) { toastError('The garment changed during export. Export the current garment again.'); return; }
       const blob = gltf instanceof ArrayBuffer
         ? new Blob([gltf], { type: 'model/gltf-binary' })
         : new Blob([JSON.stringify(gltf, null, 2)], { type: 'model/gltf+json' });
-      downloadBlob(`${base}.${gltf instanceof ArrayBuffer ? 'glb' : 'gltf'}`, blob);
+      downloadBlob(`${source.name}.${gltf instanceof ArrayBuffer ? 'glb' : 'gltf'}`, blob);
       toastSuccess('Exported glTF');
-    } catch (error) {
-      toastError(error instanceof Error ? error.message : 'glTF export failed');
-    }
+    } catch (error) { toastError(error instanceof Error ? error.message : 'glTF export failed'); }
   }
-  function downloadFile(blob: Blob, ext: string) {
+  function downloadFile(blob: Blob, ext: string, name: string) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url;
-    a.download = `${currentPattern.name.replace(/\s+/g, '_') || 'garment'}.${ext}`;
-    a.click();
-    URL.revokeObjectURL(url);
+    a.href = url; a.download = `${name}.${ext}`; a.click(); URL.revokeObjectURL(url);
   }
-  // Save Image: export the current 3D view as a PNG (matches the source's bottom-bar "Save Image").
   function saveImage() {
-    if (!renderer) return;
-    const a = document.createElement('a');
-    a.href = renderer.captureImage();
-    a.download = `${currentPattern.name.replace(/\s+/g, '_') || 'garment'}.png`;
-    a.click();
+    const source = exportSource(); if (!source) return;
+    const a = document.createElement('a'); a.href = source.target.captureImage(); a.download = `${source.name}.png`; a.click();
   }
 
   // Simulation controls: expose the solver parameters (matches the source's "Simulation controls").
@@ -674,6 +781,7 @@
   }
 
   function toggleTimeline() {
+    if(readOnly) return;
     showTimeline = !showTimeline;
     // A recording drives the mesh directly; leaving the solver running would fight it for the buffer.
     if (showTimeline && status === 'simulating') renderer?.pauseSimulation();
@@ -701,6 +809,7 @@
   // 36mm-frame equivalent focal length for the current FOV (the original's Focal(mm) slider)
   const focalMm = $derived(18 / Math.tan(((cameraFov / 2) * Math.PI) / 180));
   function setSim(patch: Partial<SimConfig>) {
+    if(readOnly)return;
     if (!renderer || !simCfg) return;
     simCfg = { ...simCfg, ...patch };
     const currentRenderer = renderer;
@@ -720,6 +829,7 @@
   const cachedPieces = $derived(currentPattern.pieces.filter((piece) => piece.settings3d.savedPositions.length > 0));
   const holdsSavedCheckpoint = $derived(!needsSourceReassembly && cachedPieces.length > 0 && cachedPieces.every((piece) => piece.settings3d.savedDrapeState === 'held') && $simAnchors);
   function setCheckpointHold(held: boolean) {
+    if(readOnly)return;
     simAnchors.set(held);
     if (!sourceCheckpoint) return;
     const pieces = currentPattern.pieces.map((piece) => piece.settings3d.savedPositions.length === 0 ? piece : {
@@ -743,7 +853,7 @@
   let paneHovered = $state(false);
   let paneFocused = $state(false);
   function handleKey(e: KeyboardEvent) {
-    if (frozenReadOnly) return;
+    if (readOnly || frozenReadOnly) return;
     if (!paneHovered && !paneFocused) return;
     if (e.key === 'Escape' && mobileControlsOpen) {
       e.preventDefault();
@@ -753,20 +863,20 @@
     // Typing or using buttons inside the drawer must not trigger viewport shortcuts.
     if (mobileControlsOpen) return;
     if (isAppShortcutBlocked(e) || isDocumentKeyboardTarget(e.target) || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
-    if (e.key === 'a' || e.key === 'A') { e.preventDefault(); toggleArrangeMode(); }
-    if (e.key === 'm' || e.key === 'M') {
+    if (matchesShortcut(e,'sceneArrange')) { e.preventDefault(); toggleArrangeMode(); }
+    if (matchesShortcut(e,'sceneMove')) {
       // like the 2D toolbar, M defers to "mirror selection" while a piece is selected outside arrange mode
       if (sceneMode !== 'arrange' && selectedPieceId) return;
       e.preventDefault(); toggleManipulateMode();
     }
-    if (e.key === ' ') { e.preventDefault(); toggleSimulate(); }
+    if (matchesShortcut(e,'sceneSimulate')) { e.preventDefault(); toggleSimulate(); }
   }
 
   // Right-side 3D control rail — Material Symbols icons + hover-to-expand labels, mirroring the
   // original studio. `sep` inserts a spacer before the button; `shortcut` shows a kbd on hover.
   interface Tool { label: string; icon: string; onClick: () => void; active?: () => boolean; disabled?: () => boolean; sep?: boolean; shortcut?: string }
   const tools = $derived<Tool[]>([
-    { label: status === 'simulating' ? 'Pause simulation' : 'Start simulation', icon: status === 'simulating' ? 'pause' : 'play_arrow', onClick: toggleSimulate, active: () => status === 'simulating', disabled: () => status !== 'ready' && status !== 'simulating' },
+    { label: status === 'simulating' ? 'Pause simulation' : 'Start simulation', icon: status === 'simulating' ? 'pause' : 'play_arrow', onClick: toggleSimulate, active: () => status === 'simulating', disabled: () => status !== 'simulating' && (status !== 'ready' || !sourceExportReady) },
     { label: 'Reset simulation', icon: 'refresh', onClick: () => void reset(), disabled: () => !canReset() },
     { label: 'Show triangles', icon: 'change_history', onClick: toggleTriangles, active: () => showTriangles, sep: true },
     { label: bodyEnabled ? 'Hide avatar' : 'Draft on a body', icon: 'person', onClick: bodyEnabled ? toggleAvatar : togglePerson, active: () => bodyEnabled && showAvatar },
@@ -784,9 +894,9 @@
     { label: 'Assembly timeline', icon: 'linear_scale', onClick: toggleTimeline, active: () => showTimeline, sep: true },
     { label: showWires ? 'Hide wires' : 'Show wires', icon: 'cable', onClick: toggleWires, active: () => showWires },
     { label: dark ? 'Light mode' : 'Dark mode', icon: dark ? 'light_mode' : 'dark_mode', onClick: toggleDark, active: () => dark, sep: true },
-    { label: 'Download as OBJ', icon: 'download', onClick: downloadOBJ },
-    { label: 'Download as STL', icon: 'deployed_code', onClick: () => void downloadSTL() },
-    { label: 'Download as glTF', icon: 'view_in_ar', onClick: () => void downloadGLTF() }
+    { label: 'Download as OBJ', icon: 'download', onClick: downloadOBJ, disabled: () => !sourceExportReady },
+    { label: 'Download as STL', icon: 'deployed_code', onClick: () => void downloadSTL(), disabled: () => !sourceExportReady },
+    { label: 'Download as glTF', icon: 'view_in_ar', onClick: () => void downloadGLTF(), disabled: () => !sourceExportReady }
   ]);
 </script>
 
@@ -802,6 +912,9 @@
   aria-label="3D pattern view"
   tabindex="0"
   data-status={status}
+  data-export-ready={sourceExportReady}
+  ondragover={event => { if(!frozenReadOnly && event.dataTransfer?.types.includes(FABRIC_DRAG_TYPE)) event.preventDefault(); }}
+  ondrop={dropFabric}
   onpointerenter={() => (paneHovered = true)}
   onpointerleave={() => (paneHovered = false)}
   onfocusin={() => (paneFocused = true)}
@@ -882,7 +995,7 @@
         class="group relative flex items-center h-8 md:h-10 justify-center btn p-0 my-0.5 ml-1 mr-0 md:mr-1 max-w-[calc(100vw-3rem)] overflow-hidden transition-all self-end text-center hover:aspect-auto aspect-square shadow"
         class:btn-accent={tool.active?.()}
         class:btn-primary={!tool.active?.()}
-        disabled={tool.disabled?.()}
+        disabled={tool.disabled?.() || (readOnly && [toggleSimulate,toggleArrangeMode,toggleManipulateMode,toggleFreezeSelected,togglePerson,toggleTimeline].includes(tool.onClick))}
         onclick={tool.onClick}
       >
         <span class="min-w-0 flex-1 p-0 hidden group-hover:inline">
@@ -903,7 +1016,7 @@
   <div class="scene-mobile-primary" data-tour-id={isNarrowPane ? 'tour-3d-controls' : undefined} role="group" aria-label="Primary 3D controls">
     {#each tools.slice(0, 2) as tool}
       <button type="button" class="btn btn-sm" class:btn-accent={tool.active?.()}
-        title={tool.label} aria-label={tool.label} disabled={tool.disabled?.()} onclick={tool.onClick}>
+        title={tool.label} aria-label={tool.label} disabled={tool.disabled?.() || (readOnly && [toggleSimulate,toggleArrangeMode,toggleManipulateMode,toggleFreezeSelected,togglePerson,toggleTimeline].includes(tool.onClick))} onclick={tool.onClick}>
         <span class="material-symbols-rounded notranslate" aria-hidden="true">{tool.icon}</span>
         {tool.icon === 'refresh' ? 'Reset' : status === 'simulating' ? 'Pause' : 'Start'}
       </button>
@@ -938,7 +1051,7 @@
       <div class="scene-mobile-tools">
         {#each tools.slice(2) as tool}
           <button type="button" class="btn btn-sm justify-start" aria-label={tool.label}
-            class:btn-accent={tool.active?.()} disabled={tool.disabled?.()}
+            class:btn-accent={tool.active?.()} disabled={tool.disabled?.() || (readOnly && [toggleSimulate,toggleArrangeMode,toggleManipulateMode,toggleFreezeSelected,togglePerson,toggleTimeline].includes(tool.onClick))}
             onclick={() => runMobileControl(tool.onClick)}>
             <span class="material-symbols-rounded notranslate" aria-hidden="true">{tool.icon}</span>
             {tool.label}
@@ -974,7 +1087,7 @@
             <button type="button" class="btn btn-sm" class:btn-active={lightingMode === tab.id}
               onclick={() => runMobileControl(() => setLighting(tab.id))}>{tab.label}</button>
           {/each}
-          <button type="button" class="btn btn-sm" onclick={() => runMobileControl(saveImage)}>Save Image</button>
+          <button type="button" class="btn btn-sm" disabled={!sourceExportReady} onclick={() => runMobileControl(saveImage)}>Save Image</button>
         </div>
       </div>
     </div>
@@ -1003,7 +1116,7 @@
     <!-- clears the pose and lighting bars that already own the bottom centre -->
     <div class="absolute bottom-28 left-1/2 -translate-x-1/2 z-20">
       <AssemblyTimeline
-        disabled={status !== 'ready' && status !== 'simulating'}
+        disabled={readOnly || (status !== 'ready' && status !== 'simulating')}
         record={(options) => renderer?.recordAssemblyTimeline(options) ?? Promise.resolve(null)}
         showFrame={(positions) => renderer?.showAssemblyFrame(positions)}
         onclose={() => (showTimeline = false)}
@@ -1025,6 +1138,7 @@
           <span>RMS stretch error</span><span class="tabular-nums">{(stretchError * 100).toFixed(1)}%</span>
         </div>
       {/if}
+      <fieldset disabled={readOnly} class="contents">
       <label class="flex items-center justify-between gap-2"><span>Self-collision</span>
         <input type="checkbox" class="toggle toggle-xs" checked={simCfg.handleSelfCollisions} onchange={(e) => setSim({ handleSelfCollisions: e.currentTarget.checked })} /></label>
       <label class="flex items-center justify-between gap-2"><span>Body collision</span>
@@ -1063,6 +1177,7 @@
           <input type="range" class="range range-xs" min={ctl.min} max={ctl.max} step={ctl.step} value={ctl.get()} oninput={(e) => ctl.set(parseFloat(e.currentTarget.value))} />
         </label>
       {/each}
+      </fieldset>
       <p class="opacity-50 leading-tight pt-1">{sourceCheckpoint ? 'Changes update simulation. Unfinished garments may reassemble.' : 'Changes apply immediately; the drape is preserved.'}</p>
       <div class="border-t border-base-300 pt-2">
         <label class="flex flex-col gap-0.5">
@@ -1113,7 +1228,7 @@
         <button class="join-item btn btn-xs" class:btn-active={lightingMode === tab.id} onclick={() => setLighting(tab.id)}>{tab.label}</button>
       {/each}
     </div>
-    <button class="btn btn-xs gap-1 bg-base-200/85 backdrop-blur shadow" title="Save a PNG of the 3D view" onclick={saveImage}>
+    <button class="btn btn-xs gap-1 bg-base-200/85 backdrop-blur shadow" title="Save a PNG of the 3D view" aria-label="Save Image" disabled={!sourceExportReady} onclick={saveImage}>
       <span class="material-symbols-rounded notranslate text-base" aria-hidden="true">photo_camera</span>
       Save Image
     </button>
@@ -1124,13 +1239,14 @@
     <div class="scene-poses absolute bottom-11 left-1/2 -translate-x-1/2 z-10" role="group" aria-label="Body poses">
       <div class="join join-horizontal bg-base-200/85 backdrop-blur rounded-lg shadow">
         {#each poses as p}
-          <button class="join-item btn btn-xs" class:btn-active={currentPose === p} onclick={() => setPose(p)}>{p}</button>
+          <button class="join-item btn btn-xs" class:btn-active={currentPose === p} disabled={readOnly} onclick={() => setPose(p)}>{p}</button>
         {/each}
       </div>
     </div>
   {/if}
 
   {/if}
+  <div class="absolute top-10 left-2 z-10"><SimulationStageIndicator {status} arranging={sceneMode === 'arrange'} savedPieces={currentPattern.pieces.filter(piece => (piece.settings3d.savedPositions?.length ?? 0) > 0).length} held={holdsSavedCheckpoint} source={currentPattern.pieces.some(piece => !!piece.settings3d.arrangement.sourcePlacement)} /></div>
   <div class="scene-info absolute top-2 left-2 z-10 text-xs opacity-60 bg-base-200/80 rounded px-2 py-1">
     {#if bodyEnabled}{currentPattern.body.gender} · {/if}{currentPattern.pieces.length} pieces
   </div>

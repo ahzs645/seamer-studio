@@ -14,8 +14,8 @@ test('material maps can remain URL-only, download an offline copy, or upload a f
   await page.goto('/studio', { waitUntil: 'domcontentloaded' });
   await expect(page.getByTestId('pattern-name-input')).toHaveValue('Pencil skirt - 3D');
 
-  await page.getByRole('button', { name: 'Fabric', exact: true }).first().click();
-  await page.getByRole('button', { name: /Material ↔10\/10/ }).dblclick();
+  await page.locator('#studio-left-panel').getByRole('tab', { name: 'Fabric', exact: true }).click();
+  await page.locator('.material-panel').getByRole('button', { name: 'Edit fabric Material', exact: true }).click();
   const source = page.getByTestId('texture-source-base').first();
   const url = source.getByRole('textbox', { name: 'Texture map URL' });
   await expect(url).toHaveValue(/69db4cec-026c-44e3-b5f5-cf088e1aca43\.jpg$/);

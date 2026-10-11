@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { DRAWING_SHORTCUTS, drawingShortcutTool } from '$lib/utils/shortcuts';
   import type { Editor } from '@atelier/core';
   import { editorState } from '@atelier/svelte';
   import { selectedTool, zoom } from '$lib/stores/pattern';
@@ -16,9 +17,9 @@
   const editorView = editorState(editor);
 
   const tools: { id: string; icon: string; label: string; hotkey?: string }[] = [
-    { id: 'select', icon: '&#x2B9F;', label: 'Select', hotkey: 'V' },
-    { id: 'pan', icon: '&#x270B;', label: 'Pan', hotkey: 'H' },
-    { id: 'measure', icon: '&#x2194;', label: 'Measure', hotkey: 'M' }
+    { id: 'select', icon: '&#x2B9F;', label: 'Select', hotkey: DRAWING_SHORTCUTS.select },
+    { id: 'pan', icon: '&#x270B;', label: 'Pan', hotkey: DRAWING_SHORTCUTS.pan },
+    { id: 'measure', icon: '&#x2194;', label: 'Measure', hotkey: DRAWING_SHORTCUTS.measure }
   ];
 
   function toggleGrid() { onchange({ ...currentPattern, showGrid: !currentPattern.showGrid }); }
@@ -32,7 +33,7 @@
     // M doubles as "mirror selection" — an active selection wins over the measure tool
     if (e.key.toLowerCase() === 'm' &&
         (editorView.selection.get('point').size || editorView.selection.get('path').size || editorView.selection.get('piece').size)) return;
-    const tool = tools.find((t) => t.hotkey?.toLowerCase() === e.key.toLowerCase());
+    const tool = tools.find((t) => t.id === drawingShortcutTool(e));
     if (tool) { e.preventDefault(); selectedTool.set(tool.id); }
   }
 

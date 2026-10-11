@@ -52,7 +52,7 @@ test('runs the default cloth drape on WebGPU and updates particle positions', as
 	});
 
 	await page.goto('/studio', { waitUntil: 'domcontentloaded' });
-	await expect(page.getByTestId('pattern-name-input')).toHaveValue('Pencil skirt - 3D');
+	await expect(page.getByTestId('pattern-name-input')).toHaveValue('Pencil skirt - 3D', { timeout: 90_000 });
 
 	const gpuProbe = await page.evaluate(async () => {
 		if (!('gpu' in navigator) || !navigator.gpu) {
@@ -154,7 +154,7 @@ test('imports, drapes, pauses, and resets the legacy pencil skirt', async ({ pag
 	page.on('pageerror', (error) => pageErrors.push(error.message));
 
 	await page.goto('/studio', { waitUntil: 'domcontentloaded' });
-	await expect(page.getByTestId('pattern-name-input')).toHaveValue('Pencil skirt - 3D');
+	await expect(page.getByTestId('pattern-name-input')).toHaveValue('Pencil skirt - 3D', { timeout: 90_000 });
 
 	const chooserPromise = page.waitForEvent('filechooser');
 	await page.getByTestId('import-menu-trigger').click();
@@ -163,7 +163,7 @@ test('imports, drapes, pauses, and resets the legacy pencil skirt', async ({ pag
 	await chooser.setFiles(fileURLToPath(new URL('./fixtures/pencil-skirt-legacy.json', import.meta.url)));
 
 	await expect(page.getByText('Imported "Pencil skirt - 3D"')).toBeVisible();
-	await expect(page.getByTestId('pattern-name-input')).toHaveValue('Pencil skirt - 3D');
+	await expect(page.getByTestId('pattern-name-input')).toHaveValue('Pencil skirt - 3D', { timeout: 90_000 });
 	await page.getByRole('button', { name: '3D', exact: true }).click();
 
 	const scene = page.getByTestId('pattern-scene-3d');

@@ -29,7 +29,7 @@ async function selectFirstPiece(page: Page) {
 async function openArtwork(page: Page) {
   const panel = page.locator('#studio-left-panel');
   if (!await panel.isVisible()) await page.getByRole('button', { name: 'Layers and body panel', exact: true }).click();
-  await panel.locator('.tabs').getByText('Artwork', { exact: true }).click();
+  await panel.getByRole('tab', { name: 'Artwork', exact: true }).click();
   await expect(page.getByTestId('artwork-panel')).toBeVisible();
   return page.getByTestId('artwork-panel');
 }

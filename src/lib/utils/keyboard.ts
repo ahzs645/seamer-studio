@@ -13,7 +13,7 @@ export function isSpecsKeyboardTarget(target: EventTarget | null): boolean {
 
 /** Production, appearance and layout controls own their keys while a canvas remains visible. */
 export function isDocumentKeyboardTarget(target: EventTarget | null): boolean {
-  return target instanceof Element && Boolean(target.closest('[data-keyboard-scope="specs"], [data-keyboard-scope="artwork"], [data-keyboard-scope="colorways"], [data-keyboard-scope="workspace"]'));
+  return target instanceof Element && Boolean(target.closest('[data-keyboard-scope="specs"], [data-keyboard-scope="artwork"], [data-keyboard-scope="colorways"], [data-keyboard-scope="workspace"], [data-document-keyboard], [role="tablist"]'));
 }
 
 /** Dialogs keep app shortcuts from acting on the pattern underneath them. */

@@ -46,7 +46,7 @@ test('self-collision OFF and ON rebuild from the current shape and survive pause
     localStorage.setItem('seamer.autosaveSeconds', '120');
   });
   await page.goto('/studio', { waitUntil: 'domcontentloaded' });
-  await expect(page.getByTestId('pattern-name-input')).toHaveValue('Pencil skirt - 3D');
+  await expect(page.getByTestId('pattern-name-input')).toHaveValue('Pencil skirt - 3D', { timeout: 90_000 });
   const gpuAvailable = await page.evaluate(async () => !!navigator.gpu && !!(await navigator.gpu.requestAdapter()));
   test.skip(!gpuAvailable, 'A WebGPU adapter is unavailable');
 

@@ -5,6 +5,18 @@ sewing-pattern domain. It consumes the local `atelier` engine through `file:`
 dependencies and owns the pattern model, formula/constraint solver, avatar,
 XPBD cloth simulation, application UI, server routes, and product pages.
 
+## Studio feature release
+
+The current Studio includes Draft/Fit/Appearance/Production/Cutting tasks, accessible sidebar navigation, configurable pane docking and detached browser panes. Compact landscape places all five tasks in More with 44px touch targets; other desktop and portrait layouts retain the taskbar. Direct artwork editing, structured vector motifs, repeat/zone/ink treatments, named colorways and appearance versions use actual document geometry and mesh UVs. Linked mirrors follow source/axis edits, show dependency warnings and offer Detach; an invalid axis can be restored through drafting or undo.
+
+Production supports unit-aware grade rules, body-chart/ease mapping, captured mesh measurements, stale approvals, validated true-shape-marker consumption and dated exchange quotes. Tech Pack downloads include generated PDF/XLSX, HTML/CSV, actual construction views and freshly rendered flat variant mockups. Fabric libraries include collections, physical-criteria ranking, real configured catalog import and piece-targeted drops; range plans preserve style, size, colorway and budget records.
+
+Starting simulation, 3D downloads and garment captures wait for completed preparation of the current document. Pause remains available during an active simulation. Pending SSP capture retains existing checkpoints; asynchronous exports reject a changed source document.
+
+The default `pnpm build` profile remains a static application for on-device editing. `pnpm build:server` adds self-hosted persistent accounts, membership roles, shared documents/revisions, conflicts and live polling/chat; see [server setup and detached windows](docs/self-hosting-collaboration.md). Detached editors require a same-origin main window and keep its canonical document/history. Source features and operating boundaries are described in [the comparison](docs/fabra-comparison.md); the [completion checklist](docs/completion-checklist.md#final-verification-record) records integrated verification and its operating boundaries.
+
+The checkpoint below preserves the archived garment pipeline's physical acceptance status; the Studio release does not certify settled fit or manufacturing readiness.
+
 ## Garment implementation checkpoint
 
 This is an in-progress implementation checkpoint. The application includes
@@ -64,9 +76,8 @@ document Y axis is mathematical Y-up; only the canvas/SVG projection flips Y.
 The canonical document is an Atelier `Editor<Pattern>`. It uses the pattern
 command registry, a single immutable Atelier `Selection`, labeled snapshot
 history, an 800 ms coalescing window, and `IndexedDbHistoryPersistence` keyed
-by pattern id. The old point/path/piece selection stores are compatibility
-views over the one engine selection while the untouched Canvas2D and panels are
-migrated incrementally.
+by pattern id. Canvas2D, panels and contextual actions read the canonical
+selection; the old point/path/piece selection stores have been removed.
 
 `window.seamer` is installed through `installAutomationApi`. Compatibility
 aliases preserve the old `getPattern()` and object-shaped `getSelection()`
@@ -172,8 +183,8 @@ Install the isolated environment and set `GARMENTCODE_ROOT` and
 [scripts/garmentcode/README.md](scripts/garmentcode/README.md), then start the dev
 server. The endpoint limits request/output size, concurrent processes and runtime;
 only deployment configuration selects executable/source paths. This repository's
-current production adapter is static: built static hosts support examples and JSON
-imports, while live generation requires a server deployment with the SvelteKit
+default production adapter is static: built static hosts support examples and JSON
+imports, while live generation requires the Node server profile with the SvelteKit
 endpoint or the documented CLI followed by JSON import. The dialog reports an
 unavailable backend and offers the examples.
 The endpoint returns the validated original generator JSON. This preserves signed
@@ -519,9 +530,12 @@ short cloth simulations with finite-particle, movement, pause/reset and device-l
 checks. These establish execution, not converged garment fit or physical-device
 performance; hardware/mobile GPU and settled-fit validation remain separate.
 
-**Carried for continuity, not exercised.** Other `routes/api/**`, `lib/server/**`,
-`hooks.server.ts`, and marketing/docs routes. The GarmentCode endpoint and process
-bridge are exercised independently with real generation and failure-boundary tests.
+**Other carried routes.** Marketing/docs routes and API/server paths outside
+the exercised workflows retain their migration status. The GarmentCode endpoint
+and process bridge have real generation and failure-boundary coverage.
+Collaboration persistence, authorization, shared revisions and sessions have
+dedicated unit, runtime and browser coverage; the current integrated results
+are recorded in [the comparison](docs/fabra-comparison.md#current-completion-tranche-final-verification).
 
 ### Completed since the first port
 

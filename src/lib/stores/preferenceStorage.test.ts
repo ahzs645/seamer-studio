@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { get } from 'svelte/store';
-import type { Body, Material, Pattern } from '@seamer/pattern-model';
+import { readFileSync } from 'node:fs';
+import type { Body, Pattern } from '@seamer/pattern-model';
 
 let originalStorage: PropertyDescriptor | undefined;
 
@@ -21,7 +22,8 @@ afterEach(() => {
 it('loads and edits the material library in memory when the localStorage getter throws', async () => {
   const library = await import('./materialLibrary');
   expect(get(library.materialLibrary)).toEqual([]);
-  const link = library.saveNewLibraryItem({ id: 'fabric', name: 'Cotton' } as Material, '2026-10-02');
+  const pattern = JSON.parse(readFileSync(new URL('../../../static/templates/pencil-skirt.json', import.meta.url), 'utf8')) as Pattern;
+  const link = library.saveNewLibraryItem({ ...pattern.materials[0], id: 'fabric', name: 'Cotton' }, '2026-10-02');
   expect(library.getLibraryItem(link.libraryItemId)?.name).toBe('Cotton');
   library.deleteLibraryItem(link.libraryItemId);
   expect(get(library.materialLibrary)).toEqual([]);

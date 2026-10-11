@@ -79,7 +79,7 @@ test('Tech Pack edits manual size values, converts POM units, costs live BOM qua
   const csvPromise = page.waitForEvent('download');
   await pack.getByRole('button', { name: 'Download measurements CSV', exact: true }).click();
   const csvDownload = await csvPromise; const csvPath = testInfo.outputPath('measurements.csv'); await csvDownload.saveAs(csvPath);
-  expect(await readFile(csvPath, 'utf8')).toContain('"Finished hem","M","Manual size entry","mm","505","500","5","10"');
+  expect(await readFile(csvPath, 'utf8')).toContain('"Finished hem","M","Manual override","mm","505","500","5","10"');
 });
 
 test('Tech Pack changes use document undo and repeated direct navigation opens its tab', async ({ page }) => {

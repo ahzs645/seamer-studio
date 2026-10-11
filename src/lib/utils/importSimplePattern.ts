@@ -5,8 +5,8 @@
 // edge groupings first, apply known legacy presets when the piece signature is unambiguous, and use
 // conservative arrangement/seam heuristics for other files.
 
-import { createEmptyPattern, type Pattern, type ConstrainablePoint, type ConstrainablePath, type Piece, type Material, type Seam, type PiecePath } from '@seamer/pattern-model';
-import { indexPaths, indexPoints, pieceOutline, piecePathPolyline, pieceTransform, type Vec2 } from '@seamer/pattern-model/utils/patternGeometry';
+import { createEmptyPattern, type Pattern, type ConstrainablePoint, type ConstrainablePath, type Piece, type Material, artworkDraftPoint, pieceCutCounts, type PieceArtwork, type ColorwayState, type Seam, type PiecePath } from '@seamer/pattern-model';
+import { indexPaths, indexPoints, pieceOutline, piecePathPolyline, pieceTransform, pieceInverseTransform, type Vec2 } from '@seamer/pattern-model/utils/patternGeometry';
 import { buildPieceCloth, computeSeamEdgeIntervals } from '@seamer/cloth-sim';
 import { simplifyPolyline } from '@atelier/geometry';
 
@@ -481,9 +481,12 @@ export function convertSimplePatternWithLegacyProject(
     restored.enable3d = legacyProject.enable3d !== false;
     restored.viewMode = legacyProject.viewMode ?? restored.viewMode;
     if (legacyProject.productionSpec) restored.productionSpec = structuredClone(legacyProject.productionSpec);
+    if (legacyProject.productionAutomation) restored.productionAutomation = structuredClone(legacyProject.productionAutomation);
+    if (legacyProject.rangePlan) restored.rangePlan = structuredClone(legacyProject.rangePlan);
     if (legacyProject.techPack) restored.techPack = structuredClone(legacyProject.techPack);
     if (legacyProject.colorways) restored.colorways = structuredClone(legacyProject.colorways);
     if (legacyProject.artwork) restored.artwork = structuredClone(legacyProject.artwork);
+    if (legacyProject.appearanceHistory) restored.appearanceHistory = structuredClone(legacyProject.appearanceHistory);
     if (legacyProject.workspaceLayout) restored.workspaceLayout = structuredClone(legacyProject.workspaceLayout);
     return restored;
   }
@@ -683,13 +686,11 @@ export function convertSimplePatternWithLegacyProject(
     useLegacyDefaultAvatar: legacyProject.body.useLegacyDefaultAvatar ?? true
   };
 
-  // Preserve document data independently of the rebuilt drafting graph. Piece/annotation links
-  // in production, colorway and artwork records may remain stale in this paired legacy path;
-  // their panels expose missing references for explicit repair rather than guessing owner IDs or
-  // artwork coordinate frames. Complete native JSON/SSP restores retain the original identities.
+  // Copy authored document data, then remap only owners proven by unique placed geometry.
+  // Ambiguous names/copies/frames retain explicit repairable source references.
   const transferable = [
     'lengthUnit', 'angleUnit', 'defaultNotchSize', 'currentSize', 'seamAllowance', 'settings3d',
-    'gradingProfile', 'markerSettings', 'productionSpec', 'techPack', 'colorways', 'artwork', 'workspaceLayout', 'graphicsOffset', 'graphicsScale', 'enable3d', 'viewMode',
+    'gradingProfile', 'markerSettings', 'productionSpec', 'productionAutomation', 'rangePlan', 'techPack', 'colorways', 'artwork', 'appearanceHistory', 'workspaceLayout', 'graphicsOffset', 'graphicsScale', 'enable3d', 'viewMode',
     'showCompass', 'showGrid', 'snapToGrid', 'snapToGuides', 'showPieceNames', 'useBodyMeasurementsForSizes'
   ] as const;
   const sourceRecord = legacyProject as unknown as Record<string, unknown>;
@@ -698,11 +699,117 @@ export function convertSimplePatternWithLegacyProject(
     if (sourceRecord[key] !== undefined) targetRecord[key] = structuredClone(sourceRecord[key]);
   }
 
+  remapPairedLegacyDocumentOwners(legacyProject, pattern);
+
   pattern.name = json.name ?? legacyProject.name ?? pattern.name;
   pattern.description = json.description ?? legacyProject.description ?? pattern.description;
   pattern.enable3d = legacyProject.enable3d !== false;
   pattern.viewMode = legacyProject.viewMode ?? (pattern.enable3d ? 'both' : pattern.viewMode);
   return pattern;
+}
+
+/** Remap extension owners only after proving a unique name, single cut and matching placed outline.
+ * This does not participate in the legacy seam mapper or native JSON/SSP import paths. */
+export function remapPairedLegacyDocumentOwners(source: Pattern, target: Pattern): void {
+  const sourcePoints = indexPoints(source), targetPoints = indexPoints(target);
+  const sourcePaths = indexPaths(source), targetPaths = indexPaths(target);
+  const close = (a: Vec2, b: Vec2, epsilon = .2) => Math.hypot(a.x - b.x, a.y - b.y) <= epsilon;
+  const distanceToSegment = (p: Vec2, a: Vec2, b: Vec2) => {
+    const dx = b.x - a.x, dy = b.y - a.y, denominator = dx * dx + dy * dy;
+    const u = denominator ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / denominator)) : 0;
+    return Math.hypot(p.x - a.x - u * dx, p.y - a.y - u * dy);
+  };
+  const bounds = (poly: Vec2[]) => [Math.min(...poly.map(p => p.x)), Math.min(...poly.map(p => p.y)), Math.max(...poly.map(p => p.x)), Math.max(...poly.map(p => p.y))];
+  const area = (poly: Vec2[]) => Math.abs(poly.reduce((sum, p, i) => { const q = poly[(i + 1) % poly.length]; return sum + p.x * q.y - q.x * p.y; }, 0)) / 2;
+  const equivalent = (a: Vec2[], b: Vec2[]) => {
+    if (a.length < 3 || b.length < 3 || [...a, ...b].some(p => !Number.isFinite(p.x) || !Number.isFinite(p.y))) return false;
+    const aa = area(a), ab = area(b), ba = bounds(a), bb = bounds(b);
+    if (aa < 1e-6 || ab < 1e-6 || Math.abs(aa - ab) > Math.max(2, aa * .005) || ba.some((v, i) => Math.abs(v - bb[i]) > .2)) return false;
+    const onBoundary = (points: Vec2[], polygon: Vec2[]) => points.every(p => polygon.some((q, i) => distanceToSegment(p, q, polygon[(i + 1) % polygon.length]) <= .2));
+    return onBoundary(a, b) && onBoundary(b, a);
+  };
+  const ownerMap = new Map<string, { piece: Piece; map: (point: Vec2) => Vec2; reflected: boolean }>();
+  for (const owner of source.pieces) {
+    if (source.pieces.filter(p => p.name === owner.name).length !== 1 || pieceCutCounts(owner).total !== 1 || owner.useMaterialScaling) continue;
+    const candidates = target.pieces.filter(p => p.name === owner.name);
+    if (candidates.length !== 1) continue;
+    const piece = candidates[0];
+    if (pieceCutCounts(piece).total !== 1 || piece.useMaterialScaling || !sourcePoints.has(owner.originPoint) || !targetPoints.has(piece.originPoint)) continue;
+    const placedSource = pieceTransform(owner, sourcePoints), placedTarget = pieceTransform(piece, targetPoints);
+    const sourceOutline = pieceOutline(source, owner, sourcePaths, sourcePoints, 1).map(placedSource);
+    const targetOutline = pieceOutline(target, piece, targetPaths, targetPoints, 1).map(placedTarget);
+    if (!equivalent(sourceOutline, targetOutline)) continue;
+    const inverse = pieceInverseTransform(piece, targetPoints), map = (point: Vec2) => inverse(placedSource(point));
+    const o = map({ x: 0, y: 0 }), x = map({ x: 1, y: 0 }), y = map({ x: 0, y: 1 });
+    const ux = { x: x.x - o.x, y: x.y - o.y }, uy = { x: y.x - o.x, y: y.y - o.y };
+    const determinant = ux.x * uy.y - ux.y * uy.x;
+    if (Math.abs(Math.hypot(ux.x, ux.y) - 1) > 1e-8 || Math.abs(Math.hypot(uy.x, uy.y) - 1) > 1e-8 || Math.abs(ux.x * uy.x + ux.y * uy.y) > 1e-8 || Math.abs(Math.abs(determinant) - 1) > 1e-8) continue;
+    ownerMap.set(owner.id, { piece, map, reflected: determinant < 0 });
+  }
+  const ownerId = (id: string) => ownerMap.get(id)?.piece.id ??
+    (target.pieces.some(piece => piece.id === id) ? `UnresolvedLegacyPiece:${id}` : id);
+  const remapArtwork = (rows: PieceArtwork[] | undefined) => rows?.map(row => {
+    const mapping = ownerMap.get(row.pieceId);
+    if (!mapping) return { ...row, pieceId: ownerId(row.pieceId) };
+    const center = mapping.map({ x: row.x, y: row.y });
+    const top = mapping.map(artworkDraftPoint(row, .5, 0));
+    const rotation = Math.atan2(top.y - center.y, top.x - center.x) * 180 / Math.PI - 90;
+    const next = { ...row, pieceId: mapping.piece.id, x: center.x, y: center.y, rotation, flipX: Boolean(row.flipX) !== mapping.reflected, zone: row.zone?.map(mapping.map) };
+    if (row.repeat) {
+      // Every supported lattice is periodic over two rows/columns. Verify one full period
+      // against its reflected/rotated lattice before changing the motif's owner/frame.
+      const lattice = (art: PieceArtwork, column: number, line: number): Vec2 => {
+        const repeat = art.repeat!;
+        const dx = (column + (repeat.mode === 'brick' && Math.abs(line % 2) === 1 ? .5 : 0)) * (art.widthMm + repeat.gapXmm);
+        const dy = (line + (repeat.mode === 'half-drop' && Math.abs(column % 2) === 1 ? .5 : 0)) * (art.heightMm + repeat.gapYmm);
+        const angle = art.rotation * Math.PI / 180;
+        return { x: art.x + dx * Math.cos(angle) - dy * Math.sin(angle), y: art.y + dx * Math.sin(angle) + dy * Math.cos(angle) };
+      };
+      const candidates: Vec2[] = [];
+      for (let x = -3; x <= 3; x++) for (let y = -3; y <= 3; y++) candidates.push(lattice(next, x, y));
+      for (let x = -1; x <= 1; x++) for (let y = -1; y <= 1; y++) {
+        const point = mapping.map(lattice(row, x, y));
+        if (!candidates.some(candidate => close(candidate, point, 1e-7))) return { ...row, pieceId: `UnresolvedLegacyArtworkPiece:${row.pieceId}` };
+      }
+    }
+    // Verify the asymmetric image's four exact UV corners, not just its center or bbox.
+    if ([[0, 0], [1, 0], [1, 1], [0, 1]].some(([u, v]) => !close(artworkDraftPoint(next, u, v), mapping.map(artworkDraftPoint(row, u, v)), 1e-7))) return { ...row, pieceId: `UnresolvedLegacyArtworkPiece:${row.pieceId}` };
+    if (!next.flipX && row.flipX === undefined) delete (next as { flipX?: boolean }).flipX;
+    if (!row.zone) delete next.zone;
+    return next;
+  });
+  const remapColorways = (state: ColorwayState | undefined) => state && { ...state, variants: state.variants.map(variant => ({ ...variant, pieces: Object.fromEntries(Object.entries(variant.pieces).map(([id, value]) => [ownerId(id), value])) })) };
+  target.artwork = remapArtwork(target.artwork);
+  target.colorways = remapColorways(target.colorways);
+  if (target.techPack) target.techPack.construction = target.techPack.construction.map(row => ({ ...row, pieceId: row.pieceId ? ownerId(row.pieceId) : null }));
+  if (target.appearanceHistory) target.appearanceHistory.versions = target.appearanceHistory.versions.map(version => ({ ...version, pieces: version.pieces.map(row => ({ ...row, id: ownerId(row.id) })), colorways: remapColorways(version.colorways), artwork: remapArtwork(version.artwork) }));
+  if (target.productionAutomation) target.productionAutomation.surfaceMeasurements = target.productionAutomation.surfaceMeasurements.map(row => {
+    const mapping = ownerMap.get(row.pieceId); if (!mapping) return { ...row, pieceId: ownerId(row.pieceId) };
+    // Keep provenance but mark its source snapshot stale; a rebuilt triangulation requires recapture.
+    return { ...row, pieceId: mapping.piece.id, from: mapping.map(row.from), to: mapping.map(row.to), captured: row.captured ? { ...row.captured, geometryFingerprint: `Legacy geometry rebuilt; recapture. ${row.captured.geometryFingerprint}` } : undefined };
+  });
+  // Range entries reference entire saved documents. Only the exact source document link is updated.
+  if (target.rangePlan) target.rangePlan.styles = target.rangePlan.styles.map(style => style.patternId === source.id ? { ...style, patternId: target.id } : style);
+  // Restore annotations only when all endpoints resolve through one proven piece frame and each
+  // endpoint has one exact target point. Shared anchors/multiple owners remain unresolved.
+  const ownership = (piece: Piece) => new Set([...piece.mainPaths, ...piece.internalPaths].flatMap(edge => sourcePaths.get(edge.path)?.pathPoints.map(point => point.id) ?? []));
+  const sourceOwners = source.pieces.map(piece => ({ piece, ids: ownership(piece) }));
+  const annotations = (source.measurements ?? []).flatMap(annotation => {
+    const endpointIds = [annotation.fromPointId, annotation.toPointId, ...(annotation.viaPointId ? [annotation.viaPointId] : [])];
+    const owners = sourceOwners.filter(owner => endpointIds.every(id => owner.ids.has(id)));
+    if (owners.length !== 1 || !ownerMap.has(owners[0].piece.id)) return [];
+    const mapping = ownerMap.get(owners[0].piece.id)!;
+    const targetIds = new Set([...mapping.piece.mainPaths, ...mapping.piece.internalPaths].flatMap(edge => targetPaths.get(edge.path)?.pathPoints.map(point => point.id) ?? []));
+    const points = [...targetIds].map(id => targetPoints.get(id)).filter((point): point is ConstrainablePoint => !!point);
+    const remapped = endpointIds.map(id => {
+      const point = sourcePoints.get(id); if (!point) return null;
+      const position = mapping.map(point), matches = points.filter(candidate => close(candidate, position, 1e-5));
+      return matches.length === 1 ? matches[0].id : null;
+    });
+    if (remapped.some(id => !id)) return [];
+    return [{ ...structuredClone(annotation), fromPointId: remapped[0]!, toPointId: remapped[1]!, viaPointId: annotation.viaPointId ? remapped[2]! : annotation.viaPointId }];
+  });
+  if (annotations.length) target.measurements = annotations;
 }
 
 function slot(color: string) {

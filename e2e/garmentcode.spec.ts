@@ -261,7 +261,7 @@ test('manual arrangement overrides imported placement and clears the restored 3D
   await browser.getByTestId('object-browser-piece').first().click();
   await page.keyboard.press('Escape');
   const properties = page.getByRole('complementary', { name: 'Properties', exact: true });
-  await properties.getByRole('button', { name: /3D Settings/ }).click();
+  await properties.getByRole('button', { name: /Simulation & arrangement/ }).click();
   await properties.getByLabel('Cylinder', { exact: true }).fill('torso');
   await expect.poll(() => page.evaluate((id) => {
     const piece = window.seamer!.getPattern().pieces.find((candidate) => candidate.id === id)!;

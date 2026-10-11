@@ -157,6 +157,13 @@ function restoreAssetReferences(pattern: Pattern, assets: SSPEmbeddedAsset[]): P
       frontTexture: restoreSlot(material.frontTexture),
       backTexture: restoreSlot(material.backTexture)
     })),
+    appearanceHistory: pattern.appearanceHistory && { ...pattern.appearanceHistory,
+      versions: pattern.appearanceHistory.versions.map(version => ({ ...version,
+        materials: version.materials.map(material => ({ ...material,
+          frontTexture: restoreSlot(material.frontTexture), backTexture: restoreSlot(material.backTexture)
+        }))
+      }))
+    },
     images: (pattern.images ?? []).map((image) => ({ ...image, url: restore(image.url) })),
     thumbnailUrl: pattern.thumbnailUrl ? restore(pattern.thumbnailUrl) : pattern.thumbnailUrl
   };
@@ -238,7 +245,7 @@ export async function createSSPArchive(pattern: Pattern, options: SSPExportOptio
     normalUrl: slot.normalSourceMode === 'linked' ? slot.normalUrl : await embed(slot.normalUrl),
     opacityUrl: slot.opacitySourceMode === 'linked' ? slot.opacityUrl : await embed(slot.opacityUrl)
   });
-  for (const material of archived.materials ?? []) {
+  for (const material of [...(archived.materials ?? []), ...(archived.appearanceHistory?.versions.flatMap(version => version.materials) ?? [])]) {
     material.frontTexture = await embedSlot(material.frontTexture);
     material.backTexture = await embedSlot(material.backTexture);
   }

@@ -1,5 +1,7 @@
 import { writable, derived, type Writable } from 'svelte/store';
 import { browser } from '$app/environment';
+import { synchronizeLinkedDraft } from '$lib/utils/draftingSync';
+import { automationSnapshot } from '$lib/utils/automationSnapshot.svelte';
 import type { Pattern, Piece, ConstrainablePoint, ConstrainablePath } from '@seamer/pattern-model';
 import {
   COMMAND_LIST,
@@ -17,11 +19,20 @@ import {
   createDoc,
   installAutomationApi,
   type CommandDef,
+  type CommandContext,
   type CommandResult
 } from '@atelier/core';
 
 interface ReplaceParams {
   pattern: Pattern;
+}
+
+let documentMutationLock: string | null = null;
+let adoptingDocument = false;
+
+/** Shared documents and frozen observations guard commands, transactions and history alike. */
+export function setDocumentMutationLock(reason: string | null): void {
+  documentMutationLock = reason;
 }
 
 const replaceSilent: CommandDef<Pattern, ReplaceParams> = {
@@ -49,23 +60,56 @@ const historyPersistence = new IndexedDbHistoryPersistence<Pattern>({
   version: 1
 });
 
+// Fresh authoritative snapshots retain future history persistence without loading obsolete
+// on-device snapshots into a server document's newly reset undo stack.
+const freshHistoryPersistence = {
+  save: historyPersistence.save.bind(historyPersistence),
+  load: async () => null,
+  delete: historyPersistence.delete.bind(historyPersistence)
+};
+
 function registry(): CommandRegistry<Pattern> {
-  return createPatternRegistry()
+  const result = createPatternRegistry()
     .register(replaceSilent)
     .register(replaceWithHistory);
+  for (const command of result.list()) {
+    const original = command.run as unknown as (content: Pattern, params: unknown, context: CommandContext<Pattern>) => Pattern;
+    result.register<unknown>({ ...command, run: (content, params, context) => {
+      if (documentMutationLock && !(adoptingDocument && command.type === 'studio.replaceSilent')) throw new Error(documentMutationLock);
+      const next = original(content, params, context);
+      return command.type.startsWith('studio.') || command.type === 'transaction.commit' ? next : synchronizeLinkedDraft(content, next);
+    } });
+  }
+  return result;
 }
 
-function makeEditor(content: Pattern, docId = content.id): Editor<Pattern> {
+function makeEditor(content: Pattern, docId = content.id, freshHistory = false): Editor<Pattern> {
   validateDocumentExtensions(content);
-  return new Editor(createDoc(content, { id: docId, name: content.name }), {
+  const editor = new Editor(createDoc(content, { id: docId, name: content.name }), {
     registry: registry(),
     history: {
       limit: 100,
       coalesceMs: 800,
-      persist: historyPersistence,
+      persist: freshHistory ? freshHistoryPersistence : historyPersistence,
       persistLimit: 30
     }
   });
+  const beginTransaction = editor.transaction.bind(editor);
+  editor.transaction = (label) => {
+    const baseDocument = editor.doc;
+    const transaction = beginTransaction(label), commit = transaction.commit.bind(transaction);
+    transaction.commit = () => {
+      // Executing a command can precede a role change or a remote snapshot. Engine commit
+      // applies its working snapshot directly, so guard it here as well as in the registry.
+      if (documentMutationLock || activeEditor !== editor || editor.doc !== baseDocument) { transaction.rollback(); return false; }
+      return commit();
+    };
+    return transaction;
+  };
+  const undo = editor.undo.bind(editor), redo = editor.redo.bind(editor);
+  editor.undo = () => !documentMutationLock && undo();
+  editor.redo = () => !documentMutationLock && redo();
+  return editor;
 }
 
 let activeEditor = makeEditor(structuredClone(EMPTY_PATTERN));
@@ -113,6 +157,7 @@ interface InstalledAutomation {
   }>;
   execute: (type: string, params?: unknown) => CommandResult;
   getContent: () => Pattern;
+  getDoc?: () => ReturnType<typeof createDoc<Pattern>>;
   getPattern?: () => Pattern;
   getSelection: () => unknown;
 }
@@ -136,6 +181,8 @@ function patchAutomationSurface(): void {
     replayable: command.replayable ?? true
   }));
   const getSelection = (): Selection => activeEditor.selection;
+  api.getContent = () => automationSnapshot(activeEditor.content);
+  api.getDoc = () => automationSnapshot(activeEditor.doc);
   api.getPattern = api.getContent;
   api.getSelection = () => ({
     pointIds: [...getSelection().get('point')],
@@ -146,11 +193,11 @@ function patchAutomationSurface(): void {
   });
 }
 
-function replaceEditor(content: Pattern, docId = content.id): void {
+function replaceEditor(content: Pattern, docId = content.id, freshHistory = false): void {
   for (const dispose of disposeEditorEvents) dispose();
   disposeEditorEvents = [];
   activeEditor.dispose();
-  activeEditor = makeEditor(content, docId);
+  activeEditor = makeEditor(content, docId, freshHistory);
   editorValue.set(activeEditor);
   pendingHistoryLabel = null;
   connectEditor();
@@ -189,7 +236,9 @@ function setPattern(next: Pattern): void {
     if (result.ok) transaction.commit();
     else transaction.rollback();
   } else {
-    activeEditor.execute('studio.replaceSilent', { pattern: next });
+    adoptingDocument = true;
+    try { activeEditor.execute('studio.replaceSilent', { pattern: next }); }
+    finally { adoptingDocument = false; }
   }
 }
 
@@ -198,6 +247,16 @@ export const pattern: Writable<Pattern> = {
   set: setPattern,
   update: (fn) => setPattern(fn(activeEditor.content))
 };
+
+/** Authorized remote snapshots must arrive even while viewer mutation/history is locked. */
+export function adoptPatternSnapshot(next: Pattern, options: { clearHistory?: boolean } = {}): void {
+  pendingHistoryLabel = null;
+  if (options.clearHistory) {
+    // The fresh adapter skips load synchronously; clearing disk history cannot race a restore.
+    void historyPersistence.save(next.id, [], []).catch(() => {});
+    replaceEditor(next, next.id, true);
+  } else setPattern(next);
+}
 
 export const selectedTool = writable<string>('select');
 
@@ -304,6 +363,7 @@ export function resetHistory(): void {
 
 /** Open a pattern-specific engine history. Restoration completes asynchronously inside Editor. */
 export async function restoreHistory(patternId: string): Promise<boolean> {
+  if (patternId !== activeEditor.content.id) return false;
   replaceEditor(activeEditor.content, patternId);
   return typeof indexedDB !== 'undefined';
 }

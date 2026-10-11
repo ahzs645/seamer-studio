@@ -22,6 +22,37 @@ for (const view of [
 			await page.goto('/studio', { waitUntil: 'domcontentloaded' });
 			await expect(page.getByTestId('pattern-name-input')).toHaveValue('Pencil skirt - 3D', { timeout: 60_000 });
 			await page.getByRole('button', { name: view.mode, exact: true }).click();
+			if (viewport.width === 667 && viewport.height === 375) {
+				await expect(page.getByTestId('task-fit')).not.toBeVisible();
+				const more = page.locator('.studio-topbar').getByRole('button', { name: 'More', exact: true });
+				await more.click();
+				const tasks = page.locator('#studio-more-actions').getByRole('navigation', { name: 'Studio tasks', exact: true });
+				const buttons = await tasks.getByRole('button').all();
+				expect(buttons).toHaveLength(5);
+				await buttons[0].focus();
+				for (let index = 0; index < buttons.length; index++) {
+					await expect(buttons[index]).toBeFocused();
+					await buttons[index].scrollIntoViewIfNeeded();
+					await expect.poll(() => buttons[index].evaluate(element => {
+						const b = element.getBoundingClientRect();
+						return b.width >= 44 && b.height >= 44 && document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2)?.closest('button') === element;
+					})).toBe(true);
+					if (index + 1 < buttons.length) await page.keyboard.press('Tab');
+				}
+				const fit = tasks.getByRole('button', { name: 'Fit', exact: true });
+				const panel = page.getByRole('dialog', { name: 'Layers, body, fabric and seams', exact: true });
+				// Fit retains Both, so both activation paths preserve the existing camera workflow.
+				for (const input of ['mouse', 'keyboard']) {
+					if (input === 'mouse') await fit.click();
+					else { await fit.focus(); await page.keyboard.press('Enter'); }
+					await expect(more).toHaveAttribute('aria-expanded', 'false');
+					await expect(panel.getByRole('tab', { name: 'Body', exact: true })).toHaveAttribute('aria-selected', 'true');
+					await panel.getByRole('button', { name: 'Close pattern panels', exact: true }).click();
+					await expect(more).toBeFocused();
+					if (input === 'mouse') { await more.click(); await expect(fit).toHaveAttribute('aria-pressed', 'true'); }
+				}
+				await page.getByRole('group', { name: 'Workspace view', exact: true }).getByRole('button', { name: 'Both', exact: true }).click();
+			}
 			const expandControls = page.getByRole('button', { name: 'Expand 3D controls', exact: true });
 			const narrowControls = await expandControls.isVisible();
 			if (narrowControls) await expandControls.click();

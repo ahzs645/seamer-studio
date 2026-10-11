@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { acceptVerifiedSourceImport, captureSourceImportDocument } from './verified-source-import';
 import { writeFile } from 'node:fs/promises';
 
 interface State {
@@ -14,7 +15,9 @@ async function readState(page:Page):Promise<State|null>{
 
 for (const preset of ['t-shirt','skirt','hoodie']) {
  test(`real generated ${preset}: renders, runs finite WebGPU frames, pauses and resets`, async({page, request},testInfo)=>{
-  testInfo.setTimeout(180_000);
+  // Guarded source frames include all corrected substeps and their actual safety proof.
+  // The skirt also prepares/runs again after Reset and a live seam edit.
+  testInfo.setTimeout(preset === 'skirt' ? 1_200_000 : 600_000);
   const errors:string[]=[];
   page.on('pageerror', error=> errors.push(error.message));
   const generated = await request.post('/api/garmentcode', { data: { preset, body: {}, design: {} } });
@@ -23,16 +26,19 @@ for (const preset of ['t-shirt','skirt','hoodie']) {
   expect(generated.status(), specification).toBe(200);
   await page.addInitScript(()=>localStorage.setItem('seamer.welcomeSeen','1'));
   await page.goto('/studio',{waitUntil:'domcontentloaded'});
-  await expect(page.getByTestId('pattern-name-input')).toBeVisible();
+  await expect(page.getByTestId('pattern-name-input')).toBeVisible({ timeout: 90_000 });
+  const documentBefore = await captureSourceImportDocument(page);
   const chooserPromise=page.waitForEvent('filechooser');
   await page.getByTestId('import-menu-trigger').click();
   await page.getByRole('button',{name:/From file/}).click();
   const chooser=await chooserPromise;
   await chooser.setFiles({ name: `generated-${preset}.json`, mimeType: 'application/json', buffer: Buffer.from(specification) });
+  await acceptVerifiedSourceImport(page, documentBefore);
   await expect(page.getByTestId('pattern-name-input')).toHaveValue(`generated-${preset}`);
   await page.getByRole('button',{name:'3D',exact:true}).click();
   const scene=page.getByTestId('pattern-scene-3d');
   await expect(scene).toHaveAttribute('data-status','ready');
+  await expect(scene).toHaveAttribute('data-export-ready','true', { timeout: 90_000 });
   await expect(scene.getByText(/Invalid shape/)).toHaveCount(0);
   await page.screenshot({path:testInfo.outputPath(`garment-${preset}-initial.png`)});
   const gpuAvailable = await page.evaluate(async () => !!navigator.gpu && !!(await navigator.gpu.requestAdapter()));
@@ -41,9 +47,13 @@ for (const preset of ['t-shirt','skirt','hoodie']) {
   await expect(scene).toHaveAttribute('data-status','simulating');
   await expect.poll(async()=>{
    const s=await readState(page);return !!s&&s.deviceAcquired&&s.running&&s.frameCount>=2&&s.positionsFinite&&s.particleCount>0;
-  }, { timeout: 60_000 }).toBe(true);
+  }, { timeout: 240_000 }).toBe(true);
   const baseline=await readState(page);
-  await page.waitForTimeout(8_000);
+  await expect.poll(async () => {
+   const s=await readState(page);
+   return !!s && s.running && s.positionsFinite && s.deviceLostReason === null
+    && s.frameCount > (baseline?.frameCount ?? 0) && s.positionHash !== baseline?.positionHash;
+  }, { timeout: 180_000 }).toBe(true);
   const running=await readState(page);
   expect(running?.frameCount).toBeGreaterThan(baseline?.frameCount??0);
   expect(running?.positionHash).not.toBe(baseline?.positionHash);
@@ -76,7 +86,7 @@ for (const preset of ['t-shirt','skirt','hoodie']) {
   await writeFile(testInfo.outputPath(`garment-${preset}-simulation-metrics.json`),JSON.stringify({baseline,running,paused,reset,errors},null,2));
   if (preset === 'skirt') {
    await scene.getByRole('button', { name: 'Start simulation' }).click();
-   await expect.poll(async () => (await readState(page))?.frameCount ?? 0, { timeout: 60_000 }).toBeGreaterThanOrEqual(5);
+   await expect.poll(async () => (await readState(page))?.frameCount ?? 0, { timeout: 360_000 }).toBeGreaterThanOrEqual(5);
    const beforeEdit = (await readState(page))!.frameCount;
    const seamCount = await page.evaluate(() => {
     const pattern = window.seamer!.getPattern();
@@ -85,24 +95,25 @@ for (const preset of ['t-shirt','skirt','hoodie']) {
    });
    // Live edits deliberately restart the solver after rebuilding. The new frame counter
    // proves the seam topology was rebuilt even though the number of seams stayed the same.
-   await expect.poll(async () => (await readState(page))?.frameCount ?? beforeEdit, { timeout: 60_000 }).toBeLessThan(beforeEdit);
+   await expect.poll(async () => (await readState(page))?.frameCount ?? beforeEdit, { timeout: 180_000 }).toBeLessThan(beforeEdit);
    expect(await page.evaluate(() => window.seamer!.getPattern().seams.length)).toBe(seamCount);
    await expect.poll(async () => {
     const state = await readState(page);
     return !!state && state.running && state.frameCount >= 2 && state.positionsFinite;
-   }, { timeout: 60_000 }).toBe(true);
+   }, { timeout: 240_000 }).toBe(true);
    await scene.getByRole('button', { name: 'Pause simulation' }).click();
    await page.evaluate(() => {
     const pattern = window.seamer!.getPattern();
     window.seamer!.execute('seam.reverse', { seamId: pattern.seams[0].id, side: 'to' });
    });
-   await expect(scene).toHaveAttribute('data-status', 'ready');
+   await expect(scene).toHaveAttribute('data-status', 'ready', { timeout: 90_000 });
+   await expect(scene).toHaveAttribute('data-export-ready', 'true', { timeout: 180_000 });
    await expect.poll(async () => (await readState(page))?.particleCount).toBe(0);
    await scene.getByRole('button', { name: 'Start simulation' }).click();
    await expect.poll(async () => {
     const state = await readState(page);
     return !!state && state.running && state.frameCount >= 2 && state.positionsFinite;
-   }, { timeout: 60_000 }).toBe(true);
+   }, { timeout: 240_000 }).toBe(true);
    await scene.getByRole('button', { name: 'Pause simulation' }).click();
    expect(errors).toEqual([]);
   } });

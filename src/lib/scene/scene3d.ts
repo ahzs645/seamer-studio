@@ -654,6 +654,8 @@ export class PatternRenderer {
   }
 
   /** Mouse interaction: grab a cloth particle and drag it (pulls the fabric, like the reference). */
+  private interactionReadOnly = false;
+  setInteractionReadOnly(value: boolean): void { this.interactionReadOnly=value; if(value){this.exitArrangeMode();this.pauseSimulation();} }
   private setupGrab() {
     const dom = this.renderer.domElement;
     const ndc = new THREE.Vector2();
@@ -663,7 +665,7 @@ export class PatternRenderer {
     };
 
     dom.addEventListener('pointerdown', (ev) => {
-      if (this.frozenPending || this.frozenDisplay) return;
+      if (this.interactionReadOnly || this.frozenPending || this.frozenDisplay) return;
       if (ev.button !== 0) return;
       // Arrange mode: click a piece to select it (the gizmo handles its own drags). Don't grab/pull.
       if (this.mode === 'arrange') {
@@ -1353,6 +1355,48 @@ export class PatternRenderer {
     return { front, back, dualShell };
   }
 
+  /** Visible geometry is the authority for picking and measurements, including temporary placement. */
+  private visibleSurfaceEntries(allowBack = false): Array<{ pieceId: string; mesh: THREE.Mesh }> {
+    const entries = this.mode === 'arrange'
+      ? this.arrangeEntries.map(entry => ({ pieceId: entry.pieceId, mesh: entry.mesh }))
+      : this.clothMeshes.flatMap(entry => allowBack && entry.backMesh
+        ? [{ pieceId: entry.pieceId, mesh: entry.mesh }, { pieceId: entry.pieceId, mesh: entry.backMesh }]
+        : [{ pieceId: entry.pieceId, mesh: entry.mesh }]);
+    return entries.filter(entry => {
+      for (let object: THREE.Object3D | null = entry.mesh; object; object = object.parent) if (!object.visible) return false;
+      return true;
+    });
+  }
+
+  /** Resolve a displayed garment hit to its original draft millimetres, including mirrored cuts. */
+  pickArtworkDraftPoint(event: PointerEvent | DragEvent, allowBack = false): { pieceId: string; x: number; y: number } | null {
+    if (this.frozenPending || this.frozenDisplay) return null;
+    const entries = this.visibleSurfaceEntries(allowBack);
+    for (const entry of entries) { entry.mesh.updateWorldMatrix(true, false); entry.mesh.geometry.computeBoundingSphere(); }
+    const hit = this.viewport.picking.raycast(event as PointerEvent, { objects: entries.map(entry => entry.mesh), recursive: false })[0];
+    if (!hit?.uv) return null;
+    const entry = entries.find(item => item.mesh === hit.object); if (!entry) return null;
+    return { pieceId: entry.pieceId.replace(/#M$/, ''), x: hit.uv.x * (entry.pieceId.endsWith('#M') ? -1 : 1), y: hit.uv.y };
+  }
+  /** Surface tools return to the retained cloth; exiting temporary placement never applies its transforms. */
+  beginArtworkEditing(): void {
+    if (this.interactionReadOnly || this.frozenPending || this.frozenDisplay) return;
+    this.exitArrangeMode();
+  }
+  setArtworkDragging(active: boolean): void { this.controls.enabled = !active; }
+  captureSurfaceMeshes(): Array<{ pieceId: string; positions: number[]; uv: number[]; indices: number[] }> {
+    if (this.frozenPending || this.frozenDisplay) return [];
+    return this.visibleSurfaceEntries().filter(entry => !entry.pieceId.endsWith('#M')).map(entry => {
+      entry.mesh.updateWorldMatrix(true, false);
+      const geometry = entry.mesh.geometry;
+      const position = geometry.getAttribute('position'), uv = geometry.getAttribute('uv');
+      const positions: number[] = [], vector = new THREE.Vector3();
+      for (let i=0;i<position.count;i++) { vector.fromBufferAttribute(position,i).applyMatrix4(entry.mesh.matrixWorld); positions.push(vector.x*1000,vector.y*1000,vector.z*1000); }
+      const index = geometry.getIndex();
+      return { pieceId: entry.pieceId, positions, uv: Array.from(uv.array), indices: index ? Array.from(index.array) : Array.from({length:position.count},(_,i)=>i) };
+    });
+  }
+
   /** Appearance-only edit: preserve live particle positions, preparation, worker and checkpoints. */
   setArtwork(pattern: Pick<Pattern, 'id' | 'artwork'>): void {
     this.assertNotFrozen();
@@ -1364,6 +1408,7 @@ export class PatternRenderer {
     this.currentArtwork = artwork;
     this.artworkKey = key;
     if (!this.pattern || this.pattern.id !== pattern.id) return;
+    this.exitArrangeMode(); // A newly uploaded print must appear before the user activates a surface tool.
     for (const entry of this.clothMeshes) {
       const uv = entry.geometry.getAttribute('uv');
       const bbox = this.addLabelUVs(entry.geometry, uv.array as Float32Array, entry.count);

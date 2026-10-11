@@ -1,5 +1,8 @@
 <script lang="ts">
   import { tick } from 'svelte';
+  import { base } from '$app/paths';
+  import type { Pattern } from '@seamer/pattern-model';
+  import { listPatterns } from '$lib/stores/localDB';
   import { libraryPanelViewport } from '$lib/utils/libraryViewport';
   import { referenceSspTemplates } from '$lib/data/referenceSspTemplates';
   import { GARMENTCODE_EXAMPLES } from '$lib/data/garmentCode';
@@ -11,10 +14,19 @@
     onglobe: () => void;
     onexample: (file: string, label: string) => void;
     onfabric: () => void;
+    onopenpattern?: (id: string) => void;
+    oncollection?: () => void;
   }
-  let { draftingTemplates, ontemplate, ongarmentcode, onglobe, onexample, onfabric }: Props = $props();
+  let { draftingTemplates, ontemplate, ongarmentcode, onglobe, onexample, onfabric, onopenpattern, oncollection }: Props = $props();
   let open = $state(false);
   let query = $state('');
+  let savedPatterns = $state<Pattern[]>([]);
+  let savedStatus = $state('');
+  const savedResults = $derived(savedPatterns.filter(pattern => (category === 'All' || category === 'Saved patterns') && matches(pattern.name, pattern.description ?? '')));
+  async function refreshSavedPatterns() {
+    try { savedPatterns = await listPatterns(); savedStatus = ''; }
+    catch (error) { savedStatus = error instanceof Error ? error.message : 'Saved patterns unavailable.'; }
+  }
   let category = $state('All');
   let container: HTMLDivElement;
   let trigger: HTMLButtonElement;
@@ -25,7 +37,7 @@
   let availableHeight = $state<number>();
   let panelOffset = $state(0);
   const panelId = $props.id();
-  const categories = ['All', 'GarmentCode', '3D samples', '2D patterns', 'Generators'];
+  const categories = ['All', 'Saved patterns', 'GarmentCode', '3D samples', '2D patterns', 'Generators'];
   const matches = (...values: string[]) => values.join(' ').toLowerCase().includes(query.trim().toLowerCase());
   const samples = $derived(referenceSspTemplates.filter((template) =>
     (category === 'All' || category === (template.dimension === '3D' ? '3D samples' : '2D patterns')) &&
@@ -36,7 +48,7 @@
     (category === 'All' || category === 'GarmentCode') && matches(example.label, 'GarmentCode garment sewing pattern 3D')));
   const showGarmentGenerator = $derived(['All', 'GarmentCode', 'Generators'].includes(category) && matches('GarmentCode garment T-shirt hoodie skirt pants dress measurements generator'));
   const showGlobe = $derived(['All', 'Generators'].includes(category) && matches('Globe lantern sphere wire generator'));
-  const resultCount = $derived(samples.length + drafts.length + examples.length + Number(showGarmentGenerator) + Number(showGlobe));
+  const resultCount = $derived(savedResults.length + samples.length + drafts.length + examples.length + Number(showGarmentGenerator) + Number(showGlobe));
 
   function measureLibrary(node: HTMLDivElement) {
     const viewport = window.visualViewport;
@@ -79,6 +91,7 @@
     lastLibraryFocus = null;
     await tick();
     focusInitial();
+    void refreshSavedPatterns();
   }
 </script>
 
@@ -104,7 +117,7 @@
   }}
 />
 
-<div class="library-dropdown dropdown dropdown-end" class:dropdown-open={open} bind:this={container}>
+<div class="library-dropdown dropdown dropdown-end" class:dropdown-open={open} bind:this={container} data-document-keyboard>
   <button type="button" class="btn btn-xs btn-ghost library-trigger" bind:this={trigger}
     data-testid="templates-menu-trigger" aria-haspopup="dialog" aria-expanded={open} aria-controls={panelId} onclick={toggle}>
     <span class="material-symbols-rounded notranslate" aria-hidden="true">local_library</span>
@@ -126,7 +139,17 @@
         {/each}
       </div>
       <p class="text-xs opacity-60 py-2" aria-live="polite">{resultCount} {resultCount === 1 ? 'result' : 'results'}</p>
+      {#if savedStatus}<p role="status" class="text-xs">{savedStatus}</p>{/if}
       <ul class="library-results">
+        {#if savedResults.length}
+          <li class="library-section-title">Your saved patterns</li>
+          {#each savedResults as pattern (pattern.id)}
+            <li><button type="button" class="library-item" disabled={!onopenpattern} onclick={() => choose(() => onopenpattern?.(pattern.id))}>
+              {#if pattern.thumbnailUrl && /^data:image\/(png|jpeg|webp);base64,[a-z\d+/=]+$/i.test(pattern.thumbnailUrl)}<img class="saved-preview" src={pattern.thumbnailUrl} alt="" />{:else}<span class="badge badge-sm">Saved</span>{/if}
+              <span><strong>{pattern.name}</strong><small>{pattern.pieces.length} pieces · {pattern.materials.length} fabrics · {pattern.colorways?.variants.length ?? 0} colorways</small></span>
+            </button></li>
+          {/each}
+        {/if}
         {#if showGarmentGenerator || showGlobe}
           <li class="library-section-title">Generators</li>
           {#if showGarmentGenerator}
@@ -153,7 +176,7 @@
           <li class="library-section-title">Complete SSP samples ({samples.length})</li>
           {#each samples as template}
             <li><button type="button" class="library-item" data-testid={`template-${template.key}`} title={`${template.description} By ${template.author}. ${template.pieces} pieces, ${template.seams} seams, ${template.materials} materials.`} onclick={() => choose(() => ontemplate(template.key))}>
-              <span class="badge badge-sm" class:badge-accent={template.dimension === '3D'}>{template.dimension}</span>
+              <img class="saved-preview" src={`${base}/templates/previews/${template.key}.svg`} alt="" loading="lazy" /><span class="badge badge-sm" class:badge-accent={template.dimension === '3D'}>{template.dimension}</span>
               <span><strong>{template.name}</strong><small>{template.author} · {template.pieces} pieces · {template.seams} seams</small></span>
             </button></li>
           {/each}
@@ -168,12 +191,14 @@
         {/if}
       </ul>
       {#if resultCount === 0}<p class="text-sm py-4">No patterns match. Try another search or category.</p>{/if}
+      {#if oncollection}<button type="button" class="btn btn-sm w-full mt-2" onclick={() => choose(oncollection)}>Collection &amp; range plan</button>{/if}
       <button type="button" class="btn btn-sm w-full mt-2" onclick={() => choose(onfabric)}>Edit fabrics in this pattern</button>
     </div>
   {/if}
 </div>
 
 <style>
+  .saved-preview { width: 72px; height: 56px; object-fit: contain; border-radius: 0.35rem; background: white; flex-shrink: 0; }
   .library-trigger > .material-symbols-rounded { font-size: 18px; }
   .library-panel { width: 24rem; display: block; max-height: calc(100dvh - 7rem); overflow-y: auto; overscroll-behavior: contain; }
   .library-heading { display: flex; align-items: center; justify-content: space-between; position: sticky; top: -0.5rem; z-index: 1; background: oklch(var(--b2)); padding: 0.25rem 0; }

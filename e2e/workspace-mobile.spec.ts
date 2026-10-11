@@ -330,7 +330,11 @@ for (const width of [390, 360]) {
 		await expect.poll(() => page.locator('.studio-topbar').evaluate((element) => element.getBoundingClientRect().height)).toBeLessThanOrEqual(150);
 		await page.getByRole('group', { name: 'Workspace view', exact: true }).getByRole('button', { name: '3D', exact: true }).tap();
 		const sceneBounds = await withinViewport(page, page.getByTestId('pattern-scene-3d'));
-		expect(sceneBounds.height).toBeGreaterThan(660);
+		const taskbarBounds = await withinViewport(page, page.getByRole('navigation', { name: 'Studio tasks', exact: true }));
+		expect(taskbarBounds.height).toBeGreaterThanOrEqual(44);
+		expect(taskbarBounds.height).toBeLessThanOrEqual(56);
+		// Preserve the original available-space budget while accounting for the visible task row.
+		expect(sceneBounds.height + taskbarBounds.height).toBeGreaterThan(660);
 		await page.screenshot({ path: testInfo.outputPath(`mobile-compact-${width}.png`) });
 
 		await trigger.tap();
@@ -371,7 +375,7 @@ for (const width of [390, 360]) {
 
 		await page.locator('.studio-topbar').getByRole('button', { name: 'Fabric', exact: true }).tap();
 		const panel = page.getByRole('dialog', { name: 'Layers, body, fabric and seams', exact: true });
-		await expect(panel.getByRole('button', { name: 'Fabric', exact: true })).toHaveClass(/tab-active/);
+		await expect(panel.getByRole('tab', { name: 'Fabric', exact: true })).toHaveAttribute('aria-selected', 'true');
 		if (width === 390) {
 			const materialCount = await page.evaluate(() => window.seamer!.getPattern().materials.length);
 			const remove = panel.getByRole('button', { name: /^Remove fabric / }).first();

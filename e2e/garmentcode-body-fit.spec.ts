@@ -1,4 +1,5 @@
 import { expect, test, type Locator } from '@playwright/test';
+import { acceptVerifiedSourceImport, captureSourceImportDocument } from './verified-source-import';
 import { readFile } from 'node:fs/promises';
 import { gunzipSync, gzipSync } from 'node:zlib';
 
@@ -64,10 +65,12 @@ test('raw generated JSON preserves resolved source measurements without a UI gen
   await page.addInitScript(() => localStorage.setItem('seamer.welcomeSeen', '1'));
   await page.goto('/studio', { waitUntil: 'domcontentloaded' });
   await expect(page.getByTestId('pattern-name-input')).toBeVisible();
+  const documentBefore = await captureSourceImportDocument(page);
   const pending = page.waitForEvent('filechooser');
   await page.getByTestId('import-menu-trigger').click();
   await page.getByRole('button', { name: /From file/ }).click();
   await (await pending).setFiles({ name: 'source-body-pants.json', mimeType: 'application/json', buffer: Buffer.from(specification) });
+  await acceptVerifiedSourceImport(page, documentBefore, false);
   await expect(page.getByTestId('pattern-name-input')).toHaveValue('source-body-pants');
   await page.getByRole('group', { name: 'Workspace view', exact: true }).getByRole('button', { name: '3D', exact: true }).click();
   await expect(page.getByTestId('pattern-scene-3d')).toHaveAttribute('data-status', 'ready');
@@ -85,10 +88,12 @@ test('older source-body drapes reassemble and partial source exports retain geom
   await page.addInitScript(() => localStorage.setItem('seamer.welcomeSeen', '1'));
   await page.goto('/studio', { waitUntil: 'domcontentloaded' });
   await expect(page.getByTestId('pattern-name-input')).toBeVisible();
+  const documentBefore = await captureSourceImportDocument(page);
   const chooseRaw = page.waitForEvent('filechooser');
   await page.getByTestId('import-menu-trigger').click();
   await page.getByRole('button', { name: /From file/ }).click();
   await (await chooseRaw).setFiles({ name: 'arm-checkpoint.json', mimeType: 'application/json', buffer: Buffer.from(await response.text()) });
+  await acceptVerifiedSourceImport(page, documentBefore, false);
   await expect(page.getByTestId('pattern-name-input')).toHaveValue('arm-checkpoint');
   await page.getByRole('group', { name: 'Workspace view', exact: true }).getByRole('button', { name: '3D', exact: true }).click();
   const scene = page.getByTestId('pattern-scene-3d');
@@ -195,10 +200,12 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       await page.addInitScript(() => localStorage.setItem('seamer.welcomeSeen', '1'));
       await page.goto('/studio', { waitUntil: 'domcontentloaded' });
       await expect(page.getByTestId('pattern-name-input')).toBeVisible();
+      const documentBefore = await captureSourceImportDocument(page);
       const chooser = page.waitForEvent('filechooser');
       await page.getByTestId('import-menu-trigger').click();
       await page.getByRole('button', { name: /From file/ }).click();
       await (await chooser).setFiles({ name: 'material-padding.json', mimeType: 'application/json', buffer: Buffer.from(await response.text()) });
+      await acceptVerifiedSourceImport(page, documentBefore, viewport.width < 480);
       await expect(page.getByTestId('pattern-name-input')).toHaveValue('material-padding');
       await page.getByRole('group', { name: 'Workspace view', exact: true }).getByRole('button', { name: '3D', exact: true }).click();
       const scene = page.getByTestId('pattern-scene-3d');
@@ -250,7 +257,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
         if (await headerFabric.isVisible()) await headerFabric.click();
         else {
           if (await panels.getAttribute('aria-expanded') !== 'true') await panels.click();
-          await page.locator('#studio-left-panel').getByRole('button', { name: 'Fabric', exact: true }).click();
+          await page.locator('#studio-left-panel').getByRole('tab', { name: 'Fabric', exact: true }).click();
         }
         const fabric = page.locator('#studio-left-panel .material-panel');
         const edit = fabric.getByRole('button', { name: /^Edit fabric / }).first();

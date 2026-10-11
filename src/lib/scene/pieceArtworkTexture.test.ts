@@ -18,6 +18,16 @@ describe('piece-bound artwork UV texture', () => {
     }
   });
 
+  it.each([false,true])('preserves reflected source UV orientation with mirrored cut=%s',mirrored=>{
+    const reflected={...artwork,flipX:true};const bounds={uMin:mirrored?-180:-20,vMin:5,wMM:200,hMM:150};
+    const transform=artworkCanvasTransform(reflected,bounds,1001,751,200,80,mirrored)!;
+    for(const [u,v]of [[0,0],[1,0],[1,1],[.2,.7]]){
+      const draft=artworkDraftPoint(reflected,u,v);
+      expect(transform[0]*u*200+transform[2]*v*80+transform[4]).toBeCloseTo(((mirrored?-draft.x:draft.x)-bounds.uMin)*1001/bounds.wMM,8);
+      expect(transform[1]*u*200+transform[3]*v*80+transform[5]).toBeCloseTo(751-(draft.y-bounds.vMin)*751/bounds.hMM,8);
+    }
+  });
+
   it('keeps physical print dimensions when the owner UV bounds change after grading', () => {
     const a = artworkCanvasTransform({ ...artwork, rotation: 0 }, { uMin: 0, vMin: 0, wMM: 100, hMM: 100 }, 1000, 1000, 200, 80)!;
     const b = artworkCanvasTransform({ ...artwork, rotation: 0 }, { uMin: -50, vMin: -10, wMM: 250, hMM: 150 }, 1000, 1000, 200, 80)!;

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { DRAWING_SHORTCUTS, drawingShortcutTool } from '$lib/utils/shortcuts';
   import { tick } from 'svelte';
   import type { Editor } from '@atelier/core';
   import { editorState } from '@atelier/svelte';
@@ -29,25 +30,25 @@
   const SEAM_MULTI = '<svg viewBox="0 -0.5 17 17" class="w-5 h-5" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path d="M16.875,2.125 L15.547,2.125 C14.93,1.461 13.747,1 12.958,1 L12.958,0.042 L12,0.042 L12,1 L4.042,1 C2.938,1 2.042,1 2.042,2 L2.042,3.875 C2.042,4.979 2.933,5.875 4.031,5.875 L4.031,5.875 L4.031,7 L3,7 L3,8 L5,8 L5,10 L5.958,10 L5.958,5.875 L6.011,5.875 C6.511,5.875 6.737,5.46 6.848,4.918 L6.987,4.05 C7.006,3.676 6.968,4.305 6.987,4 L11,4 L11,11.042 L3.042,11.042 C1.938,11.042 1.042,11.938 1.042,13.042 L1.042,13.958 C1.042,15.062 1.938,14.958 3.042,14.958 L13.958,14.958 C15.062,14.958 15.958,15.062 15.958,13.958 L15.958,13.917 L15.958,5.875 L16.875,5.875 L16.875,2.125 Z"/></svg>';
 
   const entries: Entry[] = [
-    { id: 'select', label: 'Modify & select', hotkey: 'V', icon: 'arrow_selector_tool' },
-    { id: 'pen', label: 'Pen tool (lines and curves)', hotkey: 'P', icon: 'ink_pen', gap: true },
+    { id: 'select', label: 'Modify & select', hotkey: DRAWING_SHORTCUTS['select'], icon: 'arrow_selector_tool' },
+    { id: 'pen', label: 'Pen tool (lines and curves)', hotkey: DRAWING_SHORTCUTS['pen'], icon: 'ink_pen', gap: true },
     { group: 'Arc/circle tools', icon: 'circle', sub: [
-      { id: 'circle', label: 'New circle/ellipse', hotkey: 'C', icon: 'circle' },
-      { id: 'arc-center', label: 'New center arc', hotkey: 'A', icon: 'progress_activity' },
-      { id: 'arc-3pt', label: 'New three-point-arc', hotkey: 'Q', icon: 'line_curve' }
+      { id: 'circle', label: 'New circle/ellipse', hotkey: DRAWING_SHORTCUTS['circle'], icon: 'circle' },
+      { id: 'arc-center', label: 'New center arc', hotkey: DRAWING_SHORTCUTS['arc-center'], icon: 'progress_activity' },
+      { id: 'arc-3pt', label: 'New three-point-arc', hotkey: DRAWING_SHORTCUTS['arc-3pt'], icon: 'line_curve' }
     ] },
-    { id: 'point', label: 'New point', hotkey: 'N', icon: 'radio_button_checked' },
-    { id: 'piece', label: 'Create pattern piece', hotkey: 'T', icon: 'extension', gap: true },
-    { id: 'internal', label: 'Add internal path (dart / fold) to the selected piece', hotkey: 'D', icon: 'conversion_path' },
+    { id: 'point', label: 'New point', hotkey: DRAWING_SHORTCUTS['point'], icon: 'radio_button_checked' },
+    { id: 'piece', label: 'Create pattern piece', hotkey: DRAWING_SHORTCUTS['piece'], icon: 'extension', gap: true },
+    { id: 'internal', label: 'Add internal path (dart / fold) to the selected piece', hotkey: DRAWING_SHORTCUTS['internal'], icon: 'conversion_path' },
     { id: 'piece-point', label: 'Add piece point (construction point on a dynamic piece)', icon: 'adjust' },
     { group: 'Seam tools', svg: SEAM_MULTI, gap: true, sub: [
-      { id: 'seam-single', label: 'Create single seam', hotkey: 'S', svg: SEAM_SINGLE },
-      { id: 'seam-multi', label: 'Create multi seam', hotkey: 'Shift+S', svg: SEAM_MULTI }
+      { id: 'seam-single', label: 'Create single seam', hotkey: DRAWING_SHORTCUTS['seam-single'], svg: SEAM_SINGLE },
+      { id: 'seam-multi', label: 'Create multi seam', hotkey: DRAWING_SHORTCUTS['seam-multi'], svg: SEAM_MULTI }
     ] },
-    { id: 'text', label: 'Insert text', hotkey: 'I', icon: 'text_fields', gap: true },
-    { id: 'image', label: 'Insert image (reference / logo)', hotkey: 'G', icon: 'image' },
-    { id: 'trace', label: 'Trace piece', hotkey: 'R', icon: 'polyline' },
-    { id: 'measure', label: 'Measure (point to point)', hotkey: 'M', icon: 'straighten', gap: true }
+    { id: 'text', label: 'Insert text', hotkey: DRAWING_SHORTCUTS['text'], icon: 'text_fields', gap: true },
+    { id: 'image', label: 'Insert image (reference / logo)', hotkey: DRAWING_SHORTCUTS['image'], icon: 'image' },
+    { id: 'trace', label: 'Trace piece', hotkey: DRAWING_SHORTCUTS['trace'], icon: 'polyline' },
+    { id: 'measure', label: 'Measure (point to point)', hotkey: DRAWING_SHORTCUTS['measure'], icon: 'straighten', gap: true }
   ];
 
   const instanceId = $props.id();
@@ -123,7 +124,7 @@
   function handleKeydown(ev: KeyboardEvent) {
     if (!canUseDrawingShortcut(ev)) return;
     // Shift+S (multi seam) before plain S
-    if (ev.shiftKey && ev.key.toLowerCase() === 's') { ev.preventDefault(); chooseTool('seam-multi'); return; }
+    if (drawingShortcutTool(ev) === 'seam-multi') { ev.preventDefault(); chooseTool('seam-multi'); return; }
     // Other shifted keys belong to app-level bindings (Shift+V variables, Shift+M mirror-Y).
     if (ev.shiftKey) return;
     // M doubles as "mirror selection" (studio page handler) — an active selection wins over the tool.
@@ -131,7 +132,7 @@
         (editorView.selection.get('point').size || editorView.selection.get('path').size || editorView.selection.get('piece').size)) return;
     const all: Item[] = [];
     for (const e of entries) { if (e.id) all.push(e as Item); if (e.sub) all.push(...e.sub); }
-    const t = all.find((x) => x.hotkey && !x.hotkey.includes('+') && x.hotkey.toLowerCase() === ev.key.toLowerCase());
+    const t = all.find((x) => x.id === drawingShortcutTool(ev));
     if (t) { ev.preventDefault(); chooseTool(t.id); }
   }
 

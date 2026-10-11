@@ -10,7 +10,7 @@
   let { children } = $props();
   const studioRoot = `${base}/studio`;
   const isStudio = $derived(
-    $page.url.pathname === studioRoot || $page.url.pathname.startsWith(`${studioRoot}/`)
+    $page.url.pathname === studioRoot || $page.url.pathname.startsWith(`${studioRoot}/`) || $page.url.pathname === `${base}/detached`
   );
 
   setAvatarAssetsBase(`${base}/models`);

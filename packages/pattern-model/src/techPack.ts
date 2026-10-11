@@ -1,3 +1,4 @@
+import type { TechPackExchangeRate } from './techPackExchange';
 /** User-authored production document. A released status is a document label, not fit certification. */
 export interface TechPackMetadata {
   styleCode: string;
@@ -13,7 +14,7 @@ export interface TechPackSize {
   id: string;
   name: string;
 }
-/** Explicitly entered values in the referenced production POM's unit. No automatic grading. */
+/** Entered values use the POM's unit. A non-null target overrides any automatic production rule. */
 export interface TechPackSizeMeasurement {
   target: number | null;
   actual: number | null;
@@ -24,6 +25,7 @@ export interface TechPackConstruction {
   title: string;
   pieceId: string | null;
   instruction: string;
+  capture?: { dataUrl: string; capturedAt: string; label: string; sourceVersionId: string };
 }
 export interface TechPackCosting {
   id: string;
@@ -37,6 +39,7 @@ export interface TechPackCosting {
   unit: string;
   unitCost: number | null;
   notes: string;
+  quantitySource?: 'manual' | 'marker';
 }
 export interface TechPackDocument {
   metadata: TechPackMetadata;
@@ -45,6 +48,7 @@ export interface TechPackDocument {
   sizeMeasurements: Record<string, Record<string, TechPackSizeMeasurement>>;
   construction: TechPackConstruction[];
   costing: TechPackCosting[];
+  exchangeRates?: TechPackExchangeRate[];
 }
 export function createTechPack(): TechPackDocument {
   return {

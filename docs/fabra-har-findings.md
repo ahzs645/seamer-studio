@@ -1,6 +1,6 @@
 # Fabra HAR findings and Seamer incorporation priorities
 
-Reviewed October 10, 2026 by three agents. This supersedes the earlier documentation-only confidence limits in the main [comparison](fabra-comparison.md).
+Reviewed October 10, 2026 by three agents. This is a historical capture review and implementation proposal. The [current comparison](fabra-comparison.md) and [recursive audit](fabra-recursive-audit.md) supersede its Seamer gap and priority statements; the captured evidence and qualifications below retain their original scope.
 
 ## Capture and evidence conventions
 
@@ -12,7 +12,7 @@ Editor extraction produced **315 HTML/JS/CSS/JSON responses** and **106 unique s
 
 **Entry indices are zero-based** within `log.entries`. Source offsets below are approximate zero-based character offsets in decoded JavaScript, not bytes in the HAR. Captured code establishes available implementation paths; telemetry establishes recorded client events; successful responses establish transferred data. None independently establishes screen pixels, completed manufacturing output or fit accuracy.
 
-## What the capture adds to the comparison
+## Capture findings and historical implementation proposals
 
 | Finding | Concrete evidence | Implication for Seamer |
 | --- | --- | --- |
@@ -39,7 +39,7 @@ Editor extraction produced **315 HTML/JS/CSS/JSON responses** and **106 unique s
 - **Opening export is not exporting:** billing allowance reads and Export Panel Opened do not establish successful download, content quality or spreadsheet/PDF generation.
 - **Fit Simulated is a client event:** it does not establish collision safety, seam closure, released supports or settling.
 
-## Revised implementation order
+## Historical implementation order
 
 1. Keep the implemented adjustable split and accessible, readable command palette.
 2. Add a **selection-driven contextual action bar**, reusing commands for duplicate/mirror, edge/seam operations and Properties. Validate selection-dependent availability and short-screen placement.
@@ -51,6 +51,6 @@ Editor extraction produced **315 HTML/JS/CSS/JSON responses** and **106 unique s
 
 The most useful pattern to incorporate is a shorter path from **selection → relevant action → visible result**, supported by reusable visual assets and a production Specs document. Seamer already has substantial geometry, materials, grading, cutting and 3D controls; use those foundations.
 
-## Scope of this follow-up
+## Historical scope and validation
 
-This check updates the comparison and priorities. It makes no further application-code changes. The previous implementation's **27 passing browser checks**, type checks, build and lint remain its validation record; they do not validate Fabra's runtime or the future features proposed above.
+At this checkpoint, the review updated the comparison and priorities without further application-code changes. Its **27 passing browser checks**, type checks, build and lint belong to that earlier implementation. The proposed Seamer workflows now have active implementations described in the [current comparison](fabra-comparison.md#implemented-completion-tranche), with separate verification records. These historical checks do not validate the later release or Fabra's runtime.

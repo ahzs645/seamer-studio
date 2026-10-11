@@ -1,4 +1,5 @@
 import { devices, expect, test, type Page, type Locator } from '@playwright/test';
+import { acceptVerifiedSourceImport, captureSourceImportDocument } from './verified-source-import';
 import { readFile, writeFile } from 'node:fs/promises';
 import { PerspectiveCamera, Vector3 } from 'three';
 
@@ -16,13 +17,100 @@ function cameraDifference(actual: CameraState | null, expected: CameraState | nu
     ...actual.target.map((v, i) => Math.abs(v - expected.target[i])));
 }
 
+type PreparationObservation = {
+  statuses: string[];
+  exportReadiness: string[];
+  pendingControls: { labels: string[]; allDisabled: boolean; startCount: number; startsDisabled: boolean }[];
+  observer: MutationObserver;
+};
+const exportLabels = ['Download as OBJ', 'Download as STL', 'Download as glTF', 'Save Image'];
+
+async function observePreparation(page: Page) {
+  await page.evaluate(labels => {
+    const observation: PreparationObservation = { statuses: [], exportReadiness: [], pendingControls: [],
+      observer: null as unknown as MutationObserver };
+    const sample = (records: MutationRecord[] = []) => {
+      const shell = document.querySelector('[data-testid="pattern-scene-3d"]');
+      if (!shell) return;
+      for (const record of records) {
+        if (record.target !== shell || !record.oldValue) continue;
+        if (record.attributeName === 'data-status') observation.statuses.push(record.oldValue);
+        if (record.attributeName === 'data-export-ready') observation.exportReadiness.push(record.oldValue);
+      }
+      observation.statuses.push(shell.getAttribute('data-status') ?? '');
+      const ready = shell.getAttribute('data-export-ready') ?? '';
+      observation.exportReadiness.push(ready);
+      if (ready === 'false') {
+        const controls = Array.from(shell.querySelectorAll<HTMLButtonElement>('button')).map(button => ({
+          label: labels.find(label => (button.getAttribute('aria-label') ?? button.textContent ?? '').trim().endsWith(label)),
+          disabled: button.disabled
+        })).filter(control => control.label);
+        const starts = Array.from(shell.querySelectorAll<HTMLButtonElement>('button[aria-label="Start simulation"]'));
+        observation.pendingControls.push({ labels: [...new Set(controls.map(control => control.label!))],
+          allDisabled: controls.every(control => control.disabled), startCount: starts.length,
+          startsDisabled: starts.every(button => button.disabled) });
+      }
+    };
+    observation.observer = new MutationObserver(sample);
+    // Workspace view changes replace the shell, so observe both attributes and new nodes.
+    observation.observer.observe(document.body, { subtree: true, childList: true, attributes: true,
+      attributeFilter: ['data-status', 'data-export-ready', 'disabled'], attributeOldValue: true });
+    sample();
+    (window as unknown as { __cameraPreparation: PreparationObservation }).__cameraPreparation = observation;
+  }, exportLabels);
+}
+
+async function awaitCurrentScene(page: Page) {
+  const scene = page.getByTestId('pattern-scene-3d');
+  await expect(scene).toHaveAttribute('data-status', 'ready', { timeout: 90_000 });
+  await expect(scene).toHaveAttribute('data-export-ready', 'true', { timeout: 90_000 });
+  for (const label of exportLabels.slice(0, 3)) {
+    await expect(scene.locator('.scene-desktop-controls').getByRole('button', { name: label, exact: true, includeHidden: true })).toBeEnabled();
+  }
+  await expect(scene.locator('.scene-lighting').getByRole('button', { name: 'Save Image', exact: true, includeHidden: true })).toBeEnabled();
+  await expect(scene.locator('.scene-desktop-controls').getByRole('button', { name: 'Start simulation', exact: true, includeHidden: true })).toBeEnabled();
+}
+
+async function finishPreparation(page: Page, requireBuildCycle = true) {
+  if (requireBuildCycle) {
+    await expect.poll(() => page.evaluate(() => {
+      const observed = (window as unknown as { __cameraPreparation: PreparationObservation }).__cameraPreparation;
+      const loading = observed.statuses.indexOf('loading');
+      const pending = observed.exportReadiness.indexOf('false');
+      return loading >= 0 && observed.statuses.slice(loading + 1).includes('ready')
+        && pending >= 0 && observed.exportReadiness.slice(pending + 1).includes('true');
+    }), { timeout: 90_000 }).toBe(true);
+  }
+  await expect(page.getByTestId('pattern-name-input')).toHaveValue('fresh-camera-source');
+  await expect.poll(() => page.evaluate(() => window.seamer?.getPattern().name)).toBe('fresh-camera-source');
+  await awaitCurrentScene(page);
+  const observed = await page.evaluate(() => {
+    const observation = (window as unknown as { __cameraPreparation: PreparationObservation }).__cameraPreparation;
+    observation.observer.disconnect();
+    return { statuses: observation.statuses, exportReadiness: observation.exportReadiness, pendingControls: observation.pendingControls };
+  });
+  if (requireBuildCycle) {
+    expect(observed.pendingControls.length, 'Observe actual disabled export controls during the current build').toBeGreaterThan(0);
+  }
+  for (const controls of observed.pendingControls) {
+    expect(controls.labels.sort()).toEqual([...exportLabels].sort());
+    expect(controls.allDisabled, 'Every export and Save Image control must be disabled while the current garment prepares').toBe(true);
+    expect(controls.startCount, 'Observe actual Start simulation controls during preparation').toBeGreaterThan(0);
+    expect(controls.startsDisabled, 'Every Start simulation control must be disabled while the current garment prepares').toBe(true);
+  }
+  return observed;
+}
+
 async function importFile(page: Page, name: string, buffer: Buffer) {
+  const documentBefore = await captureSourceImportDocument(page);
   const chooser = page.waitForEvent('filechooser');
   await page.getByTestId('import-menu-trigger').click();
   await page.getByRole('button', { name: /From file/ }).click();
   await (await chooser).setFiles({ name, mimeType: 'application/json', buffer });
+  await observePreparation(page);
+  await acceptVerifiedSourceImport(page, documentBefore);
   await expect(page.getByTestId('pattern-name-input')).toHaveValue(name.replace(/\.(json|ssp)$/, ''));
-  await expect(page.getByTestId('pattern-scene-3d')).toHaveAttribute('data-status', 'ready');
+  return finishPreparation(page);
 }
 
 async function revealControls(page: Page) {
@@ -73,11 +161,12 @@ async function inspectShortTouchLayout(page: Page) {
   const fabric = header.getByRole('button', { name: 'Fabric', exact: true });
   await actualTouchTarget(fabric); await fabric.tap();
   const panels = page.getByRole('dialog', { name: 'Layers, body, fabric and seams', exact: true });
-  await expect(panels.getByRole('button', { name: 'Fabric', exact: true })).toHaveClass(/tab-active/);
+  await expect(panels.getByRole('tab', { name: 'Fabric', exact: true })).toHaveAttribute('aria-selected', 'true');
   await panels.getByRole('button', { name: 'Close pattern panels', exact: true }).tap();
   await expect(more).toBeFocused();
   const primary = scene.getByRole('group', { name: 'Primary 3D controls', exact: true });
-  await expect(primary.getByRole('button')).toHaveCount(3);
+  await expect(primary.getByRole('button')).toHaveCount(4);
+  await actualTouchTarget(primary.getByRole('button', { name: 'Zoom to garment', exact: true }));
   for (const button of await primary.getByRole('button').all()) await actualTouchTarget(button);
   await scene.getByRole('button', { name: 'Expand 3D controls', exact: true }).tap();
   const controls = scene.getByRole('group', { name: '3D controls', exact: true });
@@ -90,6 +179,7 @@ async function inspectShortTouchLayout(page: Page) {
 }
 
 async function actualGeometry(page: Page) {
+  await awaitCurrentScene(page);
   await revealControls(page);
   const pending = page.waitForEvent('download');
   await page.getByTestId('pattern-scene-3d').getByRole('button', { name: 'Download as OBJ', exact: true }).click();
@@ -136,7 +226,8 @@ async function inspectFraming(page: Page, points: number[][]) {
 for (const viewport of [{ width: 1280, height: 720 }, { width: 390, height: 844 },
   { width: 360, height: 800 }, { width: 667, height: 375 }]) {
   test(`fresh source camera fits actual garment/body and Reset at ${viewport.width}x${viewport.height}`, async ({ browser, request, baseURL }, testInfo) => {
-    test.setTimeout(180_000);
+    // Desktop additionally prepares the real 12-piece source again after Save/reload.
+    test.setTimeout(viewport.width === 1280 ? 300_000 : 180_000);
     const context = await browser.newContext({ ...(viewport.width < 700 ? devices['Pixel 7'] : devices['Desktop Chrome']),
       viewport, baseURL, serviceWorkers: 'block', acceptDownloads: true });
     const page = await context.newPage();
@@ -162,9 +253,11 @@ for (const viewport of [{ width: 1280, height: 720 }, { width: 390, height: 844 
       const source = await response.text();
       await writeFile(testInfo.outputPath('actual-generated-source.json'), source);
       await page.goto('/studio', { waitUntil: 'domcontentloaded' });
-      await expect(page.getByTestId('pattern-scene-3d')).toHaveAttribute('data-status', 'ready');
-      await importFile(page, 'fresh-camera-source.json', Buffer.from(source));
+      await awaitCurrentScene(page);
+      const importPreparation = await importFile(page, 'fresh-camera-source.json', Buffer.from(source));
+      await observePreparation(page);
       await page.getByRole('group', { name: 'Workspace view', exact: true }).getByRole('button', { name: '3D', exact: true }).click();
+      const viewPreparation = await finishPreparation(page, false);
       await expect.poll(() => page.evaluate(() => window.seamer!.getPattern().settings3d.sourceCameraFraming)).toBe('viewport');
       const shortLayout = viewport.width === 667 ? await inspectShortTouchLayout(page) : null;
       const points = await actualGeometry(page);
@@ -180,7 +273,7 @@ for (const viewport of [{ width: 1280, height: 720 }, { width: 390, height: 844 
         const saved = await cameraState(page);
         await page.reload({ waitUntil: 'domcontentloaded' });
         await expect(page.getByTestId('pattern-name-input')).toHaveValue('fresh-camera-source');
-        await expect(page.getByTestId('pattern-scene-3d')).toHaveAttribute('data-status', 'ready');
+        await awaitCurrentScene(page);
         await expect.poll(async () => cameraDifference(await cameraState(page), saved)).toBeLessThan(1e-10);
         const restored = await cameraState(page);
         const sceneBounds = (await page.getByTestId('pattern-scene-3d').boundingBox())!;
@@ -207,7 +300,8 @@ for (const viewport of [{ width: 1280, height: 720 }, { width: 390, height: 844 
       const reset = await inspectFraming(page, points);
       await page.screenshot({ path: testInfo.outputPath(`reset-source-${viewport.width}.png`) });
       await writeFile(testInfo.outputPath('framing-observed.json'), JSON.stringify({ viewport, emulatedPhone: viewport.width < 700,
-        initial, reset, savedRoundTrip, shortLayout, errors, garmentAccepted: false, evidenceScope: 'Actual source cold rendering and camera/interface only; no simulation or physical phone.' }, null, 2));
+        initial, reset, savedRoundTrip, shortLayout, importPreparation, viewPreparation, errors, garmentAccepted: false,
+        evidenceScope: 'Actual source cold rendering and camera/interface only; no simulation or physical phone.' }, null, 2));
       expect(errors).toEqual([]);
     } finally {
       if (!page.isClosed()) {

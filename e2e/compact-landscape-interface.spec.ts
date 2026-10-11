@@ -23,6 +23,35 @@ async function closeControls(page: Page, touch: boolean) {
   const close = page.getByTestId('pattern-scene-3d').getByRole('button', { name: 'Close 3D controls', exact: true });
   if (await close.isVisible()) { await target(close, touch); await activate(close, touch); }
 }
+async function compactTasks(page: Page, info: TestInfo, artifact: string) {
+  const header = page.locator('.studio-topbar');
+  const more = header.getByRole('button', { name: 'More', exact: true });
+  await activate(more, true);
+  const tasks = header.getByRole('navigation', { name: 'Studio tasks', exact: true });
+  await expect(tasks.getByRole('button')).toHaveCount(5);
+  const targets = [];
+  for (const button of await tasks.getByRole('button').all()) {
+    await button.scrollIntoViewIfNeeded();
+    targets.push({ label: await button.innerText(), bounds: await target(button, true) });
+  }
+  await writeFile(info.outputPath(artifact), JSON.stringify(targets, null, 2));
+  await expect(page.getByTestId('task-appearance')).not.toBeVisible();
+  const appearance = tasks.getByRole('button', { name: 'Appearance', exact: true });
+  await appearance.scrollIntoViewIfNeeded();
+  await activate(appearance, true);
+  const panel = page.getByRole('dialog', { name: 'Layers, body, fabric and seams', exact: true });
+  await expect(panel.getByRole('tab', { name: 'Fabric', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByTestId('pattern-scene-3d')).toBeVisible();
+  await expect(more).toHaveAttribute('aria-expanded', 'false');
+  await activate(panel.getByRole('button', { name: 'Close pattern panels', exact: true }), true);
+  await expect(more).toBeFocused();
+  await activate(more, true);
+  await expect(appearance).toHaveAttribute('aria-pressed', 'true');
+  await appearance.focus();
+  await page.keyboard.press('Escape');
+  await expect(more).toHaveAttribute('aria-expanded', 'false');
+  await expect(more).toBeFocused();
+}
 async function generate(page: Page, touch: boolean, info: TestInfo) {
   await page.addInitScript(() => {
     localStorage.setItem('seamer.welcomeSeen', '1'); localStorage.setItem('seamer.autosaveSeconds', '600');
@@ -108,6 +137,7 @@ for(const viewport of [{width:667,height:375},{width:768,height:375},{width:390,
         expect(fallback.header!.height).toBeGreaterThanOrEqual(96);expect(fallback.header!.height).toBeLessThanOrEqual(105);
         expect(fallback.canvas!.height).toBeGreaterThanOrEqual(150);
         expect(await page.evaluate(()=>document.documentElement.scrollWidth-innerWidth)).toBe(0);
+        await compactTasks(page, info, 'narrow-landscape-task-targets.json');
         await page.setViewportSize(viewport);
       }
       const header=page.locator('.studio-topbar'),scene=page.getByTestId('pattern-scene-3d');
@@ -129,6 +159,15 @@ for(const viewport of [{width:667,height:375},{width:768,height:375},{width:390,
         const x=groups[a].bounds!,y=groups[b].bounds!;
         expect(x.x<y.x+y.width&&x.x+x.width>y.x&&x.y<y.y+y.height&&x.y+x.height>y.y,`Header overlaps ${groups[a].label}/${groups[b].label}`).toBe(false);
       }
+      if (viewport.height === 375) await compactTasks(page, info, 'compact-task-targets.json');
+      else {
+        const tasks = page.getByRole('navigation', { name: 'Studio tasks', exact: true });
+        await expect(tasks.getByRole('button')).toHaveCount(5);
+        for (const button of await tasks.getByRole('button').all()) {
+          await button.scrollIntoViewIfNeeded();
+          await target(button, touch);
+        }
+      }
       const trigger=page.getByTestId('templates-menu-trigger');await activate(trigger,touch);
       const library=page.getByRole('dialog',{name:'Pattern library',exact:true});await expect(library).toBeVisible();
       const bounds=(await library.boundingBox())!;await writeFile(info.outputPath('actual-library-bounds.json'),JSON.stringify(bounds));
@@ -145,7 +184,7 @@ for(const viewport of [{width:667,height:375},{width:768,height:375},{width:390,
         const fabric=header.getByRole('button',{name:'Fabric',exact:true}).filter({visible:true});
         const fabricIsMenuAction=await fabric.evaluate(element=>element.closest('#studio-more-actions')!==null);
         await target(fabric,true);await activate(fabric,true);
-        const panel=page.getByRole('dialog',{name:'Layers, body, fabric and seams',exact:true});await expect(panel.getByRole('button',{name:'Fabric',exact:true})).toHaveClass(/tab-active/);
+        const panel=page.getByRole('dialog',{name:'Layers, body, fabric and seams',exact:true});await expect(panel.getByRole('tab',{name:'Fabric',exact:true})).toHaveAttribute('aria-selected', 'true');
         await activate(panel.getByRole('button',{name:'Close pattern panels',exact:true}),true);
         // A menu action restores More; the directly visible portrait action
         // restores its own Fabric trigger. Both actual focus paths stay asserted.

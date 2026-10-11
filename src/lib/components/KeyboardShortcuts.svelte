@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { SHORTCUT_GROUPS } from '$lib/utils/shortcuts';
 	import { containModalTab } from '$lib/utils/focus';
 	// Keyboard-shortcuts reference overlay. Toggle with the `?` key or the header button.
 	let { open = $bindable(false) }: { open?: boolean } = $props();
@@ -19,68 +20,8 @@
 		};
 	});
 
-	const groups: { title: string; items: { keys: string[]; label: string }[] }[] = [
-		{
-			title: 'General',
-			items: [
-				{ keys: ['Ctrl/Cmd', 'Z'], label: 'Undo' },
-				{ keys: ['Ctrl/Cmd', 'Shift', 'Z'], label: 'Redo' },
-				{ keys: ['Ctrl/Cmd', 'S'], label: 'Save' },
-				{ keys: ['Ctrl/Cmd', 'K'], label: 'Command palette' },
-				{ keys: ['Ctrl/Cmd', 'C'], label: 'Copy selection' },
-				{ keys: ['Ctrl/Cmd', 'V'], label: 'Paste (click to place)' },
-				{ keys: ['Ctrl/Cmd', 'Shift', 'V'], label: 'Paste as copy' },
-				{ keys: ['Ctrl/Cmd', 'D'], label: 'Duplicate selected piece' },
-				{ keys: ['Delete / Backspace'], label: 'Delete selection (cascades)' },
-				{ keys: ['Ctrl/Cmd', '0'], label: 'Fit pieces to view' },
-				{ keys: ['Ctrl/Cmd', '−'], label: 'Zoom out' },
-				{ keys: ['Ctrl/Cmd', '= / +'], label: 'Zoom in' },
-				{ keys: ['Ctrl/Cmd', 'B'], label: 'Toggle property panel' },
-				{ keys: ['Shift', 'V'], label: 'Open Sizes & Variables' },
-				{ keys: ['Ctrl/Cmd', 'Shift', 'L'], label: 'Toggle layers panel' },
-				{ keys: ['?'], label: 'Toggle this help' }
-			]
-		},
-		{
-			title: 'Tools (2D)',
-			items: [
-				{ keys: ['V'], label: 'Modify & select' },
-				{ keys: ['P'], label: 'Pen tool' },
-				{ keys: ['N'], label: 'New point' },
-				{ keys: ['T'], label: 'Create pattern piece' },
-				{ keys: ['S'], label: 'Single seam' },
-				{ keys: ['Shift', 'S'], label: 'Multi seam' },
-				{ keys: ['I'], label: 'Insert text' },
-				{ keys: ['C'], label: 'Circle / ellipse' },
-				{ keys: ['A'], label: 'Center arc' },
-				{ keys: ['Q'], label: 'Three-point arc' },
-				{ keys: ['D'], label: 'Internal path (selected piece)' },
-				{ keys: ['G'], label: 'Insert image' },
-				{ keys: ['R'], label: 'Trace piece' },
-				{ keys: ['M'], label: 'Measure (no selection)' },
-				{ keys: ['Enter'], label: 'Finish path / advance multi seam' },
-				{ keys: ['Esc'], label: 'Cancel current operation' }
-			]
-		},
-		{
-			title: 'Selection (2D)',
-			items: [
-				{ keys: ['↑', '↓', '←', '→'], label: 'Nudge selection by 1' },
-				{ keys: ['Shift', 'Arrow'], label: 'Nudge selection by 10' },
-				{ keys: ['[', ']'], label: 'Rotate −15° / +15°' },
-				{ keys: ['M'], label: 'Mirror on X axis' },
-				{ keys: ['Shift', 'M'], label: 'Mirror on Y axis' }
-			]
-		},
-		{
-			title: '3D (hover or focus the pane)',
-			items: [
-				{ keys: ['A'], label: 'Toggle arrange mode' },
-				{ keys: ['M'], label: 'Toggle move mode (arrange / no selection)' },
-				{ keys: ['Space'], label: 'Start / pause simulation' }
-			]
-		}
-	];
+	const groups = SHORTCUT_GROUPS;
+
 </script>
 
 <dialog

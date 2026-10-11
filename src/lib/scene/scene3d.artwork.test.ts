@@ -63,6 +63,44 @@ describe('artwork appearance updates', () => {
     expect(state.sim.dispose).not.toHaveBeenCalled();
   });
 
+  it('paints a newly uploaded print after actual piece selection without applying temporary placement or restarting cloth', () => {
+    const { renderer, entry, pattern, artwork, sim, runner } = rig();
+    const retained = Array.from(entry.geometry.getAttribute('position').array);
+    const clone = new THREE.Mesh(entry.geometry.clone(), new THREE.MeshPhysicalMaterial());
+    const group = new THREE.Group(); group.position.set(7, 8, 9); group.add(clone);
+    const arrangeGroup = new THREE.Group(); arrangeGroup.add(group);
+    const clothGroup = new THREE.Group(); clothGroup.add(entry.mesh); clothGroup.visible = false;
+    Object.assign(renderer, { mode: 'arrange', arrangeFromDrape: true, arrangeEntries: [{pieceId: entry.pieceId, mesh: clone, group}],
+      arrangeGroup, clothGroup, scene: new THREE.Scene(), clearArrangementGhost: vi.fn(), selectArrange: vi.fn(), emitModeChange: vi.fn(),
+      viewport: { gizmos: {detach: vi.fn()}, picking: {unregister: vi.fn()} } });
+    renderer.setArtwork({id: pattern.id, artwork: [artwork]});
+    expect(renderer.getMode()).toBe('view');
+    expect(clothGroup.visible).toBe(true);
+    expect((entry.mesh.material as THREE.MeshPhysicalMaterial).map).toBeInstanceOf(THREE.Texture);
+    expect(Array.from(entry.geometry.getAttribute('position').array)).toEqual(retained);
+    expect(sim.dispose).not.toHaveBeenCalled(); expect(runner.stop).not.toHaveBeenCalled();
+  });
+
+  it('picks and measures the visible moved mesh rather than the hidden retained cloth', () => {
+    const {renderer, entry} = rig();
+    const clone = new THREE.Mesh(entry.geometry.clone(), new THREE.MeshPhysicalMaterial());
+    const group = new THREE.Group(); group.position.set(2, 3, 4); group.add(clone);
+    const clothGroup = new THREE.Group(); clothGroup.add(entry.mesh); clothGroup.visible = false;
+    const raycast = vi.fn((_event: unknown, _options: {objects: THREE.Mesh[]}) => [{object: clone, uv: new THREE.Vector2(25, 30)}]);
+    Object.assign(renderer, {mode: 'arrange', arrangeEntries: [{pieceId: entry.pieceId, mesh: clone, group}], clothGroup,
+      viewport: {picking: {raycast}} });
+    expect(renderer.pickArtworkDraftPoint({} as PointerEvent, true)).toEqual({pieceId: entry.pieceId, x: 25, y: 30});
+    expect(raycast.mock.calls[0][1].objects).toEqual([clone]);
+    const capture = renderer.captureSurfaceMeshes();
+    expect(capture).toHaveLength(1);
+    expect(capture[0].positions.slice(0, 3)).toEqual([expect.closeTo(2100), expect.closeTo(4000), expect.closeTo(4300)]);
+    expect(capture[0].uv).toEqual([0, 0, 100, 0, 0, 100]);
+    group.visible = false;
+    expect(renderer.captureSurfaceMeshes()).toEqual([]);
+    renderer.pickArtworkDraftPoint({} as PointerEvent, true);
+    expect(raycast.mock.calls.at(-1)?.[1].objects).toEqual([]);
+  });
+
   it('rejects artwork changes during frozen diagnostic inspection', () => {
     const { renderer, pattern, artwork } = rig();
     Object.assign(renderer, { frozenPending: true });

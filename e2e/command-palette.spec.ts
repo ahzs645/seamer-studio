@@ -58,7 +58,7 @@ test('workspace search and keyboard navigation switch views and open the fabric 
   await search.fill('fabric');
   await search.press('Enter');
   await expect(dialog).not.toBeVisible();
-  await expect(page.locator('#studio-left-panel').getByRole('button', { name: 'Fabric', exact: true })).toHaveClass(/tab-active/);
+  await expect(page.locator('#studio-left-panel').getByRole('tab', { name: 'Fabric', exact: true })).toHaveAttribute('aria-selected', 'true');
 });
 
 test('advanced commands validate parameters and retain execution through the command bus', async ({ page }) => {

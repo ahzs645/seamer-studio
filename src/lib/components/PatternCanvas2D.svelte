@@ -19,6 +19,8 @@
     piecePointUpdate,
     samePick,
     type BreakoutMode,
+    updatePieceArtwork,
+    type PieceArtwork,
     type ArtworkSource,
     type LayerStyle,
     type Measurement,
@@ -28,6 +30,11 @@
   } from '@seamer/pattern-model';
   import { buildSilhouette, type Silhouette } from '@seamer/avatar';
   import { isAppShortcutBlocked, isDocumentKeyboardTarget, scene3dOwnsKeyboard } from '$lib/utils/keyboard';
+  import { matchesShortcut } from '$lib/utils/shortcuts';
+  import { artworkEditing } from '$lib/stores/artworkEditing';
+  import { artworkGesture, artworkGestureCanStart } from '$lib/utils/artworkGestures';
+  import { artworkRepeatTiles, artworkSurfaceProblem, polygonBounds, artworkInkImage } from '$lib/utils/artworkSurface';
+  import { applyFabricDrop, FABRIC_DRAG_TYPE } from '$lib/utils/fabricDrag';
   import { artworkImageMatchesSource } from '$lib/scene/pieceTextureImages';
   import { isDarkTheme, onThemeChange } from '$lib/utils/theme';
   import DrawingTools from '$lib/components/DrawingTools.svelte';
@@ -71,9 +78,10 @@
     currentPattern: Pattern;
     editor: Editor<Pattern>;
     onchange: (p: Pattern, label?: string) => void;
+    ondocumentchange?: (p: Pattern, label?: string) => void;
   }
 
-  let { currentPattern, editor, onchange }: Props = $props();
+  let { currentPattern, editor, onchange, ondocumentchange }: Props = $props();
   // svelte-ignore state_referenced_locally -- parent keys this component by Editor identity
   const editorView = editorState(editor);
   const pointIds = $derived(editorView.selection.get('point'));
@@ -416,23 +424,76 @@
    * shrinkage. Three transformed UV corners give the exact canvas affine map; boundary clipping
    * prevents a print from appearing on another piece or the background.
    */
+  let artworkPreview = $state<PieceArtwork | null>(null);
+  let artworkDrag: { before: PieceArtwork; start: Vec2; invert: (point: Vec2) => Vec2; mode: 'translate' | 'rotate' | 'resize'; document: Pattern; pointerId?:number } | null = null;
+  function artworkInverse(piece: Piece) {
+    const points=indexPoints(currentPattern), inverse=pieceInverseTransform(piece,points), scale=pieceShrinkageScale(currentPattern,piece);
+    const origin=points.get(piece.originPoint) ?? {x:0,y:0};
+    return (point:Vec2)=>{const raw=inverse(point);return {x:origin.x+(raw.x-origin.x)/scale.x,y:origin.y+(raw.y-origin.y)/scale.y};};
+  }
+  function artworkRows() { return (currentPattern.artwork ?? []).map(item => item.id === artworkPreview?.id ? artworkPreview : item); }
   function drawPieceArtwork(c: CanvasRenderingContext2D, piece: Piece, outline: Vec2[], transform: (point: Vec2) => Vec2) {
-    for (const artwork of currentPattern.artwork ?? []) {
-      if (artwork.pieceId !== piece.id || artworkSourceProblem(artwork) || artworkPlacementProblem(artwork)) continue;
-      const image = artworkImageFor(artwork);
-      if (!image) continue;
-      const origin = toCanvas(transform(artworkDraftPoint(artwork, 0, 0)));
-      const right = toCanvas(transform(artworkDraftPoint(artwork, 1, 0)));
-      const bottom = toCanvas(transform(artworkDraftPoint(artwork, 0, 1)));
-      c.save();
-      tracePoly(c, outline, true);
-      c.clip();
-      c.globalAlpha = artwork.opacity;
-      c.transform((right.x - origin.x) / image.naturalWidth, (right.y - origin.y) / image.naturalWidth,
-        (bottom.x - origin.x) / image.naturalHeight, (bottom.y - origin.y) / image.naturalHeight, origin.x, origin.y);
-      c.drawImage(image, 0, 0);
+    const inverse = artworkInverse(piece);
+    const bounds = polygonBounds(outline.map(inverse));
+    for (const artwork of artworkRows()) {
+      if (artwork.pieceId !== piece.id || artworkSourceProblem(artwork) || artworkPlacementProblem(artwork) || artworkSurfaceProblem(artwork)) continue;
+      const image = artworkImageFor(artwork); if (!image) continue;
+      let tiles: PieceArtwork[]; try { tiles = artworkRepeatTiles(artwork, bounds); } catch { continue; }
+      c.save(); tracePoly(c, outline, true); c.clip();
+      if (artwork.zone) { tracePoly(c, artwork.zone.map(transform), true); c.clip(); }
+      c.globalAlpha = artwork.opacity; c.globalCompositeOperation = artwork.treatment?.blend ?? 'source-over';
+      for (const tile of tiles) {
+        const origin = toCanvas(transform(artworkDraftPoint(tile, 0, 0)));
+        const right = toCanvas(transform(artworkDraftPoint(tile, 1, 0)));
+        const bottom = toCanvas(transform(artworkDraftPoint(tile, 0, 1)));
+        c.save();
+        c.transform((right.x - origin.x) / image.naturalWidth, (right.y - origin.y) / image.naturalWidth,
+          (bottom.x - origin.x) / image.naturalHeight, (bottom.y - origin.y) / image.naturalHeight, origin.x, origin.y);
+        c.drawImage(artworkInkImage(image,artwork.treatment?.tint), 0, 0); c.restore();
+      }
       c.restore();
     }
+  }
+  function drawArtworkSelection(c: CanvasRenderingContext2D) {
+    const active = artworkRows().find(item => item.id === $artworkEditing?.id);
+    const piece = currentPattern.pieces.find(item => item.id === active?.pieceId);
+    if (!active || !piece || piece.hidden || artworkPlacementProblem(active)) return;
+    const transform = pieceTransform(piece, indexPoints(currentPattern), pieceShrinkageScale(currentPattern, piece));
+    const corners = [[0,0],[1,0],[1,1],[0,1]].map(([u,v]) => transform(artworkDraftPoint(active,u,v)));
+    c.save(); c.strokeStyle = '#8b5cf6'; c.lineWidth = 2; c.setLineDash([5,3]); tracePoly(c,corners,true); c.stroke();
+    c.setLineDash([]); c.fillStyle = '#8b5cf6';
+    for(const corner of corners) { const p = toCanvas(corner); c.fillRect(p.x-4,p.y-4,8,8); }
+    const center = toCanvas(transform({x:active.x,y:active.y}));
+    c.font = '12px sans-serif'; c.fillText(`${$artworkEditing?.mode} · Esc cancels`, center.x+8,center.y-8); c.restore();
+  }
+  function beginArtworkDrag(pos: Vec2): boolean {
+    const tool = $artworkEditing;
+    if (!tool) return false;
+    const item = (currentPattern.artwork ?? []).find(row => row.id === tool.id);
+    const piece = item && currentPattern.pieces.find(row => row.id === item.pieceId);
+    if (!item || !piece || piece.hidden || layerLocked(piece.layerId)) return false;
+    const invert = artworkInverse(piece);
+    const point = invert(toPattern(pos.x,pos.y));
+    if (!artworkGestureCanStart(item,point) || pieceAt(pos)?.id !== piece.id) return false;
+    artworkDrag = { before: structuredClone($state.snapshot(item)), start: point, invert, mode: tool.mode, document: currentPattern };
+    artworkPreview = artworkDrag.before; render(); return true;
+  }
+  function endArtworkDrag(cancel = false) {
+    const drag = artworkDrag, preview = artworkPreview;
+    artworkDrag = null; artworkPreview = null;
+    if(drag?.pointerId!==undefined && canvasEl.hasPointerCapture(drag.pointerId))canvasEl.releasePointerCapture(drag.pointerId);
+    if (drag && preview && !cancel && currentPattern === drag.document) {
+      try { (ondocumentchange ?? onchange)(updatePieceArtwork($state.snapshot(currentPattern) as Pattern,preview.id,preview),'Transform artwork'); }
+      catch(cause) { toast(cause instanceof Error ? cause.message : 'Artwork transform could not be committed','error'); }
+    }
+    render();
+  }
+  function dropFabric(event: DragEvent) {
+    if (!event.dataTransfer) return;
+    event.preventDefault(); const piece = pieceAt(getPos(event)); if (!piece) return;
+    try { const result = applyFabricDrop(event.dataTransfer, $state.snapshot(currentPattern) as Pattern, [piece.id]);
+      if(result.count) (ondocumentchange ?? onchange)(result.pattern, 'Drop fabric on piece');
+    } catch(cause) { toast(cause instanceof Error ? cause.message : 'Fabric could not be assigned','error'); }
   }
 
   // ---- layers: visibility / lock --------------------------------------------
@@ -798,12 +859,13 @@
       render();
     });
     const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && artworkDrag) { e.preventDefault(); endArtworkDrag(true); return; }
       if (isAppShortcutBlocked(e) || isDocumentKeyboardTarget(e.target) || scene3dOwnsKeyboard()) return;
       const drawing = isDrawingTool($selectedTool);
-      if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+      if (matchesShortcut(e,'finish')) {
         if (penDraft.length > 0) { e.preventDefault(); finishDraft(); }
         else if ($selectedTool === 'seam-multi' && (seamFromPicks.length || seamToPicks.length)) { e.preventDefault(); advanceSeamPhase(); }
-      } else if (e.key === 'Escape') {
+      } else if (matchesShortcut(e,'cancel')) {
         if ($pathPickRequest) { e.preventDefault(); pathPickRequest.set(null); render(); return; }
         if (calibrating) { e.preventDefault(); calibrating = null; render(); return; }
         if ($pendingPaste) { e.preventDefault(); pendingPaste.set(null); render(); return; }
@@ -811,9 +873,9 @@
       } else if ((e.key === 'v' || e.key === 'V') && drawing && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
         // 'V' returns to select and cancels the in-progress operation (like the source)
         e.preventDefault(); cancelOperation();
-      } else if ((e.metaKey || e.ctrlKey) && e.key === '0') {
+      } else if (matchesShortcut(e,'fit')) {
         e.preventDefault(); fitView(); render();
-      } else if ((e.metaKey || e.ctrlKey) && (e.key === '-' || e.key === '=' || e.key === '+')) {
+      } else if (matchesShortcut(e,'zoomOut') || matchesShortcut(e,'zoomIn')) {
         e.preventDefault();
         const f = e.key === '-' ? 1 / 1.25 : 1.25;
         zoom.update((z) => Math.max(0.02, Math.min(20, z * f))); // min matches the toolbar's 0.02 clamp
@@ -840,6 +902,8 @@
     void editorView.selection;
     untrack(() => render());
   });
+
+  $effect(() => { if(artworkDrag && currentPattern!==artworkDrag.document)endArtworkDrag(true); });
 
   let lastFitKey = '';
   $effect(() => {
@@ -1624,6 +1688,7 @@
     // Piece names last of all, so nothing — pieces, notches, markers, seam overlays — can cover
     // the one thing you read to tell the pieces apart.
     drawPieceLabels(c, pendingLabels, hoveredOutline);
+    drawArtworkSelection(c);
 
     // compass — a small orientation widget in the top-right corner showing the canvas axes
     // (pattern +y is up = N, +x is right = E)
@@ -3200,7 +3265,7 @@
 
   function handleMouseDown(e: MouseEvent) {
     // Context-menu presses must not draw, drag, or refit selection before the menu resolves its hit.
-    if (e.button === 2) return;
+    if (e.button === 2 || artworkDrag) return;
     const pos = getPos(e);
     dragStartX = pos.x; dragStartY = pos.y;
     if ($pathPickRequest && e.button === 0) {
@@ -3352,6 +3417,7 @@
   function handleMouseMove(e: MouseEvent) {
     const pos = getPos(e);
     cursorPos = pos;
+    if (artworkDrag) { if(!(e instanceof PointerEvent))return; artworkPreview = artworkGesture(artworkDrag.before,artworkDrag.mode,artworkDrag.start,artworkDrag.invert(toPattern(pos.x,pos.y))); render(); return; }
     cursorMm.set(toPattern(pos.x, pos.y)); // live drafting-mm readout for the status bar
     updateAutoScroll(pos);
     if ($pendingPaste) { render(); return; } // ghost follows the cursor
@@ -3430,6 +3496,7 @@
   }
 
   function handleMouseUp() {
+    if (artworkDrag) return;
     // Drag-onto-path: dropping an unconstrained loose point onto a path converts it to a sliding
     // point on that path (the original's "Maybe add sliding point"). Structural piece corners are
     // exempt — sliding a boundary endpoint would tear the piece.
@@ -3497,10 +3564,17 @@
   width={canvasW}
   height={canvasH}
   class="w-full h-full block"
+  ondragover={event => { if (event.dataTransfer?.types.includes(FABRIC_DRAG_TYPE)) event.preventDefault(); }}
+  ondrop={dropFabric}
+  onpointerdown={event => { if(!artworkDrag && event.button===0 && $artworkEditing && beginArtworkDrag(getPos(event))) { artworkDrag!.pointerId=event.pointerId; canvasEl.setPointerCapture(event.pointerId); event.preventDefault(); } }}
+  onpointermove={event => { if(artworkDrag?.pointerId===event.pointerId) { handleMouseMove(event); event.preventDefault(); } }}
+  onpointerup={event => { if(artworkDrag?.pointerId===event.pointerId) { endArtworkDrag(); event.preventDefault(); } }}
+  onpointercancel={event => { if(artworkDrag?.pointerId===event.pointerId)endArtworkDrag(true); }}
+  onlostpointercapture={event => { if(artworkDrag?.pointerId===event.pointerId)endArtworkDrag(true); }}
   onmousedown={handleMouseDown}
   onmousemove={handleMouseMove}
   onmouseup={handleMouseUp}
-  onmouseleave={() => { cursorMm.set(null); handleMouseUp(); }}
+  onmouseleave={() => { cursorMm.set(null); if(!artworkDrag)handleMouseUp(); }}
   onwheel={handleWheel}
   oncontextmenu={handleContextMenu}
   style="cursor: {$selectedTool === 'pan' ? 'grab' : 'crosshair'}; touch-action: none;"

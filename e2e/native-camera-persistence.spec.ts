@@ -19,6 +19,14 @@ function difference(a: CameraState | null, b: CameraState | null) {
     ...a.target.map((v, i) => Math.abs(v - b.target[i])));
 }
 
+async function awaitCurrentScene(page: Page) {
+  await expect(page.getByTestId('pattern-name-input')).toHaveValue('Pencil skirt - 3D', { timeout: 90_000 });
+  await expect.poll(() => page.evaluate(() => window.seamer?.getPattern().name), { timeout: 90_000 }).toBe('Pencil skirt - 3D');
+  const scene = page.getByTestId('pattern-scene-3d');
+  await expect(scene).toHaveAttribute('data-status', 'ready', { timeout: 90_000 });
+  await expect(scene).toHaveAttribute('data-export-ready', 'true', { timeout: 90_000 });
+}
+
 test.use({ viewport: { width: 1280, height: 720 } });
 test.beforeEach(async ({ page }) => {
   test.setTimeout(180_000);
@@ -26,10 +34,10 @@ test.beforeEach(async ({ page }) => {
     localStorage.setItem('seamer.welcomeSeen', '1'); localStorage.setItem('seamer.autosaveSeconds', '600');
   });
   await page.goto('/studio', { waitUntil: 'domcontentloaded' });
-  await expect(page.getByTestId('pattern-name-input')).toHaveValue('Pencil skirt - 3D');
-  await expect(page.getByTestId('pattern-scene-3d')).toHaveAttribute('data-status', 'ready');
+  await awaitCurrentScene(page);
   await page.getByRole('group', { name: 'Workspace view', exact: true })
     .getByRole('button', { name: '3D', exact: true }).click();
+  await awaitCurrentScene(page);
   expect(await page.evaluate(() => window.seamer!.getPattern().garmentCodeSource)).toBeUndefined();
 });
 
@@ -48,7 +56,7 @@ test('native initial camera and explicit Reset remain exact through Save and rel
   await expect(page.getByRole('button', { name: 'Saved', exact: true })).toBeVisible();
   const saved = await camera(page);
   await page.reload({ waitUntil: 'domcontentloaded' });
-  await expect(scene).toHaveAttribute('data-status', 'ready');
+  await awaitCurrentScene(page);
   await expect.poll(async () => difference(await camera(page), saved)).toBeLessThan(1e-10);
   await writeFile(testInfo.outputPath('native-reset-camera.json'), JSON.stringify({ initialStored, reset, saved,
     reloaded: await camera(page), evidenceScope: 'Native camera/interface only; no simulation.' }, null, 2));
@@ -69,7 +77,7 @@ test('native actual user orbit settles, persists, survives resize and reload', a
   await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Saved', exact: true })).toBeVisible();
   await page.reload({ waitUntil: 'domcontentloaded' });
-  await expect(scene).toHaveAttribute('data-status', 'ready');
+  await awaitCurrentScene(page);
   await expect.poll(async () => difference(await camera(page), orbited)).toBeLessThan(1e-10);
   await writeFile(testInfo.outputPath('native-orbit-camera.json'), JSON.stringify({ initial, orbited,
     reloaded: await camera(page), evidenceScope: 'Native camera/interface only; no simulation.' }, null, 2));

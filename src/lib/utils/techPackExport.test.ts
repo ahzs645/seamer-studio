@@ -145,7 +145,7 @@ describe('Tech Pack production document and exports', () => {
     expect(techPackCsvCell('Line "A",\nB')).toBe('"Line ""A"",\nB"');
     const p = sample(); p.productionSpec!.measurements[0].name = '=WEBSERVICE("evil")';
     expect(patternToTechPackCsv(p, 'measurements')).toContain('"\'=WEBSERVICE(""evil"")"');
-    expect(patternToTechPackCsv(p, 'measurements')).toContain('"M","Manual size entry","cm","51","50"');
+    expect(patternToTechPackCsv(p, 'measurements')).toContain('"M","Manual override","cm","51","50"');
   });
   it('archives authored Tech Pack metadata, manual sizes, construction and supplier costs with SSP', async () => {
     const p = sample(); p.techPack!.construction = [{ id: 's', title: 'Finish seam', pieceId: null, instruction: 'Overlock 3 thread' }]; p.techPack!.costing = [costing()];

@@ -1,4 +1,5 @@
 import { devices, expect, test, type Locator, type Page } from '@playwright/test';
+import { acceptVerifiedSourceImport, captureSourceImportDocument } from './verified-source-import';
 import { readFile, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import type { DrapeDebugState, DrapeFailureDiagnostics } from '../src/lib/scene/scene3d';
@@ -32,10 +33,12 @@ async function loadStageSource(page: Page, source: string) {
   });
   await page.goto('/studio', { waitUntil: 'domcontentloaded' });
   await expect(page.getByTestId('pattern-name-input')).toBeVisible();
+  const documentBefore = await captureSourceImportDocument(page);
   const chooser = page.waitForEvent('filechooser');
   await page.getByTestId('import-menu-trigger').click();
   await page.getByRole('button', { name: /From file/ }).click();
   await (await chooser).setFiles({ name: 'source-stage-dress.json', mimeType: 'application/json', buffer: Buffer.from(source) });
+  await acceptVerifiedSourceImport(page, documentBefore, false);
   await page.getByRole('group', { name: 'Workspace view', exact: true }).getByRole('button', { name: '3D', exact: true }).click();
   const scene = page.getByTestId('pattern-scene-3d');
   await expect(scene).toHaveAttribute('data-status', 'ready');
@@ -158,10 +161,12 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
         expect(browserIdentity.coarsePointer).toBe(true);
       }
       await expect(page.getByTestId('pattern-name-input')).toBeVisible();
+      const documentBefore = await captureSourceImportDocument(page);
       const chooser = page.waitForEvent('filechooser');
       await activate(page.getByTestId('import-menu-trigger'));
       await activate(page.getByRole('button', { name: /From file/ }));
       await (await chooser).setFiles({ name: 'worker-source-dress.json', mimeType: 'application/json', buffer: Buffer.from(source) });
+      await acceptVerifiedSourceImport(page, documentBefore, touch);
       await expect(page.getByTestId('pattern-name-input')).toHaveValue('worker-source-dress');
       await activate(page.getByRole('group', { name: 'Workspace view', exact: true }).getByRole('button', { name: '3D', exact: true }));
       const scene = page.getByTestId('pattern-scene-3d');

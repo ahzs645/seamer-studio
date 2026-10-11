@@ -7,6 +7,9 @@ import type { PieceArtwork } from './artwork';
 import type { ColorwayState } from './colorways';
 import type { TechPackDocument } from './techPack';
 import type { WorkspaceLayout } from './workspace';
+import type { ProductionAutomation } from './productionAutomation';
+import type { RangePlan } from './rangePlan';
+import type { AppearanceHistory } from './appearanceHistory';
 
 export interface Formula {
   formula: string;
@@ -24,7 +27,7 @@ export type PointConstraint =
   // sliding: a point ON a path, by a distance formula from an anchor, or by a fixed arc-length fraction
   | { type: 'sliding'; path: string; positionFormula?: string; from?: string; unit?: string; fraction?: number }
   // mirror: a point reflected across the line defined by `axisPath`'s endpoints (referenced/mirror copies)
-  | { type: 'mirror'; source: string; axisPath: string }
+  | { type: 'mirror'; source: string; axisPath: string; compensation?: { originPointId: string; scaleX: number; scaleY: number } }
   // intersection: a point at the crossing of two rays, each from an anchor at a formula-driven angle
   // (the source draws direction-only paths — basePoint + angle, no length — that meet at this point)
   | { type: 'intersection'; a: string; aAngleFormula: string; b: string; bAngleFormula: string; aAngleUnit?: string; bAngleUnit?: string };
@@ -351,6 +354,8 @@ export interface Piece {
   layerId?: string; // layer membership (defaults to the 'default' layer)
   type: 'dynamic' | string; // "dynamic" => closed simulatable cloth piece
   materialId: string;
+  /** Source relationship used to reflect both draft geometry and piece placement. */
+  linkedMirror?: { ownerPieceId?: string; sourcePieceId: string; axisPathId: string; edgeMap?: Record<string, string>; pointMap?: Record<string, string> };
   origin: NamedVector; // piece-local origin in 2D mm
   originPoint: string; // ConstrainablePoint id of the origin
   position: { x: number; y: number }; // piece placement on the 2D canvas (mm)
@@ -374,6 +379,8 @@ export interface Piece {
   // the full outline is produced by mirroring across that first edge (a "cut on fold" / first-edge
   // symmetry, faithful to the source's firstEdgeSymmetry flag). Default false.
   firstEdgeSymmetry?: boolean;
+  /** Conjugated fold reflection for derived anisotropically compensated linked pieces. */
+  firstEdgeSymmetryAffine?: { a: number; b: number; c: number; d: number; tx: number; ty: number };
   mainPaths: PiecePath[]; // ordered boundary loop
   internalPaths: PiecePath[]; // darts / internal seams / fold lines
   markers?: PieceMarker[]; // drill holes / punch markers (piece-local mm)
@@ -457,6 +464,10 @@ export interface Seam {
   /** True when an interchange format specifies literal seam direction, including false/false
    * references. Prevent geometry-based direction repair from changing that authored pairing. */
   explicitOrientation?: boolean;
+  /** Authored target difference (target edge length minus source edge length), in millimeters. */
+  expectedEaseMm?: number;
+  /** Allowed difference from authored ease; omitted uses the seam panel's default. */
+  toleranceMm?: number;
 }
 
 /** One step of the assembly order: a seam (or several sewn together) closing in one operation. */
@@ -513,6 +524,8 @@ export interface ProductionMeasurement {
   name: string;
   /** null selects a manually entered sample measurement. References remain visible when deleted. */
   annotationId: string | null;
+  /** Explicitly selects a captured 3D measurement instead of a 2D annotation/manual actual. */
+  surfaceMeasurementId?: string | null;
   unit: ProductionMeasurementUnit;
   manualValue: number | null;
   target: number | null;
@@ -735,12 +748,18 @@ export interface Pattern {
   // Optional for patterns saved before the Measure tool existed.
   measurements?: Measurement[];
   productionSpec?: ProductionSpec;
+  /** Generated size targets, body mappings, observed surface values and production review. */
+  productionAutomation?: ProductionAutomation;
+  /** Commercial collection styles and variant plans linked to saved pattern identities. */
+  rangePlan?: RangePlan;
   /** Production document metadata, size values, construction instructions and manual costing. */
   techPack?: TechPackDocument;
   /** Named appearance variants over the same editable geometry. */
   colorways?: ColorwayState;
   /** Raster artwork positioned in each piece's canonical draft coordinates (millimeters). */
   artwork?: PieceArtwork[];
+  /** Named, bounded appearance snapshots; restoring does not replace garment geometry. */
+  appearanceHistory?: AppearanceHistory;
   /** Optional custom arrangement of the supported 2D, 3D and Specs panes. */
   workspaceLayout?: WorkspaceLayout;
   // Optional sewing order driving the assembly timeline; absent = seams sew in `seams` order.

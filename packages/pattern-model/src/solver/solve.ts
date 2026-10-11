@@ -230,7 +230,13 @@ function constraintPos(cn: NonNullable<ConstrainablePoint['constraint']>, scope:
   }
   if (cn.type === 'mirror') {
     const src = solved.get(cn.source); const ax = axisEnds(pathById.get(cn.axisPath), solved);
-    return src && ax ? reflect(src, ax[0], ax[1]) : null;
+    if (!src || !ax) return null;
+    if (cn.compensation) {
+      const origin = solved.get(cn.compensation.originPointId), { scaleX, scaleY } = cn.compensation;
+      if (!origin || !Number.isFinite(scaleX) || !Number.isFinite(scaleY) || scaleX <= 0 || scaleY <= 0) return null;
+      return reflect({ x: origin.x + (src.x - origin.x) * scaleX, y: origin.y + (src.y - origin.y) * scaleY }, ax[0], ax[1]);
+    }
+    return reflect(src, ax[0], ax[1]);
   }
   if (cn.type === 'intersection') {
     const pa = solved.get(cn.a), pb = solved.get(cn.b); if (!pa || !pb) return null;

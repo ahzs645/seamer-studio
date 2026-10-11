@@ -2,8 +2,11 @@
   import type { Pattern, Material, TextureSlot } from '@seamer/pattern-model';
   import MaterialPreview3D from '$lib/components/MaterialPreview3D.svelte';
   import TextureMapSource from '$lib/components/TextureMapSource.svelte';
-  import { materialLibrary, instantiateFromLibrary, saveNewLibraryItem } from '$lib/stores/materialLibrary';
+  import { materialLibrary, libraryPersistenceError, instantiateFromLibrary, saveNewLibraryItem, organizeLibraryItem, importCatalogItems, deleteLibraryItem } from '$lib/stores/materialLibrary';
   import { applyFabric, removeFabric, type FabricSource } from '$lib/utils/fabricApplication';
+
+  import { startFabricDrag } from '$lib/utils/fabricDrag';
+  import { FABRIC_TARGETS, recommendFabrics, fetchFabricCatalog, materialFacts, type FabricCriteria } from '$lib/utils/fabricLibrary';
 
   interface Props {
     currentPattern: Pattern;
@@ -17,9 +20,17 @@
   let sourceTab = $state<'project' | 'library'>('project');
   let chosen = $state<{ kind: 'project' | 'library'; id: string } | null>(null);
   let status = $state('');
+  let collection = $state('All');
+  let recommendation = $state('None');
+  let criteria: FabricCriteria = $state({ ...FABRIC_TARGETS['Woven shirt'] });
+  let catalogUrl = $state('');
+  let catalogBusy = $state(false);
+  let organization = $state(false);
+  const collections = $derived([...new Set($materialLibrary.map(item => item.collection || 'Unsorted'))].sort());
+  const ranked = $derived(recommendation === 'None' ? [] : recommendFabrics($materialLibrary, criteria));
   const matches = (name: string) => name.toLowerCase().includes(query.trim().toLowerCase());
   const projectResults = $derived(currentPattern.materials.filter(material => material.id === editingId || matches(material.name)));
-  const libraryResults = $derived($materialLibrary.filter(item => matches(item.name)));
+  const libraryResults = $derived((recommendation === 'None' ? $materialLibrary : ranked.map(result => result.item)).filter(item => (collection === 'All' || (item.collection || 'Unsorted') === collection) && matches([item.name, ...(item.tags ?? [])].join(' '))));
   const selectedIds = $derived(currentPattern.pieces.filter(piece => selectedPieceIds.includes(piece.id)).map(piece => piece.id));
   const activeSource: FabricSource | null = $derived.by(() => {
     const selected = chosen;
@@ -31,6 +42,13 @@
   });
   const activeName = $derived(activeSource?.kind === 'library' ? activeSource.item.name
     : activeSource ? currentPattern.materials.find(material => material.id === activeSource.id)?.name : undefined);
+
+  async function loadCatalog() {
+    catalogBusy = true; status = '';
+    try { const items = await fetchFabricCatalog(catalogUrl); const count = importCatalogItems(items, new URL(catalogUrl).hostname, new Date().toISOString()); sourceTab = 'library'; collection = 'All'; status = `Imported ${count} catalog fabrics into your local library.`; }
+    catch (error) { status = error instanceof Error ? error.message : 'Catalog could not be loaded.'; }
+    finally { catalogBusy = false; }
+  }
 
   function choose(kind: 'project' | 'library', id: string) {
     chosen = { kind, id };
@@ -60,9 +78,11 @@
   }
 
   function saveToLibrary(material: Material) {
-    const link = saveNewLibraryItem($state.snapshot(material), new Date().toISOString());
-    patch(material.id, value => ({ ...value, ...link }));
-    status = `Saved ${material.name} to the local fabric library.`;
+    try {
+      const link = saveNewLibraryItem($state.snapshot(material), new Date().toISOString());
+      patch(material.id, value => ({ ...value, ...link }));
+      status = `Saved ${material.name} to the local fabric library.`;
+    } catch (error) { status = error instanceof Error ? error.message : 'Fabric could not be saved to the library.'; }
   }
 
   function defaultSlot(color: string): TextureSlot {
@@ -124,7 +144,7 @@
   function commitNumber(e: Event, current: number, apply: (v: number) => void) {
     const el = e.currentTarget as HTMLInputElement;
     const v = el.value.trim() === '' ? NaN : Number(el.value);
-    if (Number.isFinite(v)) apply(v);
+    if (Number.isFinite(v) && el.checkValidity()) apply(v);
     else el.value = String(current);
   }
 
@@ -158,8 +178,9 @@
   }
 </script>
 
-<div class="material-panel text-xs">
+<div class="material-panel text-xs" data-document-keyboard>
   <h3 class="font-bold mb-2">Fabric</h3>
+  {#if $libraryPersistenceError}<p role="alert" class="text-warning mb-2">{$libraryPersistenceError}</p>{/if}
   <label class="block mb-2"><span class="sr-only">Search fabrics</span><input class="input input-bordered input-xs w-full" type="search" aria-label="Search fabrics" placeholder="Search fabrics…" bind:value={query} /></label>
   <div class="flex gap-1 mb-2" role="group" aria-label="Fabric sources">
     <button class="btn btn-xs flex-1" class:btn-active={sourceTab === 'project'} aria-pressed={sourceTab === 'project'} onclick={() => { sourceTab = 'project'; status = ''; }}>Project fabrics</button>
@@ -167,6 +188,34 @@
   </div>
   <p class="mb-2 opacity-70">{selectedIds.length} selected {selectedIds.length === 1 ? 'piece' : 'pieces'} · {currentPattern.pieces.length} total</p>
 
+  {#if sourceTab === 'library'}
+    <div class="space-y-1 mb-2">
+      <label class="block">Collection<select class="select select-bordered select-xs w-full" bind:value={collection}><option>All</option>{#each collections as name}<option>{name}</option>{/each}</select></label>
+      <label class="block">Recommend for<select class="select select-bordered select-xs w-full" bind:value={recommendation} onchange={(event) => { const target = FABRIC_TARGETS[event.currentTarget.value]; if (target) criteria = { ...target }; }}><option>None</option>{#each Object.keys(FABRIC_TARGETS) as name}<option>{name}</option>{/each}</select></label>
+      {#if recommendation !== 'None'}
+        <p class="opacity-70">Ranked by distance to weight, thickness, warp/weft stretch and bend criteria. Suitability needs a swatch test.</p>
+        <details><summary class="cursor-pointer">Edit recommendation criteria</summary>
+          {#each [['weight', 'Target weight (g/m²)', 10000], ['thickness', 'Target thickness (mm)', 100], ['stretchWarp', 'Target warp stretch', 100], ['stretchWeft', 'Target weft stretch', 100], ['bend', 'Target bend', 100]] as [key, label, maximum]}
+            <label class="block">{label}<input type="number" class="input input-bordered input-xs w-full" min="0" max={maximum} step="any" value={criteria[key as keyof FabricCriteria]} onchange={(event) => { const input = event.currentTarget, value = input.value.trim() === '' ? NaN : Number(input.value); if (Number.isFinite(value) && value >= 0 && value <= Number(maximum)) criteria = { ...criteria, [key]: value }; else input.value = String(criteria[key as keyof FabricCriteria]); }} /></label>
+          {/each}
+        </details>
+      {/if}
+      <button class="btn btn-xs w-full" onclick={() => organization = !organization} aria-expanded={organization}>Organize &amp; import fabrics</button>
+      {#if organization}
+        {#if activeSource?.kind === 'library'}
+          {@const item = activeSource.item}
+          <MaterialPreview3D material={instantiateFromLibrary(item, item.id)} />
+          <label class="block">Fabric collection<input class="input input-bordered input-xs w-full" value={item.collection ?? ''} disabled={item.writeProtected} onchange={(e) => organizeLibraryItem(item.id, e.currentTarget.value, item.tags ?? [])} /></label>
+          <label class="block">Fabric tags (comma separated)<input class="input input-bordered input-xs w-full" value={item.tags?.join(', ') ?? ''} disabled={item.writeProtected} onchange={(e) => organizeLibraryItem(item.id, item.collection ?? '', e.currentTarget.value.split(','))} /></label>
+          <button class="btn btn-xs w-full" disabled={item.writeProtected} onclick={() => { deleteLibraryItem(item.id); chosen = null; status = 'Removed from local library. Project copies remain available.'; }}>Delete saved fabric</button>
+        {/if}
+        <label class="block">Remote catalog URL<input class="input input-bordered input-xs w-full" type="url" placeholder="https://supplier.example/catalog.json" bind:value={catalogUrl} /></label>
+        <p class="opacity-70">Public JSON catalog version 1 with a materials array. The provider must allow browser access (CORS). Imported fabrics become local copies.</p>
+        <button class="btn btn-xs w-full" disabled={catalogBusy || !catalogUrl.trim()} onclick={loadCatalog}>{catalogBusy ? 'Loading catalog…' : 'Import catalog'}</button>
+      {/if}
+    </div>
+  {/if}
+  <p class="opacity-60 mb-2">Drag a fabric onto a 2D or 3D piece, or use Apply below.</p>
   <div class="material-list space-y-1 mb-2 max-h-72 overflow-y-auto">
     {#if sourceTab === 'project'}
     {#each projectResults as mat (mat.id)}
@@ -254,7 +303,7 @@
       {:else}
         <div role="button" tabindex="0" class="fabric-card flex items-center gap-1 p-1 rounded hover:bg-base-200 cursor-pointer w-full text-left"
           class:chosen={chosen?.kind === 'project' && chosen.id === mat.id}
-          data-testid="project-fabric-card" aria-pressed={chosen?.kind === 'project' && chosen.id === mat.id}
+          draggable="true" ondragstart={(event) => startFabricDrag(event, 'project', mat.id)} data-testid="project-fabric-card" aria-pressed={chosen?.kind === 'project' && chosen.id === mat.id}
           onclick={() => choose('project', mat.id)} ondblclick={() => { choose('project', mat.id); editingId = mat.id; }}
           onkeydown={(e: KeyboardEvent) => {
             if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); choose('project', mat.id); }
@@ -274,9 +323,9 @@
       {#each libraryResults as item (item.id)}
         <button type="button" class="fabric-card flex items-center gap-2 p-1 rounded hover:bg-base-200 w-full text-left"
           class:chosen={chosen?.kind === 'library' && chosen.id === item.id} aria-pressed={chosen?.kind === 'library' && chosen.id === item.id}
-          data-testid="library-fabric-card" onclick={() => choose('library', item.id)}>
+          draggable="true" ondragstart={(event) => startFabricDrag(event, 'library', item.id)} data-testid="library-fabric-card" onclick={() => choose('library', item.id)}>
           <span class="fabric-swatch" style:background={item.material.frontTexture?.color ?? '#7c8aa0'}>{#if item.material.frontTexture?.url}<img src={item.material.frontTexture.url} alt="" loading="lazy" />{/if}</span>
-          <span class="min-w-0 flex-1"><strong class="block truncate">{item.name}</strong><span class="opacity-60">Version {item.version} · {item.material.weight} g/m²</span></span>
+          <span class="min-w-0 flex-1"><strong class="block truncate">{item.name}</strong><span class="opacity-60 block">{materialFacts(item.material)}</span><span class="opacity-60 block">{item.collection || 'Unsorted'} · v{item.version}{#if item.tags?.length} · {item.tags.join(', ')}{/if}</span></span>
         </button>
       {/each}
       {#if libraryResults.length === 0}<p class="opacity-60 py-2">{query.trim() ? 'No saved fabrics match your search.' : 'No saved fabrics yet. Edit a project fabric and save it to your library.'}</p>{/if}

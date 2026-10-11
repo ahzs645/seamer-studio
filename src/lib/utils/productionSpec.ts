@@ -1,4 +1,5 @@
 import { pieceCutCounts, placedPoints, type Measurement, type Pattern, type ProductionMeasurement, type ProductionMeasurementUnit } from '@seamer/pattern-model';
+import { productionGeometryFingerprint } from './productionAutomation';
 
 const millimetersPerUnit = { mm: 1, cm: 10, inch: 25.4 } as const;
 
@@ -40,7 +41,16 @@ export interface SpecMeasurementResult {
 export function evaluateSpecMeasurement(pattern: Pattern, row: ProductionMeasurement): SpecMeasurementResult {
   let actual = row.manualValue;
   const result = (status: SpecMeasurementStatus, label: string, lower: number | null = null, upper: number | null = null): SpecMeasurementResult => ({ actual, lower, upper, status, label });
-  if (row.annotationId) {
+  if (row.surfaceMeasurementId) {
+    const measurement = pattern.productionAutomation?.surfaceMeasurements.find(item => item.id === row.surfaceMeasurementId);
+    actual = null;
+    if (!measurement) return result('missing-reference', 'Missing surface measurement');
+    if (!measurement.captured) return result('no-actual', 'Capture current cloth measurement');
+    if (!pattern.pieces.some(piece => piece.id === measurement.pieceId)) return result('missing-reference', 'Missing surface piece');
+    if (measurement.captured.geometryFingerprint !== productionGeometryFingerprint(pattern)) return result('missing-reference', 'Stale surface measurement');
+    if (row.unit === 'deg') return result('invalid', 'Source unit mismatch');
+    actual = convertSpecValue(measurement.captured.valueMm, 'mm', row.unit);
+  } else if (row.annotationId) {
     const annotation = pattern.measurements?.find(m => m.id === row.annotationId);
     actual = null;
     if (!annotation) return result('missing-reference', 'Missing annotation');

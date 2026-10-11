@@ -1,4 +1,5 @@
-import type { PieceArtwork } from '@seamer/pattern-model';
+import { artworkPlacementProblem, type PieceArtwork } from '@seamer/pattern-model';
+import { artworkRepeatTiles, artworkSurfaceProblem, artworkInkImage } from '$lib/utils/artworkSurface';
 import { artworkImageMatchesSource } from './pieceTextureImages';
 
 export interface ArtworkTextureBounds {
@@ -26,7 +27,7 @@ function sourceHash(source: string): string {
 export function pieceArtworkFingerprint(artwork: readonly PieceArtwork[]): string {
   return JSON.stringify(artwork.map(item => ({ id: item.id, piece: item.pieceId, source: sourceHash(item.dataUrl),
     mime: item.mimeType, pixelWidth: item.pixelWidth, pixelHeight: item.pixelHeight,
-    x: item.x, y: item.y, w: item.widthMm, h: item.heightMm, r: item.rotation, opacity: item.opacity })));
+    x: item.x, y: item.y, w: item.widthMm, h: item.heightMm, r: item.rotation, opacity: item.opacity, flipX: item.flipX, repeat: item.repeat, treatment: item.treatment, zone: item.zone })));
 }
 
 /** Source pixels -> piece UV canvas. Mesh UVs are canonical drafting millimetres;
@@ -48,8 +49,9 @@ export function artworkCanvasTransform(
   const radians = artwork.rotation * Math.PI / 180;
   const cos = Math.cos(radians), sin = Math.sin(radians);
   const px = canvasWidth / bounds.wMM, py = canvasHeight / bounds.hMM;
-  const a = sign * artwork.widthMm * cos * px / imageWidth;
-  const b = -artwork.widthMm * sin * py / imageWidth;
+  const inkU = artwork.flipX ? -1 : 1;
+  const a = inkU * sign * artwork.widthMm * cos * px / imageWidth;
+  const b = -inkU * artwork.widthMm * sin * py / imageWidth;
   const c = sign * artwork.heightMm * sin * px / imageHeight;
   const d = artwork.heightMm * cos * py / imageHeight;
   const centerX = (sign * artwork.x - bounds.uMin) * px;
@@ -70,13 +72,20 @@ export function drawPieceArtwork(
 ): void {
   for (const item of artwork) {
     const image = images.get(item.dataUrl);
-    if (!image || !artworkImageMatchesSource(image, item) || !Number.isFinite(item.opacity) || item.opacity <= 0) continue;
-    const transform = artworkCanvasTransform(item, bounds, width, height, image.naturalWidth, image.naturalHeight, mirrored);
-    if (!transform) continue;
+    if (!image || !artworkImageMatchesSource(image, item) || !Number.isFinite(item.opacity) || item.opacity <= 0 || artworkSurfaceProblem(item) || artworkPlacementProblem(item)) continue;
+    let tiles: PieceArtwork[];
+    try { tiles=artworkRepeatTiles(item,{minX:mirrored?-(bounds.uMin+bounds.wMM):bounds.uMin,maxX:mirrored?-bounds.uMin:bounds.uMin+bounds.wMM,minY:bounds.vMin,maxY:bounds.vMin+bounds.hMM}); } catch {continue;}
     context.save();
-    context.setTransform(...transform);
-    context.globalAlpha = Math.min(1, item.opacity);
-    context.drawImage(image, 0, 0);
+    context.setTransform(1,0,0,1,0,0);
+    if(item.zone) {
+      context.beginPath();item.zone.forEach((point,index)=>{const x=((mirrored?-point.x:point.x)-bounds.uMin)*width/bounds.wMM,y=height-(point.y-bounds.vMin)*height/bounds.hMM;if(index)context.lineTo(x,y);else context.moveTo(x,y);});context.closePath();context.clip();
+    }
+    context.globalAlpha = Math.min(1, item.opacity);context.globalCompositeOperation=item.treatment?.blend??'source-over';
+    for(const tile of tiles) {
+      const transform = artworkCanvasTransform(tile, bounds, width, height, image.naturalWidth, image.naturalHeight, mirrored);
+      if (!transform) continue;
+      context.setTransform(...transform);context.drawImage(artworkInkImage(image,item.treatment?.tint),0,0);
+    }
     context.restore();
   }
 }

@@ -12,7 +12,7 @@ async function openColorways(page: Page) {
   });
   await page.goto('/studio', { waitUntil: 'domcontentloaded' });
   await expect(page.getByTestId('pattern-name-input')).toHaveValue('Pencil skirt - 3D');
-  await page.locator('#studio-left-panel').getByRole('button', { name: 'Colorways', exact: true }).click();
+  await page.locator('#studio-left-panel').getByRole('tab', { name: 'Colorways', exact: true }).click();
   return page.getByTestId('colorway-panel');
 }
 async function create(page: Page, name: string) {
@@ -39,6 +39,8 @@ function geometry(pattern: Pattern) {
 }
 
 test('named colorway tint changes actual 3D image, shares geometry and supports switch/undo/redo', async ({ page }) => {
+  // This full 3D workflow prepares and repaints the garment across several variants.
+  test.setTimeout(180_000);
   const panel = await openColorways(page);
   await expect(page.getByTestId('pattern-scene-3d')).toHaveAttribute('data-status', 'ready', { timeout: 60_000 });
   const originalPattern = await page.evaluate(() => window.seamer!.getPattern());

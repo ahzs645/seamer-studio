@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createLinkedMirror, detachLinkedMirror, isLinkedMirrorPiece, linkedMirrorProblem } from '$lib/utils/linkedMirror';
   import {
     formulaSet,
     imageUpdate,
@@ -194,6 +195,14 @@
     onchange({ ...currentPattern, pieces, hasChanged: true }, label);
   }
 
+  let pieceMirrorAxisId = $state('');
+  const mirrorAxes = $derived(currentPattern.paths.filter(path => path.pathPoints.length === 2 && path.pathPoints.every(point => !point.handle)));
+  function linkedMirror() {
+    if (!editingPiece || !pieceMirrorAxisId) return;
+    try { onchange(createLinkedMirror($state.snapshot(currentPattern) as Pattern, editingPiece.id, pieceMirrorAxisId), 'Create linked mirror'); }
+    catch (error) { toastError(error instanceof Error ? error.message : 'Could not create linked mirror'); }
+  }
+
   // ---- Seam corner join (per boundary edge) — faithful to the original ro.js editor -----------
   let cornerEditId = $state<string | null>(null);
   const CORNER_TYPES: { id: SeamCornerJoinType; icon: string; title: string }[] = [
@@ -302,14 +311,14 @@
   }
 
   const sections = [
-    { id: 'general', icon: 'edit', title: 'General' },
-    { id: 'scaling', icon: 'open_in_full', title: 'Scaling' },
-    { id: 'orientation', icon: 'explore', title: 'Orientation' },
+    { id: 'general', icon: 'edit', title: 'Identity & cutting quantities' },
+    { id: 'scaling', icon: 'open_in_full', title: 'Cut compensation & allowances' },
+    { id: 'orientation', icon: 'explore', title: 'Orientation & linked mirrors' },
     { id: 'seam', icon: 'select', title: 'Seam boundary' },
     { id: 'internal', icon: 'conversion_path', title: 'Internal paths' },
     { id: 'piecePoints', icon: 'adjust', title: 'Piece points' },
     { id: 'material', icon: 'texture', title: 'Material' },
-    { id: '3d', icon: 'view_in_ar', title: '3D Settings' }
+    { id: '3d', icon: 'view_in_ar', title: 'Simulation & arrangement' }
   ];
 
   // ---- property formulas (the original's *Formula fields) ------------------
@@ -581,9 +590,9 @@
   }
 
   const patternSections = [
-    { id: 'general', icon: 'edit', title: 'General' },
+    { id: 'general', icon: 'edit', title: 'Identity & cutting quantities' },
     { id: 'settings', icon: 'settings', title: 'Settings' },
-    { id: '3d', icon: 'view_in_ar', title: '3D Settings' },
+    { id: '3d', icon: 'view_in_ar', title: 'Simulation & arrangement' },
     { id: 'sizes', icon: 'tag', title: 'Sizes & Variables' },
     { id: 'body', icon: 'accessibility', title: 'Body' },
     { id: 'materials', icon: 'texture', title: 'Materials' },
@@ -709,7 +718,7 @@
     </select></label>
 {/snippet}
 
-<div class="w-[340px] border-l bg-base-100 flex flex-col shrink-0 overflow-y-auto" data-tour-id="tour-properties">
+<div class="w-[340px] border-l bg-base-100 flex flex-col shrink-0 overflow-y-auto" data-tour-id="tour-properties" data-document-keyboard="true">
   <div class="w-full bg-base-300 p-2 px-4 font-bold text-sm flex items-center sticky z-10 top-0 border-b-2 border-accent">
     <span data-testid="property-panel-heading">Properties{editingArc ? ' for Arc' : editingEdge ? ' for Edge' : editingPiece ? ' for Piece' : editingPoint ? ' for Point' : ' for Pattern'}</span>
     {#if onclose}
@@ -919,6 +928,19 @@
               {/if}
 
             {:else if s.id === 'orientation'}
+              <div class="border-b border-base-300 pb-2 mb-2 space-y-1">
+                {#if isLinkedMirrorPiece(currentPattern, piece) || linkedMirrorProblem(currentPattern, piece)}
+                  <p>Linked mirror: the source anchors, curves and placement drive this piece.</p>
+                  {#if linkedMirrorProblem(currentPattern, piece)}<p class="text-warning" role="status">{linkedMirrorProblem(currentPattern, piece)}</p>{/if}
+                  <button type="button" class="btn btn-xs" onclick={() => onchange(detachLinkedMirror($state.snapshot(currentPattern) as Pattern, piece.id), 'Detach linked mirror')}>Detach linked mirror</button>
+                {:else}
+                  <label class="flex flex-col gap-1">Mirror axis<select aria-label="Linked mirror axis" class="select select-bordered select-xs" bind:value={pieceMirrorAxisId}>
+                    <option value="">Choose a straight path…</option>{#each mirrorAxes as axis}<option value={axis.id}>{axis.name || axis.id}</option>{/each}
+                  </select></label>
+                  <button type="button" class="btn btn-xs w-full" disabled={!pieceMirrorAxisId} onclick={linkedMirror}>Create linked mirror</button>
+                  <p class="opacity-60 text-[11px]">The new piece follows changes to the source and axis; detach to edit it independently.</p>
+                {/if}
+              </div>
               <label class="flex flex-col gap-0.5">Rotation (°)
                 <span class="flex items-center gap-1">
                   <NumericInput class="input input-bordered input-xs flex-1" value={piece.rotation} step="1" disabled={!!piece.rotationFormula}
@@ -1490,9 +1512,9 @@
                     {/if}
                   </div>
                 {:else}<p class="opacity-60">No materials yet.</p>{/each}
-                <div class="grid grid-cols-2 gap-2 mt-1">
-                  <button class="btn btn-sm btn-primary" onclick={createMaterial}><span class="material-symbols-rounded text-base">add</span> Create material</button>
-                  <button class="btn btn-sm btn-secondary" title="Pick a material from your library" onclick={() => (showLibraryPicker = !showLibraryPicker)}><span class="material-symbols-rounded text-base">library_add</span> Add from library</button>
+                <div class="flex flex-wrap gap-2 mt-1">
+                  <button class="btn btn-sm btn-primary flex-1 flex-nowrap whitespace-nowrap" onclick={createMaterial}><span class="material-symbols-rounded text-base">add</span> Create material</button>
+                  <button class="btn btn-sm btn-secondary flex-1 flex-nowrap whitespace-nowrap" title="Pick a material from your library" onclick={() => (showLibraryPicker = !showLibraryPicker)}><span class="material-symbols-rounded text-base">library_add</span> Add from library</button>
                 </div>
                 {#if showLibraryPicker}
                   <div class="border border-base-300 rounded-md p-2 bg-base-200 space-y-1">
